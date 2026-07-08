@@ -61,7 +61,28 @@ It's enabled to start automatically on reboot. `Restart=always` means
 systemd restarts it if the process ever dies outright — on top of the
 app's own internal exponential backoff for recoverable errors (Rule 7).
 
-## 5. Updating later
+## 5. Scheduled jobs (daily routine, backtesting, backups)
+
+The monitor runs 24/7 on its own, but three things run on a schedule:
+
+```bash
+cd ~/meme-intelligence
+bash deploy/install-cron.sh
+```
+
+This installs three cron jobs (idempotent — safe to re-run):
+- **13:05 UTC daily** — `daily` routine: market regime check, watchlist
+  deep review, daily report (alerts go to your Telegram like the monitor's)
+- **every 6 hours** — `backtest --refresh`: measures prediction outcomes
+  so the Part 24 self-improvement metrics accumulate; without this the
+  system never learns
+- **13:45 UTC daily** — consistent online backup of the SQLite database
+  to `data/backups/` (keeps the last 7 days; safe against the live writer)
+
+Job output lands in `logs/cron-*.log`. The database runs in WAL mode
+with a busy timeout, so the monitor and these jobs share it safely.
+
+## 6. Updating later
 
 ```bash
 cd ~/meme-intelligence

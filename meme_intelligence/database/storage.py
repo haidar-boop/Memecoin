@@ -180,8 +180,16 @@ class Storage:
         self._logger = get_logger("database.storage")
         if path != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(path)
+        # timeout + WAL + busy_timeout: the 24/7 monitor and the scheduled
+        # jobs (daily routine, backtest refresh) share this database file.
+        # WAL lets readers and the writer coexist, and the busy timeout
+        # makes a second writer wait politely instead of raising
+        # "database is locked" (Rule 7). On :memory: databases WAL is a
+        # harmless no-op (sqlite keeps "memory" journaling).
+        self._conn = sqlite3.connect(path, timeout=30.0)
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA busy_timeout=30000")
         self._conn.executescript(_SCHEMA)
         self._migrate()
         self._conn.commit()

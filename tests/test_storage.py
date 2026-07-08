@@ -106,3 +106,18 @@ def test_journal_roundtrip(storage):
     assert token_entries[0]["kind"] == "thesis"
     all_entries = storage.journal_entries()
     assert len(all_entries) == 2
+
+
+def test_file_backed_storage_uses_wal_and_tolerates_second_writer(tmp_path):
+    """The 24/7 monitor and scheduled jobs (daily, backtest --refresh) share
+    the database file; WAL + busy timeout let them coexist (Rule 7)."""
+    path = str(tmp_path / "shared.sqlite3")
+    with Storage(path, now_func=lambda: NOW) as first:
+        mode = first._conn.execute("PRAGMA journal_mode").fetchone()[0]
+        assert mode == "wal"
+        # A second process-style connection writes while the first is open.
+        with Storage(path, now_func=lambda: NOW) as second:
+            second.update_watchlist(TOKEN, WatchlistTier.TIER_2_DEVELOPING,
+                                    score=70.0, classification=Classification.WATCHLIST)
+            first.add_journal(TOKEN, "thesis", "written by the other connection's peer")
+        assert first.get_watchlist()  # sees the other writer's row
