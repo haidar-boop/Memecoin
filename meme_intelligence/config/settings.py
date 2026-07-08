@@ -629,13 +629,39 @@ def _load_group(cls: type, group: str, env: Mapping[str, str]) -> Any:
     return cls(**kwargs)
 
 
+def load_dotenv(path: str = ".env") -> int:
+    """Load KEY=VALUE lines from a local .env file into the process environment.
+
+    Real environment variables always win over file values; lines starting
+    with '#' and blank lines are ignored. Returns the number of values
+    loaded. Missing file is fine — .env is optional (Rule 16: secrets live
+    outside the repository).
+    """
+    loaded = 0
+    try:
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key, value = key.strip(), value.strip().strip("'\"")
+                if key and key not in os.environ:
+                    os.environ[key] = value
+                    loaded += 1
+    except OSError:
+        return 0
+    return loaded
+
+
 _settings: Settings | None = None
 
 
 def get_settings() -> Settings:
-    """Return the process-wide settings, loading from the environment on first use."""
+    """Return the process-wide settings, loading .env then the environment on first use."""
     global _settings
     if _settings is None:
+        load_dotenv()
         _settings = Settings.from_env()
     return _settings
 

@@ -66,3 +66,26 @@ def test_bad_env_value_raises_clear_error():
 def test_negative_interval_rejected():
     with pytest.raises(ConfigurationError, match="must be positive"):
         Settings.from_env(env={"MEMEINTEL_INTERVALS_FAST": "-1"})
+
+
+def test_load_dotenv(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "# comment line\n"
+        "MEMEINTEL_TEST_DOTENV_A=hello\n"
+        "MEMEINTEL_TEST_DOTENV_B='quoted'\n"
+        "\n"
+        "not-a-kv-line\n"
+    )
+    monkeypatch.delenv("MEMEINTEL_TEST_DOTENV_A", raising=False)
+    monkeypatch.setenv("MEMEINTEL_TEST_DOTENV_B", "real-env-wins")
+
+    from meme_intelligence.config.settings import load_dotenv
+    loaded = load_dotenv(str(env_file))
+
+    import os
+    assert os.environ["MEMEINTEL_TEST_DOTENV_A"] == "hello"
+    assert os.environ["MEMEINTEL_TEST_DOTENV_B"] == "real-env-wins"  # env beats file
+    assert loaded == 1
+    monkeypatch.delenv("MEMEINTEL_TEST_DOTENV_A")
+    assert load_dotenv(str(tmp_path / "missing.env")) == 0
