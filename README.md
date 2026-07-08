@@ -20,7 +20,9 @@ human operator.
 | Part 6 — On-chain intelligence & wallet behavior | On-chain analyzer (holder health, volume quality, buy/sell pressure, phase classification) running today on market+security data; smart-money/whale/flow slots ready for wallet collectors | ✅ Built (partial data sources) |
 | Part 7 — Token evaluation & market structure | Token analyzer: market-cap staging, FDV dilution, liquidity/volume-to-mcap ratios, supply concentration, valuation classification, competition percentile helper | ✅ Built |
 | Part 8 — Trading strategy & execution framework | Trade planner: trade score, setup classification, conviction + sizing guidance, entry checklist, required confirmations, invalidation conditions, FOMO questions — plans only, never orders | ✅ Built |
-| Parts 9+ — Risk management, scoring engine, alerts, dashboard, database | — | ⏳ Upcoming |
+| Part 9 — Risk management & capital protection | Risk analyzer (5-component risk score, higher = riskier), portfolio exposure limits, drawdown posture, emergency exit flags | ✅ Built |
+| Part 10 — Scoring algorithm & decision engine | Master scoring engine: Part 31-locked weights, red-flag overrides forcing Avoid, 6-question decision tree with caps, timing derivation, full decision trace | ✅ Built |
+| Parts 11+ — Momentum/narrative analyzers, database, alerts, dashboard, AI reports | — | ⏳ Upcoming |
 
 ## Project structure
 
@@ -50,7 +52,9 @@ meme_intelligence/
 │   ├── community_analyzer.py  # Layer 3: social strength + fake detection
 │   ├── onchain_analyzer.py    # Layer 3: wallet/volume behavior + phase
 │   ├── foundation_analyzer.py # foundation score combiner (AI inputs later)
-│   └── token_analyzer.py      # token structure: staging, dilution, ratios
+│   ├── token_analyzer.py      # token structure: staging, dilution, ratios
+│   ├── risk_analyzer.py       # risk score + portfolio limits + emergencies
+│   └── scoring_engine.py      # master score: overrides, decision tree, weights
 ├── trading/
 │   └── trade_planner.py    # trade plans: checklist, sizing guidance, invalidations
 tests/                      # pytest suite (unit tests, no network required)
@@ -114,7 +118,7 @@ environment.
 4. ~~Community / on-chain / foundation analyzers~~ ✅ (social + wallet
    collectors pending API keys — engines run on partial data honestly)
 5. ~~Token structure analyzer + trade planner~~ ✅
-6. Risk management framework, momentum analyzer, database layer
-7. Scoring engine with red-flag overrides + AI report generation
-8. Alert system (Telegram/Discord) + dashboard
+6. ~~Risk management framework + master scoring engine~~ ✅
+7. Momentum/narrative analyzers, database layer, daily workflow
+8. Alert system (Telegram/Discord) + dashboard + AI report generation
 9. Backtesting and self-improvement loop

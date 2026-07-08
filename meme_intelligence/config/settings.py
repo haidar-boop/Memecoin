@@ -356,6 +356,48 @@ class TradingSettings:
 
 
 @dataclass(frozen=True)
+class RiskSubWeights:
+    """Sub-weights inside the risk score (Part 9, Section 6). Higher risk score = riskier."""
+
+    security: float = 0.25
+    market: float = 0.20
+    community: float = 0.15
+    token: float = 0.20
+    execution: float = 0.20
+
+    def __post_init__(self) -> None:
+        _check_weight_sum("risk", dataclasses.asdict(self))
+
+
+@dataclass(frozen=True)
+class RiskSettings:
+    """Portfolio-level exposure and drawdown discipline (Part 9, Sections 2/5/8).
+
+    All values are guidance the system reports against — it never manages
+    money directly (Part 13, Section 8).
+    """
+
+    max_open_positions: int = 10
+    max_single_position_percent: float = 10.0
+    max_chain_concentration_percent: float = 50.0
+    max_narrative_concentration_percent: float = 40.0
+    max_total_exposure_percent: float = 80.0  # remainder stays as cash reserve
+    reduced_daily_loss_percent: float = 5.0    # losses beyond this => reduce risk
+    defensive_daily_loss_percent: float = 10.0  # losses beyond this => defensive mode
+    reduced_weekly_loss_percent: float = 10.0
+    defensive_weekly_loss_percent: float = 20.0
+
+    def __post_init__(self) -> None:
+        for name, value in dataclasses.asdict(self).items():
+            if value <= 0:
+                raise ConfigurationError(f"risk setting '{name}' must be positive, got {value}")
+        if self.reduced_daily_loss_percent >= self.defensive_daily_loss_percent:
+            raise ConfigurationError("reduced_daily_loss_percent must be below defensive_daily_loss_percent")
+        if self.reduced_weekly_loss_percent >= self.defensive_weekly_loss_percent:
+            raise ConfigurationError("reduced_weekly_loss_percent must be below defensive_weekly_loss_percent")
+
+
+@dataclass(frozen=True)
 class CommunityThresholds:
     """Community-analysis anchors (Part 5, Part 18 Section 8).
 
@@ -426,6 +468,8 @@ class Settings:
     token_weights: TokenSubWeights = field(default_factory=TokenSubWeights)
     trading: TradingSettings = field(default_factory=TradingSettings)
     trade_weights: TradeScoreWeights = field(default_factory=TradeScoreWeights)
+    risk: RiskSettings = field(default_factory=RiskSettings)
+    risk_weights: RiskSubWeights = field(default_factory=RiskSubWeights)
     log_level: str = "INFO"
     log_dir: str = "logs"
 
@@ -452,6 +496,8 @@ class Settings:
             token_weights=_load_group(TokenSubWeights, "TOKEN_WEIGHTS", env),
             trading=_load_group(TradingSettings, "TRADING", env),
             trade_weights=_load_group(TradeScoreWeights, "TRADE_WEIGHTS", env),
+            risk=_load_group(RiskSettings, "RISK", env),
+            risk_weights=_load_group(RiskSubWeights, "RISK_WEIGHTS", env),
             log_level=env.get(f"{_ENV_PREFIX}_LOG_LEVEL", "INFO"),
             log_dir=env.get(f"{_ENV_PREFIX}_LOG_DIR", "logs"),
         )

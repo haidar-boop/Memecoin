@@ -116,6 +116,23 @@ class CheckStatus(str, Enum):
     UNKNOWN = "unknown"  # unverified is not a pass (Rule 8)
 
 
+class RiskCategory(str, Enum):
+    """Overall risk classification (Spec Part 9, Section 7). Higher = riskier."""
+
+    LOW_RELATIVE = "low_relative"  # still speculative — meme coins always are
+    MODERATE = "moderate"
+    HIGH = "high"
+    EXTREME = "extreme"            # avoid
+
+
+class RiskPosture(str, Enum):
+    """Portfolio operating mode under drawdown (Spec Part 9, Sections 8-9)."""
+
+    NORMAL = "normal"
+    REDUCED = "reduced"        # smaller positions, fewer trades, more confirmation
+    DEFENSIVE = "defensive"    # capital preservation only
+
+
 class ScanLayer(str, Enum):
     """The four monitoring layers of the real-time architecture (Spec Part 2, Section 4)."""
 

@@ -21,6 +21,8 @@ import asyncio
 import sys
 
 from meme_intelligence.analyzers.onchain_analyzer import OnChainAnalyzer, derive_onchain_profile
+from meme_intelligence.analyzers.risk_analyzer import RiskAnalyzer
+from meme_intelligence.analyzers.scoring_engine import ScoringEngine, derive_timing_score
 from meme_intelligence.analyzers.security_analyzer import SecurityAnalyzer
 from meme_intelligence.analyzers.token_analyzer import TokenAnalyzer
 from meme_intelligence.core.enums import MarketRegime
@@ -240,9 +242,23 @@ async def _cmd_plan(args, settings) -> int:
     if token_assessment:
         print(token_assessment.summary() + "\n")
 
+    regime = MarketRegime(args.regime)
+    risk_assessment = RiskAnalyzer(settings.risk_weights).assess(
+        security, pair=pair, token=token_assessment, onchain=onchain, regime=regime,
+    )
+    print(risk_assessment.summary() + "\n")
+
+    master = ScoringEngine(settings.weights, settings.bands).evaluate(
+        security,
+        onchain=onchain,
+        token_structure=token_assessment,
+        risk=risk_assessment,
+        timing_score=derive_timing_score(pair, token_assessment, onchain),
+    )
+    print(master.summary() + "\n")
+
     plan = planner.build_plan(
-        pair, security, onchain=onchain, token=token_assessment,
-        regime=MarketRegime(args.regime),
+        pair, security, onchain=onchain, token=token_assessment, regime=regime,
     )
     print(plan.render())
     return 0 if not security.is_destructive else 2
