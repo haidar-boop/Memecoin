@@ -165,12 +165,13 @@ class CommunityAnalyzer:
                          f"{p.twitter_engagement_rate_percent:.2f}% engagement: "
                          "follower count likely inflated")
 
-        if (
-            s.observe("telegram_active_members", p.telegram_active_members)
-            and p.telegram_members
-        ):
-            active_percent = 100.0 * p.telegram_active_members / p.telegram_members
-            s.signal(scale(active_percent, 0.0, self._t.telegram_active_target_percent))
+        # Observe the derived ratio, not the raw count: active members without
+        # a total membership is uncomputable and must stay unknown (Rule 8).
+        telegram_active_percent = None
+        if p.telegram_active_members is not None and p.telegram_members:
+            telegram_active_percent = 100.0 * p.telegram_active_members / p.telegram_members
+        if s.observe("telegram_active_percent", telegram_active_percent):
+            s.signal(scale(telegram_active_percent, 0.0, self._t.telegram_active_target_percent))
 
         if s.observe("discord_active_percent", p.discord_active_percent):
             s.signal(scale(p.discord_active_percent, 0.0, self._t.telegram_active_target_percent))

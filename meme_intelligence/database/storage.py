@@ -230,9 +230,13 @@ class Storage:
                                      f"added at {tier.value}" + (f" (score {score:.0f})" if score is not None else ""))
         else:
             old_tier = WatchlistTier(existing["tier"])
+            # COALESCE keeps the last known score/classification when an
+            # update (e.g. archival) carries none — history feeds learning.
             self._conn.execute(
                 """UPDATE watchlist SET tier = ?, thesis = COALESCE(?, thesis),
-                       updated_at = ?, last_score = ?, last_classification = ?
+                       updated_at = ?,
+                       last_score = COALESCE(?, last_score),
+                       last_classification = COALESCE(?, last_classification)
                    WHERE token_id = ?""",
                 (tier.value, thesis, now, score, classification_value, token_id),
             )
@@ -240,7 +244,7 @@ class Storage:
                 change = WatchlistChange(token, "tier_changed", tier,
                                          f"{old_tier.value} -> {tier.value}")
             else:
-                change = WatchlistChange(token, "updated", tier, f"score refreshed")
+                change = WatchlistChange(token, "updated", tier, "score refreshed")
         self._conn.commit()
         self._logger.info("watchlist %s: %s (%s)", change.change,
                           token.symbol or token.address, change.detail)

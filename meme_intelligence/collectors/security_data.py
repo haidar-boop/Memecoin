@@ -160,9 +160,14 @@ class GoPlusClient(BaseCollector):
         """Unwrap GoPlus's ``{code, message, result: {address: {...}}}`` envelope."""
         if not isinstance(payload, dict):
             raise CollectorError(f"{self.name}: expected JSON object, got {type(payload).__name__}")
-        code = payload.get("code")
+        try:
+            code = int(payload.get("code"))
+        except (TypeError, ValueError):
+            code = None
         if code not in (1, 2):  # 1 = complete, 2 = partial data (still usable)
-            raise CollectorError(f"{self.name}: API error code {code}: {payload.get('message')}")
+            raise CollectorError(
+                f"{self.name}: API error code {payload.get('code')}: {payload.get('message')}"
+            )
         result = payload.get("result")
         if not isinstance(result, dict) or not result:
             return None

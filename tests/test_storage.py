@@ -88,6 +88,16 @@ def test_archive_excluded_from_default_watchlist(storage):
     assert any("archived" in e["content"] for e in entries)
 
 
+def test_archive_preserves_last_known_score(storage):
+    """Regression: archival (an update without a score) must not erase history."""
+    storage.update_watchlist(TOKEN, WatchlistTier.TIER_2_DEVELOPING,
+                             score=72.0, classification=Classification.WATCHLIST)
+    storage.archive(TOKEN, "deteriorated")
+    entry = storage.get_watchlist(include_archived=True)[0]
+    assert entry.last_score == 72.0
+    assert entry.last_classification == "watchlist"
+
+
 def test_journal_roundtrip(storage):
     storage.add_journal(TOKEN, "thesis", "strong meme, early community")
     storage.add_journal(None, "daily_report", "market neutral today")

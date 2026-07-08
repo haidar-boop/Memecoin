@@ -142,7 +142,11 @@ async def _cmd_discover(args, settings) -> int:
 async def _cmd_security(args, settings) -> int:
     analyzer = SecurityAnalyzer(settings.security, settings.security_weights)
     async with build_goplus(settings) as goplus, build_dexscreener(settings) as dex:
-        profile = await goplus.get_token_security(args.chain, args.address)
+        try:
+            profile = await goplus.get_token_security(args.chain, args.address)
+        except CollectorError as exc:
+            print(f"Security data unavailable: {exc}")
+            return 1
         if profile is None:
             print(f"GoPlus has no security data for {args.address} on {args.chain}.")
             return 1
@@ -213,65 +217,15 @@ async def _cmd_scan(args, settings) -> int:
 
 async def _cmd_plan(args, settings) -> int:
     """Full research pass for one token, ending in a trade plan (Part 8)."""
-    security_analyzer = SecurityAnalyzer(settings.security, settings.security_weights)
-    onchain_analyzer = OnChainAnalyzer(settings.onchain, settings.onchain_weights)
-    token_analyzer = TokenAnalyzer(settings.token, settings.token_weights)
-    planner = TradePlanner(settings.trading, settings.trade_weights)
-
-    async with build_dexscreener(settings) as dex, build_goplus(settings) as goplus:
-        pairs = await dex.get_token_pairs(args.address, chain=args.chain)
-        if not pairs:
-            print(f"No trading pairs found for {args.address}.")
-            return 1
-        pair = max(pairs, key=lambda p: p.liquidity_usd or 0.0)
-
-        security_profile = await goplus.get_token_security(pair.chain, pair.base_token.address)
-        if security_profile is None:
-            print(f"GoPlus has no security data for {args.address} on {pair.chain}.")
-            return 1
-
-    try:
-        security = security_analyzer.assess(security_profile, pair)
-    except InsufficientDataError as exc:
-        print(f"Cannot assess security: {exc}")
+    result, error = await _gather_assessments(args, settings)
+    if error:
+        print(error)
         return 1
+    pair, security, onchain, token_assessment, risk_assessment, master, plan = result
 
-    onchain = None
-    try:
-        onchain = onchain_analyzer.assess(derive_onchain_profile(pair, security_profile))
-    except InsufficientDataError:
-        pass
-
-    token_assessment = None
-    try:
-        token_assessment = token_analyzer.assess(pair, security_profile)
-    except InsufficientDataError:
-        pass
-
-    print(security.summary() + "\n")
-    if onchain:
-        print(onchain.summary() + "\n")
-    if token_assessment:
-        print(token_assessment.summary() + "\n")
-
-    regime = MarketRegime(args.regime)
-    risk_assessment = RiskAnalyzer(settings.risk_weights).assess(
-        security, pair=pair, token=token_assessment, onchain=onchain, regime=regime,
-    )
-    print(risk_assessment.summary() + "\n")
-
-    master = ScoringEngine(settings.weights, settings.bands).evaluate(
-        security,
-        onchain=onchain,
-        token_structure=token_assessment,
-        risk=risk_assessment,
-        timing_score=derive_timing_score(pair, token_assessment, onchain),
-    )
-    print(master.summary() + "\n")
-
-    plan = planner.build_plan(
-        pair, security, onchain=onchain, token=token_assessment, regime=regime,
-    )
+    for section in (security, onchain, token_assessment, risk_assessment, master):
+        if section is not None:
+            print(section.summary() + "\n")
     print(plan.render())
     return 0 if not security.is_destructive else 2
 
@@ -287,7 +241,10 @@ async def _gather_assessments(args, settings):
         if not pairs:
             return None, f"No trading pairs found for {args.address}."
         pair = max(pairs, key=lambda p: p.liquidity_usd or 0.0)
-        security_profile = await goplus.get_token_security(pair.chain, pair.base_token.address)
+        try:
+            security_profile = await goplus.get_token_security(pair.chain, pair.base_token.address)
+        except CollectorError as exc:
+            return None, f"Security data unavailable: {exc}"
         if security_profile is None:
             return None, f"GoPlus has no security data for {args.address} on {pair.chain}."
 

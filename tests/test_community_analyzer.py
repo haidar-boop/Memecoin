@@ -114,6 +114,21 @@ def test_no_data_raises():
         make_analyzer().assess(CommunityProfile(token=TOKEN, source="test"))
 
 
+def test_active_members_without_total_stays_unknown():
+    """Regression: an uncomputable activity ratio must not score a phantom 100."""
+    profile = CommunityProfile(token=TOKEN, source="test", telegram_active_members=500)
+    with pytest.raises(InsufficientDataError):
+        make_analyzer().assess(profile)  # nothing observable => no assessment at all
+
+
+def test_active_ratio_computes_when_both_known():
+    profile = CommunityProfile(token=TOKEN, source="test",
+                               telegram_members=1000, telegram_active_members=200)
+    assessment = make_analyzer().assess(profile)
+    assert assessment.sub_scores["engagement"] == 100.0  # 20% active >= 15% target
+    assert "telegram_active_percent" not in assessment.unknown_fields
+
+
 def test_summary_renders():
     text = make_analyzer().assess(healthy_profile()).summary()
     assert "MEME" in text and "Overall" in text
