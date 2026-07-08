@@ -1,0 +1,68 @@
+"""Tests for configuration loading and validation (Spec Part 31 defaults, Rule 17)."""
+
+import pytest
+
+from meme_intelligence.config.settings import (
+    ClassificationBands,
+    ScoringWeights,
+    SecuritySubWeights,
+    Settings,
+)
+from meme_intelligence.core.errors import ConfigurationError
+
+
+def test_default_settings_are_valid():
+    settings = Settings.from_env(env={})
+    assert settings.weights.security == 0.15
+    assert settings.weights.timing == 0.10
+    assert settings.bands.elite == 90.0
+    assert settings.alerts.overall == 85.0
+    assert settings.intervals.ultra_fast == 7.0
+
+
+def test_scoring_weights_match_consistency_lock():
+    """Part 31 Section 4: 6 categories at 15% plus timing at 10%."""
+    w = ScoringWeights()
+    assert (w.foundation, w.security, w.community, w.blockchain, w.momentum, w.narrative) == (
+        0.15, 0.15, 0.15, 0.15, 0.15, 0.15,
+    )
+    assert w.timing == 0.10
+
+
+def test_security_sub_weights_sum_to_one():
+    w = SecuritySubWeights()
+    assert w.contract + w.liquidity + w.distribution + w.developer + w.manipulation == pytest.approx(1.0)
+
+
+def test_invalid_weight_sum_rejected():
+    with pytest.raises(ConfigurationError, match="must sum to 1.0"):
+        ScoringWeights(security=0.50)  # breaks the sum
+
+
+def test_bands_must_descend():
+    with pytest.raises(ConfigurationError, match="descending"):
+        ClassificationBands(elite=70.0, strong_candidate=80.0)
+
+
+def test_env_override_applies():
+    env = {
+        "MEMEINTEL_WEIGHTS_SECURITY": "0.20",
+        "MEMEINTEL_WEIGHTS_TIMING": "0.05",
+        "MEMEINTEL_INTERVALS_ULTRA_FAST": "5",
+        "MEMEINTEL_LOG_LEVEL": "DEBUG",
+    }
+    settings = Settings.from_env(env=env)
+    assert settings.weights.security == 0.20
+    assert settings.weights.timing == 0.05
+    assert settings.intervals.ultra_fast == 5.0
+    assert settings.log_level == "DEBUG"
+
+
+def test_bad_env_value_raises_clear_error():
+    with pytest.raises(ConfigurationError, match="MEMEINTEL_HTTP_TIMEOUT_SECONDS"):
+        Settings.from_env(env={"MEMEINTEL_HTTP_TIMEOUT_SECONDS": "not-a-number"})
+
+
+def test_negative_interval_rejected():
+    with pytest.raises(ConfigurationError, match="must be positive"):
+        Settings.from_env(env={"MEMEINTEL_INTERVALS_FAST": "-1"})
