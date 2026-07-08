@@ -358,7 +358,11 @@ class AIJudgmentService:
             value = data.get(name)
             if value is None:
                 return None
-            if not isinstance(value, (int, float)) or not (0.0 <= value <= 100.0):
+            # bool is a subclass of int in Python — reject it explicitly so a
+            # JSON `true`/`false` isn't silently parsed as 1.0/0.0 (Rule 6).
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not (
+                0.0 <= value <= 100.0
+            ):
                 raise AIJudgmentError(f"judgment '{name}' out of range: {value!r}")
             return float(value)
 
@@ -368,11 +372,21 @@ class AIJudgmentService:
                 raise AIJudgmentError(f"risk flag '{name}' is not a boolean: {value!r}")
             return value
 
+        def string_list(name: str) -> list[str]:
+            value = data.get(name)
+            if value is None:
+                return []
+            if not isinstance(value, list):
+                raise AIJudgmentError(f"'{name}' must be a list, got {type(value).__name__}")
+            return [str(item) for item in value]
+
+        bull_case = string_list("bull_case")
+        bear_case = string_list("bear_case")
         prose_parts = [
             str(data.get("narrative_summary") or ""),
             str(data.get("confidence_reason") or ""),
-            *(str(b) for b in data.get("bull_case") or []),
-            *(str(b) for b in data.get("bear_case") or []),
+            *bull_case,
+            *bear_case,
         ]
         violations = check_language("\n".join(prose_parts))
         if violations:
@@ -414,8 +428,8 @@ class AIJudgmentService:
         return AIJudgment(
             foundation_inputs=foundation,
             narrative_inputs=narrative,
-            bull_case=tuple(str(b) for b in data.get("bull_case") or []),
-            bear_case=tuple(str(b) for b in data.get("bear_case") or []),
+            bull_case=tuple(bull_case),
+            bear_case=tuple(bear_case),
             confidence=confidence,
             confidence_reason=str(data.get("confidence_reason") or ""),
             mode=mode,

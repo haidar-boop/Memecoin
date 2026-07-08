@@ -192,6 +192,13 @@ class NarrativeInputs:
             value = getattr(self, name)
             if value is not None and not (0.0 <= value <= 100.0):
                 raise ValueError(f"narrative input '{name}' must be within 0-100, got {value}")
+        if not isinstance(self.catalysts, tuple) or not all(
+            isinstance(c, ViralCatalyst) for c in self.catalysts
+        ):
+            raise TypeError(
+                "narrative input 'catalysts' must be a tuple of ViralCatalyst, "
+                f"got {self.catalysts!r}"
+            )
 
 
 @dataclass(frozen=True)
@@ -336,6 +343,20 @@ class NarrativeAnalyzer:
         unknowns = [u for part in parts for u in part.unknowns]
         known = sum(part.known_count for part in parts)
 
+        # community_creativity_proxy is ONE underlying community-engine fact
+        # that both _assess_participation and _assess_creativity fall back to
+        # (Sections 3 and 11) — when both lack their own judgment, the same
+        # fact is observed twice; dedupe so it is tallied once, not twice,
+        # in the aggregate confidence count (Rule 8).
+        if inputs.community_participation is None and inputs.community_creativity is None:
+            if creativity_fallback is not None:
+                known -= 1
+            else:
+                try:
+                    unknowns.remove("community_creativity_proxy")
+                except ValueError:
+                    pass
+
         sentiment = self._classify_sentiment(positive_sentiment_percent)
         if sentiment is SentimentLabel.NEGATIVE:
             findings.append(Finding(
@@ -463,7 +484,11 @@ class NarrativeAnalyzer:
     # ---- Long-term strength + Section 10 risk factors ----
 
     def _assess_long_term(self, inputs: NarrativeInputs) -> SubScore:
-        s = SubScore("long_term_strength")
+        # requires_signal=True: the Section 10 risk flags alone must not
+        # fabricate a base-100 "perfect" score when no long_term_strength
+        # judgment exists (Rule 8) — mirrors the organic-verdict guard in
+        # _assess_participation.
+        s = SubScore("long_term_strength", requires_signal=True)
 
         if s.observe("long_term_strength", inputs.long_term_strength):
             s.signal(inputs.long_term_strength)

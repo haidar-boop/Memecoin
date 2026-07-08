@@ -189,7 +189,10 @@ class ResearchPipeline:
                         community_profile.positive_sentiment_percent
                         if community_profile else None),
                 )
-            except InsufficientDataError:
+            except (InsufficientDataError, ValueError):
+                # A malformed provider value (out-of-range/NaN sentiment) is a
+                # data-quality gap, not grounds to abort the whole analysis
+                # (Rule 6) — the rest of the deterministic chain still stands.
                 pass
 
         risk = self._risk.assess(security, pair=pair, token=token,
@@ -245,18 +248,31 @@ class ResearchPipeline:
                         result.community_profile.positive_sentiment_percent
                         if result.community_profile else None),
                 )
-            except InsufficientDataError:
+            except (InsufficientDataError, ValueError):
                 narrative = None
 
         foundation = None
-        try:
-            foundation = self._foundation.assess(
-                result.pair.base_token, judgment.foundation_inputs,
-                community_quality=(
-                    result.community.overall_score if result.community else None),
-            )
-        except InsufficientDataError:
-            pass
+        has_foundation_evidence = any(
+            v is not None for v in dataclasses.asdict(judgment.foundation_inputs).values()
+        )
+        if has_foundation_evidence:
+            # Only fold community_quality in when the AI actually contributed
+            # a foundation judgment — otherwise this would fabricate a
+            # foundation score from the community score alone (double-
+            # counting community and moving the master score with zero new
+            # evidence, Rule 8). An artificial community's score describes
+            # bots, not brand/dev-communication quality, so exclude it here
+            # too (mirrors the same guard in NarrativeAnalyzer).
+            community_quality = None
+            if result.community is not None and not result.community.is_artificial:
+                community_quality = result.community.overall_score
+            try:
+                foundation = self._foundation.assess(
+                    result.pair.base_token, judgment.foundation_inputs,
+                    community_quality=community_quality,
+                )
+            except InsufficientDataError:
+                pass
 
         master = self._scoring.evaluate(
             result.security,

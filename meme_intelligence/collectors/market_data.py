@@ -43,6 +43,17 @@ def _to_int(value: Any) -> int | None:
         return None
 
 
+def _to_percent(value: Any) -> float | None:
+    """Parse a 0-100 percentage field; out-of-range or non-finite values are
+    treated as missing data rather than fabricated or allowed to crash a
+    downstream analyzer that enforces the 0-100 contract (Rule 6, Rule 8).
+    """
+    parsed = _to_float(value)
+    if parsed is None or not (0.0 <= parsed <= 100.0):
+        return None
+    return parsed
+
+
 def _from_ms_timestamp(value: Any) -> datetime | None:
     ms = _to_float(value)
     if ms is None or ms <= 0:
@@ -336,6 +347,7 @@ class CoinGeckoClient(BaseCollector):
                 "vs_currencies": "usd",
                 "include_24hr_change": "true",
             },
+            headers=self._headers,
             cache_key="coingecko:majors",
             cache_ttl=120.0,
         )
@@ -366,18 +378,32 @@ class CoinGeckoClient(BaseCollector):
         if platform is None:
             self._logger.info("%s: no CoinGecko platform for chain %s", self.name, token.chain)
             return None
+        # Lowercase only for the cache key: some providers reach the same
+        # token via a checksummed address and some via lowercase, which
+        # otherwise fragments the cache into two entries for one token
+        # (Rules 10/11). The request itself keeps the caller's original
+        # casing since CoinGecko accepts either.
+        cache_key = f"coingecko:community:{platform}:{token.address.lower()}"
+        not_listed_key = f"{cache_key}:404"
+        if self._cache is not None and await self._cache.get(not_listed_key) is not None:
+            return None
         try:
             payload = await self._get_json(
                 f"api/v3/coins/{platform}/contract/{token.address}",
                 headers=self._headers,
-                cache_key=f"coingecko:community:{platform}:{token.address}",
+                cache_key=cache_key,
                 cache_ttl=600.0,  # research cadence (Part 21 Section 4)
             )
         except CollectorError as exc:
             # Unlisted tokens return 404: "not listed" is a data gap, not a failure.
-            if "status 404" in str(exc):
+            # Cached separately (not via the success cache_key) so repeated
+            # lookups of a not-yet-indexed token don't re-hit the API every
+            # cycle within the TTL window (Rules 10/11).
+            if exc.status_code == 404:
                 self._logger.info("%s: %s/%s not listed on CoinGecko",
                                   self.name, token.chain, token.address)
+                if self._cache is not None:
+                    await self._cache.set(not_listed_key, True, 600.0)
                 return None
             raise
         if not isinstance(payload, dict):
@@ -396,8 +422,8 @@ class CoinGeckoClient(BaseCollector):
             comments_48h = _to_float(community.get("reddit_average_comments_48h"))
             if posts_48h is not None:
                 reddit_posts_per_day = posts_48h / 2.0
-            if posts_48h is not None or comments_48h is not None:
-                user_content_per_day = ((posts_48h or 0.0) + (comments_48h or 0.0)) / 2.0
+            if posts_48h is not None and comments_48h is not None:
+                user_content_per_day = (posts_48h + comments_48h) / 2.0
         else:
             reddit_subscribers = None
 
@@ -408,7 +434,7 @@ class CoinGeckoClient(BaseCollector):
             reddit_subscribers=reddit_subscribers,
             reddit_posts_per_day=reddit_posts_per_day,
             user_content_per_day=user_content_per_day,
-            positive_sentiment_percent=_to_float(payload.get("sentiment_votes_up_percentage")),
+            positive_sentiment_percent=_to_percent(payload.get("sentiment_votes_up_percentage")),
         )
 
 

@@ -280,6 +280,85 @@ predictions against actual outcomes without needing new instrumentation.
 The join logic, outcome labeling (winner/loser/rug), and weight-tuning
 loop itself are not written.
 
+### Bug-hunt fix pass across Parts 19/23/24/29 + community collector
+
+A multi-agent adversarial bug hunt over the recently-built modules
+(narrative engine, AI reasoning, backtesting, alerts, CoinGecko
+collector) surfaced 15 concrete defects, mostly Rule 6/8 violations
+(fabricated scores, unhandled malformed provider data, silent data
+loss). Fixed directly, all 362 tests green:
+
+- **`analyzers/common.py`**: `SubScore` gained an opt-in
+  `requires_signal` flag. Deduction-style analyzers (start at 100,
+  subtract) keep the old default; `NarrativeAnalyzer._assess_long_term`
+  now uses it so Section 10 risk flags alone (no `long_term_strength`
+  judgment) can no longer fabricate a "perfect 100" score out of thin
+  air — mirrors the existing organic-growth guard in
+  `_assess_participation`.
+- **`analyzers/narrative_analyzer.py`**: `NarrativeInputs.catalysts` is
+  now validated at construction (fail-fast instead of a deferred
+  `AttributeError` inside `summary()`); the `community_creativity_proxy`
+  fact is deduped so it's tallied once, not twice, when both the
+  participation and creativity components fall back to it.
+- **`ai/reasoning.py`**: `score()` rejects JSON booleans explicitly
+  (`bool` is an `int` subclass in Python); `bull_case`/`bear_case` are
+  validated as lists before iteration instead of raising an uncaught
+  `TypeError` that escaped `judge()` and crashed the whole pipeline run.
+- **`ai/prompts.py`**: `check_language` now ignores a banned phrase when
+  a negation word (not/no/never/nothing/without/...) appears in the
+  preceding few words — the system prompt explicitly asks the analyst to
+  write cautionary disclaimers ("no guarantee against a rug pull", "not
+  risk-free"), and those were being flagged as hype, silently discarding
+  otherwise-valid AI judgments.
+- **`collectors/market_data.py`** / **`core/errors.py`** /
+  **`collectors/base.py`**: `CollectorError` now carries a `status_code`
+  so "not listed" detection no longer depends on a substring match
+  against the error message; unlisted-token 404s are now negatively
+  cached (previously re-hit CoinGecko every recheck cycle); the
+  community cache key is lowercased (the request itself keeps original
+  casing) so checksummed vs. lowercase addresses no longer fragment the
+  cache; `get_majors` now sends the configured demo API key like
+  `get_community_profile` already did; `positive_sentiment_percent` is
+  clamped to `None` outside 0-100 (was crashing narrative assessment
+  with a raw `ValueError`); `user_content_per_day` no longer substitutes
+  0 for a genuinely missing reddit posts/comments field.
+- **`workflow/pipeline.py`**: narrative `ValueError`s are now caught
+  alongside `InsufficientDataError` (defense in depth even with the
+  collector-level fix above); `_enrich_with_ai` only builds a foundation
+  score from `community_quality` when the AI judgment actually supplied
+  at least one foundation slot — previously an all-null AI judgment
+  still fabricated a foundation score from the community score alone,
+  double-counting it and moving the master score with zero new
+  evidence; an artificial community's score is now excluded from
+  `community_quality` the same way `NarrativeAnalyzer` already excludes
+  it.
+- **`alerts/notification_engine.py`**: the per-token cooldown key now
+  includes alert priority — `events_from_security_changes` deliberately
+  emits one event per severity for the same `alert_type`, and without
+  priority in the key a CRITICAL alert could be silently swallowed by an
+  earlier (or same-batch) MEDIUM one, with no way to ever re-fire since
+  the baseline had already advanced. Most `AlertEvent` emissions that
+  omitted `master` from their `scores` dict now include it (needed for
+  the `alert_performance()` score-drift measurement below).
+- **`database/storage.py`**: `record_alert`'s score extraction no longer
+  uses `or` (which treated a legitimate `0.0` score as missing) and now
+  checks every score key the automation rules actually use, so
+  risk-only alert types (`emergency_review`, `whale_exit`,
+  `insider_risk`, ...) get a real `score_at_alert` instead of a
+  permanent `NULL` that silently excluded them from
+  `alert_performance()`/`alerts_with_drift()`.
+- **`alerts/sinks.py`** / **`collectors/base.py`**: `BaseCollector`
+  gained an optional `redact` tuple of secret substrings, scrubbed out
+  of every raised error message before it reaches a log line.
+  `TelegramSink`/`DiscordSink` register their bot token / webhook
+  URL(s) — previously any delivery failure (timeout, 429, 4xx) logged
+  the live credential in plaintext at WARNING/ERROR.
+- **`workflow/controller.py`**: `ContinuousScanner` now applies the same
+  `hasattr(community_client, "get_community_profile")` guard
+  `DailyRoutine` already had, so a legacy get-majors-only client
+  degrades gracefully instead of crashing the scanner on the first
+  token.
+
 ## Notable implementation choices (Rule 19)
 
 - **Python 3.11 + asyncio** over Node.js (both allowed by spec): the

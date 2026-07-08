@@ -108,7 +108,8 @@ class AutomationRules:
                 token=result.pair.base_token,
                 title="Destructive risk detected — do not enter; review any exposure now",
                 reasons=tuple(critical),
-                scores={"security": result.security.overall_score},
+                scores={"security": result.security.overall_score,
+                        "master": result.master.final_score},
                 why_it_matters="Destructive findings invalidate the opportunity outright; "
                                "capital in this token is at immediate structural risk.",
                 monitoring=("verify LP status and contract permissions immediately",
@@ -121,7 +122,8 @@ class AutomationRules:
                 token=result.pair.base_token,
                 title="Serious risk indicators appeared",
                 reasons=tuple(high[:4]),
-                scores={"security": result.security.overall_score},
+                scores={"security": result.security.overall_score,
+                        "master": result.master.final_score},
                 monitoring=("watch liquidity and top-holder movements closely",),
             ))
         return events
@@ -244,7 +246,8 @@ class AutomationRules:
                                "and often precedes sharp drawdowns.",
                 reasons=tuple(f"{w.owner[:8]}… {w.percent:.1f}% [{w.classification.value}]"
                               for w in wallet.whales[:4]),
-                scores={"smart_money": wallet.overall_score},
+                scores={"smart_money": wallet.overall_score,
+                        "master": result.master.final_score},
                 monitoring=("check exchange inflows and holder-count trend next",),
             ))
 
@@ -255,7 +258,8 @@ class AutomationRules:
                 token=result.pair.base_token,
                 title="Artificial accumulation pattern detected",
                 reasons=tuple(f.message for f in wallet.findings[:3]),
-                scores={"smart_money": wallet.overall_score},
+                scores={"smart_money": wallet.overall_score,
+                        "master": result.master.final_score},
                 monitoring=("treat volume and holder growth as untrustworthy until this clears",),
             ))
         return events
@@ -301,11 +305,16 @@ class AutomationRules:
         )
 
 
-def events_from_security_changes(token: TokenIdentity, changes) -> list[AlertEvent]:
+def events_from_security_changes(
+    token: TokenIdentity, changes, *, master_score: float | None = None,
+) -> list[AlertEvent]:
     """Convert detected security-fact changes into alert events (Part 18, Section 10).
 
     Changes arrive worst-first; one event is emitted per severity level so
-    a critical change is never buried inside a medium digest.
+    a critical change is never buried inside a medium digest. ``master_score``
+    is the master assessment score at detection time, so these alerts are
+    not permanently excluded from Part 29's score-drift performance
+    measurement (Rule 8/13 — the score existed, it just wasn't threaded through).
     """
     by_severity: dict[AlertPriority, list] = {}
     for change in changes:
@@ -331,6 +340,7 @@ def events_from_security_changes(token: TokenIdentity, changes) -> list[AlertEve
             token=token,
             title=titles.get(severity, "Security facts changed"),
             reasons=tuple(c.message for c in group[:5]),
+            scores={"master": master_score} if master_score is not None else {},
             monitoring=monitoring.get(severity, ()),
         ))
     return events
@@ -403,8 +413,15 @@ class NotificationEngine:
         """
         now = self._time()
 
-        def key_of(event: AlertEvent) -> tuple[str, str, str]:
-            return (event.token.chain, event.token.address.lower(), event.alert_type)
+        def key_of(event: AlertEvent) -> tuple[str, str, str, str]:
+            # Priority is part of the cooldown key: events_from_security_changes
+            # deliberately emits one event per severity for the same
+            # alert_type, and a lower-priority alert's cooldown must never
+            # suppress a later higher-priority one for the same token/type
+            # (a CRITICAL rug warning silently eaten by an earlier MEDIUM
+            # drift alert would be a permanent, unrecoverable loss — Rule 13).
+            return (event.token.chain, event.token.address.lower(),
+                    event.alert_type, event.priority.value)
 
         ranked = sorted(
             events,

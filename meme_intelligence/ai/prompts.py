@@ -118,6 +118,18 @@ _BANNED_PATTERNS = [
     for phrase in BANNED_PHRASES
 ]
 
+# A negation immediately before a match flips its meaning: "not guaranteed"
+# and "no guarantee against a rug pull" are cautionary disclosures, the
+# opposite of the hype claims these phrases exist to catch. The system
+# prompt explicitly asks for this disclaiming language ("always mention
+# possible losses"), so without this guard, honest AI judgments get
+# discarded wholesale on a false positive.
+_NEGATION_WINDOW_CHARS = 40
+_NEGATION_WORDS = {
+    "not", "no", "never", "nothing", "without", "n't",
+    "isn't", "doesn't", "won't", "can't", "cannot", "hardly",
+}
+
 
 def check_language(text: str) -> list[str]:
     """Return the banned phrases found in ``text`` (empty list = compliant).
@@ -128,6 +140,11 @@ def check_language(text: str) -> list[str]:
     """
     violations: list[str] = []
     for phrase, pattern in zip(BANNED_PHRASES, _BANNED_PATTERNS):
-        if pattern.search(text):
+        for match in pattern.finditer(text):
+            preceding = text[max(0, match.start() - _NEGATION_WINDOW_CHARS):match.start()]
+            preceding_words = re.findall(r"[\w']+", preceding.lower())
+            if any(word in _NEGATION_WORDS for word in preceding_words[-4:]):
+                continue
             violations.append(phrase)
+            break
     return violations

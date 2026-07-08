@@ -20,6 +20,10 @@ class ConfigurationError(MemeIntelError):
 class CollectorError(MemeIntelError):
     """A data collector failed in a way that is NOT worth retrying (4xx, bad payload)."""
 
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
 
 class TransientCollectorError(CollectorError):
     """A data collector failed in a way that IS worth retrying (network, timeout, 5xx)."""

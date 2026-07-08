@@ -21,7 +21,7 @@ def make_client() -> CoinGeckoClient:
 async def test_majors_normalized(monkeypatch):
     client = make_client()
 
-    async def fake_get_json(path, params=None, *, cache_key=None, cache_ttl=None):
+    async def fake_get_json(path, params=None, *, cache_key=None, cache_ttl=None, headers=None):
         client.requested_params = params
         return FIXTURE
 
@@ -37,7 +37,7 @@ async def test_majors_normalized(monkeypatch):
 async def test_missing_coins_become_none(monkeypatch):
     client = make_client()
 
-    async def fake_get_json(path, params=None, *, cache_key=None, cache_ttl=None):
+    async def fake_get_json(path, params=None, *, cache_key=None, cache_ttl=None, headers=None):
         return {"bitcoin": {"usd": 100000.0}}  # no change field, no eth/sol
 
     monkeypatch.setattr(client, "_get_json", fake_get_json)
@@ -50,7 +50,7 @@ async def test_missing_coins_become_none(monkeypatch):
 async def test_bad_payload_raises(monkeypatch):
     client = make_client()
 
-    async def bad(path, params=None, *, cache_key=None, cache_ttl=None):
+    async def bad(path, params=None, *, cache_key=None, cache_ttl=None, headers=None):
         return ["nope"]
 
     monkeypatch.setattr(client, "_get_json", bad)

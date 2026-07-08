@@ -95,6 +95,12 @@ class ContinuousScanner:
         self._logger = get_logger("workflow.controller")
 
         self._discovery = DiscoveryEngine(settings.discovery, now_func=now_func)
+        # A get_majors-only CoinGecko-compatible client (no community data
+        # support) must degrade gracefully rather than crash the whole
+        # scanner on the first token (Rule 3/18 — DailyRoutine applies this
+        # same guard).
+        if community_client is not None and not hasattr(community_client, "get_community_profile"):
+            community_client = None
         self._pipeline = ResearchPipeline(settings, goplus_client,
                                           community_client=community_client,
                                           now_func=now_func)
@@ -228,7 +234,8 @@ class ContinuousScanner:
         events = await self._verify_events(events, result)
         # Security-change events rest on contract facts, not market data, so
         # they bypass market cross-verification and are appended directly.
-        events.extend(events_from_security_changes(token, changes))
+        events.extend(events_from_security_changes(
+            token, changes, master_score=result.master.final_score))
         delivered = await self._notifier.dispatch(events)
         stats.alerts.extend(delivered)
         for event in delivered:

@@ -95,14 +95,15 @@ async def test_unsupported_chain_returns_none():
 async def test_unlisted_token_404_returns_none(monkeypatch):
     client = make_client()
     patch_json(monkeypatch, client,
-               error=CollectorError("coingecko: unexpected status 404 on url: not found"))
+               error=CollectorError("coingecko: unexpected status 404 on url: not found",
+                                    status_code=404))
     assert await client.get_community_profile(TOKEN) is None
 
 
 async def test_other_errors_propagate(monkeypatch):
     client = make_client()
     patch_json(monkeypatch, client,
-               error=CollectorError("coingecko: unexpected status 403 on url"))
+               error=CollectorError("coingecko: unexpected status 403 on url", status_code=403))
     with pytest.raises(CollectorError):
         await client.get_community_profile(TOKEN)
 

@@ -444,6 +444,24 @@ class Storage:
 
     # ---- Alert history & performance (Part 29, Sections 11-12) ----
 
+    # Preference order for the one representative score stamped on an alert.
+    # 'or' on the raw dict values would treat a legitimate 0.0 score as
+    # missing (falsy); explicit None checks below avoid that, and checking
+    # every key AutomationRules actually uses means risk-only alert types
+    # (emergency_review, whale_exit, ...) get a real score instead of a
+    # permanent NULL that silently excludes them from alert_performance()
+    # and alerts_with_drift() (Rule 8).
+    _SCORE_KEY_PREFERENCE = ("master", "overall", "security", "smart_money",
+                             "community", "momentum")
+
+    @classmethod
+    def _score_at_alert(cls, scores: dict) -> float | None:
+        for key in cls._SCORE_KEY_PREFERENCE:
+            value = scores.get(key)
+            if value is not None:
+                return value
+        return None
+
     def record_alert(self, event, source: str) -> int:
         """Persist one delivered alert (Part 29, Section 11).
 
@@ -459,7 +477,7 @@ class Storage:
             (token_id, self._now().isoformat(), event.priority.value,
              event.alert_type, event.title, json.dumps(list(event.reasons)),
              json.dumps({k: v for k, v in event.scores.items()}),
-             event.scores.get("master") or event.scores.get("overall"),
+             self._score_at_alert(event.scores),
              source),
         )
         self._conn.commit()

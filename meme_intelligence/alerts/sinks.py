@@ -120,6 +120,7 @@ class TelegramSink(BaseCollector):
     ) -> None:
         kwargs.setdefault("name", "telegram")
         kwargs.setdefault("base_url", "https://api.telegram.org")
+        kwargs.setdefault("redact", (bot_token,))
         super().__init__(**kwargs)
         self._token = bot_token
         self._chat_id = chat_id
@@ -166,6 +167,10 @@ class DiscordSink(BaseCollector):
     ) -> None:
         kwargs.setdefault("name", "discord")
         kwargs.setdefault("base_url", "https://discord.com")
+        # Every webhook URL IS a credential (anyone holding it can post to
+        # that channel) — the default and every per-category route are
+        # redacted from log/error text the same way a bot token is (Rule 16).
+        kwargs.setdefault("redact", (webhook_url, *(routes or {}).values()))
         super().__init__(**kwargs)
         self._webhook_url = webhook_url
         self._routes = routes or {}
