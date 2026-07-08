@@ -14,28 +14,35 @@ human operator.
 |---|---|---|
 | Part 1 — Role, mission & operating rules | Classification framework, scoring models, config system, logging | ✅ Built |
 | Part 2 — Scanning infrastructure & data architecture | Rate limiting, TTL cache, retry/backoff, provider failover pool, base collector, DexScreener client | ✅ Built |
-| Parts 3+ — Discovery, security, community, on-chain engines, scoring, alerts, dashboard | — | ⏳ Upcoming |
+| Part 3 — Discovery engine | GeckoTerminal new-pool client, discovery engine with hard filters, dedupe, Discovery Score, rejection tracking | ✅ Built |
+| Part 4 — Rug detection & security analysis | GoPlus client (EVM + Solana), security analyzer with graded risk taxonomy, destructive-risk overrides, confidence/coverage reporting | ✅ Built |
+| Parts 5+ — Community, on-chain engines, scoring, alerts, dashboard, database | — | ⏳ Upcoming |
 
 ## Project structure
 
 ```
 meme_intelligence/
-├── __main__.py           # temporary CLI for exercising the collection layer
+├── __main__.py             # CLI: search / token / discover / security / scan
 ├── config/
-│   └── settings.py       # all tunables, env-overridable (MEMEINTEL_* vars)
+│   └── settings.py         # all tunables, env-overridable (MEMEINTEL_* vars)
 ├── core/
-│   ├── enums.py          # Classification, RiskTier, ConfidenceLevel, ScanLayer
-│   ├── errors.py         # transient-vs-permanent error hierarchy
-│   ├── models.py         # TokenIdentity, DexPair, CategoryScores, score aggregation
-│   ├── cache.py          # async TTL cache with LRU eviction
-│   ├── rate_limiter.py   # token-bucket limiter (per provider)
-│   ├── retry.py          # exponential backoff with jitter
-│   ├── provider_pool.py  # multi-provider failover with cooldowns
-│   └── logging_setup.py  # console + rotating file logging
+│   ├── enums.py            # Classification, RiskTier, ConfidenceLevel, ScanLayer
+│   ├── errors.py           # transient-vs-permanent error hierarchy
+│   ├── models.py           # TokenIdentity, DexPair, SecurityProfile, score aggregation
+│   ├── cache.py            # async TTL cache with LRU eviction
+│   ├── rate_limiter.py     # token-bucket limiter (per provider)
+│   ├── retry.py            # exponential backoff with jitter
+│   ├── provider_pool.py    # multi-provider failover with cooldowns
+│   └── logging_setup.py    # console + rotating file logging
 ├── collectors/
-│   ├── base.py           # shared HTTP collector (rate limit + cache + retry)
-│   └── market_data.py    # DexScreener client → normalized DexPair models
-tests/                    # pytest suite (unit tests, no network required)
+│   ├── base.py             # shared HTTP collector (rate limit + cache + retry)
+│   ├── market_data.py      # DexScreener + GeckoTerminal → normalized DexPair
+│   └── security_data.py    # GoPlus (EVM + Solana) → normalized SecurityProfile
+├── scanners/
+│   └── discovery.py        # Layer 1: filter/dedupe/score new pools
+├── analyzers/
+│   └── security_analyzer.py # Layer 2: graded security assessment
+tests/                      # pytest suite (unit tests, no network required)
 ```
 
 ## Quick start
@@ -43,8 +50,10 @@ tests/                    # pytest suite (unit tests, no network required)
 ```bash
 pip install -r requirements.txt
 python -m pytest                          # run the test suite
-python -m meme_intelligence search PEPE   # live end-to-end check (no API key needed)
-python -m meme_intelligence token <contract-address> --chain solana
+python -m meme_intelligence search PEPE   # live market lookup (no API key needed)
+python -m meme_intelligence discover --network solana        # find new launches
+python -m meme_intelligence security <address> --chain solana  # rug/security check
+python -m meme_intelligence scan --network solana --top 5    # discovery -> security pipeline
 ```
 
 Configuration is entirely environment-driven — see `.env.example` for every
@@ -72,6 +81,15 @@ environment.
 - **Every collector is throttle-safe by construction.** Rate limiting,
   caching, retry with backoff, and provider failover live in the base layer,
   so no individual collector can abuse an API (Rules 9/10/11, Part 32.5).
+- **Security risk is graded, not binary** (Part 33 / Part 31 lock): normal
+  early-stage uncertainty deducts lightly; serious warnings (mint authority,
+  unlocked LP, concentration) deduct heavily; destructive risks (honeypot,
+  non-sellable, confirmed scam) force the score to 0. Partial-coverage
+  assessments are labeled "partial data" with an explicit warning — unknown
+  facts are never presented as safe.
+- **Discovery ≠ confirmation** (Part 31 Section 6): discovery candidates have
+  passed basic gates only; rejected pools are returned with reasons so the
+  future learning system can measure false negatives (Part 24).
 - **In-memory cache and SQLite-first storage** (storage arrives with the
   database phase). Redis/PostgreSQL can replace them behind the same
   interfaces when scale requires — simple, reliable solutions first (Rule 21).
@@ -79,9 +97,9 @@ environment.
 ## Roadmap (per spec build order, Parts 22/31)
 
 1. ~~Foundation: config, models, collectors~~ ✅
-2. Discovery engine + database layer
-3. Security analysis engine (rug detection, honeypot, holder concentration)
-4. Community / on-chain / momentum / narrative analyzers
+2. ~~Discovery engine~~ ✅
+3. ~~Security analysis engine (rug detection, honeypot, holder concentration)~~ ✅
+4. Database layer + community / on-chain / momentum / narrative analyzers
 5. Scoring engine with red-flag overrides + AI report generation
 6. Alert system (Telegram/Discord) + dashboard
 7. Backtesting and self-improvement loop

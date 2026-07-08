@@ -52,6 +52,67 @@ class DexPair:
 
 
 @dataclass(frozen=True)
+class SecurityProfile:
+    """Normalized contract-security facts about one token (Spec Parts 4/18/33).
+
+    Collectors (GoPlus today; Token Sniffer and honeypot services later)
+    normalize their provider-specific payloads into this shape so the
+    security analyzer never sees raw API responses (Part 32, Rule 3).
+    ``None`` always means "the source did not report this" — the analyzer
+    treats unknowns as reduced confidence, never as safe (Rule 8).
+
+    Percentages are expressed 0-100.
+    """
+
+    token: TokenIdentity
+    source: str
+
+    # Honeypot / tradability (destructive when confirmed — Part 4 Section 3)
+    is_honeypot: bool | None = None
+    cannot_buy: bool | None = None
+    cannot_sell_all: bool | None = None
+
+    # Contract permissions (Part 4 Section 2)
+    is_open_source: bool | None = None
+    is_proxy: bool | None = None
+    is_mintable: bool | None = None
+    ownership_renounced: bool | None = None
+    hidden_owner: bool | None = None
+    can_take_back_ownership: bool | None = None
+    has_blacklist: bool | None = None
+    trading_pausable: bool | None = None
+    is_freezable: bool | None = None       # Solana freeze authority
+    balance_mutable: bool | None = None    # Solana balance-mutable authority
+    selfdestruct: bool | None = None
+
+    # Taxes (Part 4 Section 2 — tax functions)
+    buy_tax_percent: float | None = None
+    sell_tax_percent: float | None = None
+    tax_modifiable: bool | None = None
+
+    # Manipulation indicators (Part 18 Sections 7-9)
+    fake_token: bool | None = None
+    is_airdrop_scam: bool | None = None
+    anti_whale_modifiable: bool | None = None
+    slippage_modifiable: bool | None = None
+    personal_slippage_modifiable: bool | None = None
+    trading_cooldown: bool | None = None
+    honeypot_same_creator_count: int | None = None
+
+    # Distribution (Part 4 Section 5; excludes burn/locked addresses where possible)
+    holder_count: int | None = None
+    top_holder_percent: float | None = None
+    top10_holder_percent: float | None = None
+
+    # Developer (Part 4 Section 8)
+    creator_percent: float | None = None
+    owner_percent: float | None = None
+
+    # Liquidity safety (Part 4 Section 4; USD depth comes from market data)
+    lp_locked_percent: float | None = None
+
+
+@dataclass(frozen=True)
 class CategoryScores:
     """Per-category scores on a 0-100 scale; ``None`` means "not yet analyzed".
 

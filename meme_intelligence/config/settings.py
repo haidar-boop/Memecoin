@@ -155,15 +155,75 @@ class ProviderSettings:
     """
 
     dexscreener_base_url: str = "https://api.dexscreener.com"
-    dexscreener_requests_per_minute: float = 240.0  # documented limit: 300/min
+    dexscreener_requests_per_minute: float = 240.0    # documented limit: 300/min
+    geckoterminal_base_url: str = "https://api.geckoterminal.com"
+    geckoterminal_requests_per_minute: float = 25.0   # documented free limit: 30/min
+    goplus_base_url: str = "https://api.gopluslabs.io"
+    goplus_requests_per_minute: float = 20.0          # conservative free-tier budget
     failure_threshold: int = 3      # consecutive failures before a provider cools down
     cooldown_seconds: float = 60.0  # how long an unhealthy provider is skipped
 
     def __post_init__(self) -> None:
-        if self.dexscreener_requests_per_minute <= 0:
-            raise ConfigurationError("dexscreener_requests_per_minute must be positive")
+        for name in ("dexscreener", "geckoterminal", "goplus"):
+            if getattr(self, f"{name}_requests_per_minute") <= 0:
+                raise ConfigurationError(f"{name}_requests_per_minute must be positive")
         if self.failure_threshold < 1:
             raise ConfigurationError("failure_threshold must be >= 1")
+
+
+@dataclass(frozen=True)
+class DiscoverySettings:
+    """Initial discovery filters and score anchors (Part 3, Part 15 Section 6, Part 27).
+
+    ``min_*`` values are hard gates for candidacy; ``target_*`` values are where
+    a component earns full marks in the discovery score.
+    """
+
+    min_liquidity_usd: float = 5000.0
+    target_liquidity_usd: float = 50000.0
+    min_volume_24h_usd: float = 1000.0
+    target_volume_24h_usd: float = 50000.0
+    max_age_hours: float = 24.0     # pools older than this are no longer "new"
+    target_txns_24h: int = 200      # transaction count earning full activity marks
+
+    def __post_init__(self) -> None:
+        for name, value in dataclasses.asdict(self).items():
+            if value <= 0:
+                raise ConfigurationError(f"discovery setting '{name}' must be positive, got {value}")
+        if self.target_liquidity_usd < self.min_liquidity_usd:
+            raise ConfigurationError("target_liquidity_usd must be >= min_liquidity_usd")
+        if self.target_volume_24h_usd < self.min_volume_24h_usd:
+            raise ConfigurationError("target_volume_24h_usd must be >= min_volume_24h_usd")
+
+
+@dataclass(frozen=True)
+class SecurityThresholds:
+    """Security-analysis limits (Part 4, Part 18, Part 33).
+
+    Values above the ``warn_*`` level deduct lightly (acceptable uncertainty);
+    values above the ``max_*`` level deduct heavily (serious warning).
+    """
+
+    max_tax_percent: float = 10.0
+    extreme_tax_percent: float = 25.0
+    min_liquidity_usd: float = 5000.0
+    healthy_liquidity_usd: float = 50000.0
+    min_lp_locked_percent: float = 50.0
+    good_lp_locked_percent: float = 80.0
+    warn_top_holder_percent: float = 10.0
+    max_top_holder_percent: float = 20.0
+    warn_top10_holder_percent: float = 50.0
+    max_top10_holder_percent: float = 70.0
+    min_holder_count: int = 50
+    warn_creator_percent: float = 5.0
+    max_creator_percent: float = 10.0
+
+    def __post_init__(self) -> None:
+        for name, value in dataclasses.asdict(self).items():
+            if value <= 0:
+                raise ConfigurationError(f"security threshold '{name}' must be positive, got {value}")
+        if self.extreme_tax_percent < self.max_tax_percent:
+            raise ConfigurationError("extreme_tax_percent must be >= max_tax_percent")
 
 
 @dataclass(frozen=True)
@@ -177,6 +237,8 @@ class Settings:
     intervals: ScanIntervals = field(default_factory=ScanIntervals)
     http: HttpSettings = field(default_factory=HttpSettings)
     providers: ProviderSettings = field(default_factory=ProviderSettings)
+    discovery: DiscoverySettings = field(default_factory=DiscoverySettings)
+    security: SecurityThresholds = field(default_factory=SecurityThresholds)
     log_level: str = "INFO"
     log_dir: str = "logs"
 
@@ -192,6 +254,8 @@ class Settings:
             intervals=_load_group(ScanIntervals, "INTERVALS", env),
             http=_load_group(HttpSettings, "HTTP", env),
             providers=_load_group(ProviderSettings, "PROVIDERS", env),
+            discovery=_load_group(DiscoverySettings, "DISCOVERY", env),
+            security=_load_group(SecurityThresholds, "SECURITY", env),
             log_level=env.get(f"{_ENV_PREFIX}_LOG_LEVEL", "INFO"),
             log_dir=env.get(f"{_ENV_PREFIX}_LOG_DIR", "logs"),
         )

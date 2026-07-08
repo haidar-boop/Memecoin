@@ -1,0 +1,388 @@
+"""Security analysis engine (Spec Parts 4, 18, and 33).
+
+Turns a normalized :class:`SecurityProfile` (plus optional market liquidity
+data) into a scored, explainable :class:`SecurityAssessment`.
+
+Risk philosophy (Part 33 Section 1 / Part 31 Consistency Lock):
+
+* **Acceptable uncertainty** (new project, unknown owner, few holders)
+  deducts lightly — it lowers confidence, it does not kill candidacy.
+* **Serious warnings** (mint authority, unlocked LP, heavy concentration)
+  deduct heavily and demand deeper review.
+* **Destructive risks** (honeypot, non-sellable token, confirmed scam)
+  force the overall score to 0 — security overrides opportunity
+  (Part 4 final rule, Part 10 Section 5 red-flag overrides).
+
+Unknown facts are *never* treated as safe: they are excluded from the
+sub-score, reported in ``unknown_fields``, and lower the confidence rating
+(Rule 8 — data before assumptions).
+"""
+
+from __future__ import annotations
+
+import dataclasses
+from dataclasses import dataclass, field
+
+from meme_intelligence.config.settings import SecuritySubWeights, SecurityThresholds
+from meme_intelligence.core.enums import ConfidenceLevel, RiskTier
+from meme_intelligence.core.errors import InsufficientDataError
+from meme_intelligence.core.logging_setup import get_logger
+from meme_intelligence.core.models import DexPair, SecurityProfile, TokenIdentity
+
+# Security band labels (Part 4, Section 11).
+_BANDS = (
+    (90.0, "Excellent"),
+    (75.0, "Good"),
+    (50.0, "Moderate Risk"),
+    (25.0, "High Risk"),
+    (0.0, "Extreme Risk"),
+)
+
+# Minimum ratio of known-to-total facts for MEDIUM confidence; below this
+# the assessment is flagged LOW (too much of the checklist was unknowable).
+_MEDIUM_CONFIDENCE_KNOWN_RATIO = 0.40
+
+
+@dataclass(frozen=True)
+class Finding:
+    """One security observation: what was found, how bad it is, what it cost."""
+
+    category: str
+    severity: RiskTier
+    message: str
+    deduction: float = 0.0
+
+
+@dataclass(frozen=True)
+class SecurityAssessment:
+    """Full security verdict for one token (report format per Part 4, Section 12)."""
+
+    token: TokenIdentity
+    source: str
+    sub_scores: dict[str, float | None]
+    overall_score: float
+    band: str
+    tier: RiskTier
+    confidence: ConfidenceLevel
+    findings: tuple[Finding, ...]
+    unknown_fields: tuple[str, ...]
+    coverage: float  # fraction of sub-score weight backed by data
+
+    @property
+    def destructive_findings(self) -> tuple[Finding, ...]:
+        return tuple(f for f in self.findings if f.severity is RiskTier.DESTRUCTIVE)
+
+    @property
+    def is_destructive(self) -> bool:
+        return bool(self.destructive_findings)
+
+    def summary(self) -> str:
+        """Human-readable one-screen summary (full report generator arrives later)."""
+        band = self.band if self.coverage >= 1.0 else f"{self.band} — partial data"
+        lines = [
+            f"Security assessment: {self.token.symbol or self.token.address} ({self.token.chain})",
+            f"  Overall: {self.overall_score:.0f}/100 [{band}]  "
+            f"tier={self.tier.value}  confidence={self.confidence.value}",
+        ]
+        if self.coverage < 1.0:
+            lines.append(
+                f"  NOTE: only {self.coverage:.0%} of security categories have data; "
+                "unverified areas are NOT safe — treat as an unconfirmed candidate"
+            )
+        for name, score in self.sub_scores.items():
+            rendered = f"{score:.0f}/100" if score is not None else "no data"
+            lines.append(f"  {name:>13}: {rendered}")
+        if self.findings:
+            lines.append("  Findings:")
+            for finding in self.findings:
+                lines.append(f"    [{finding.severity.value}] {finding.message}")
+        if self.unknown_fields:
+            lines.append(f"  Unknown: {', '.join(self.unknown_fields)}")
+        return "\n".join(lines)
+
+
+class _SubScore:
+    """Accumulates deductions for one security category."""
+
+    def __init__(self, category: str):
+        self.category = category
+        self.findings: list[Finding] = []
+        self.unknowns: list[str] = []
+        self.known_count = 0
+
+    def observe(self, field_name: str, value: object) -> bool:
+        """Record whether a fact is known; returns True when it can be evaluated."""
+        if value is None:
+            self.unknowns.append(field_name)
+            return False
+        self.known_count += 1
+        return True
+
+    def deduct(self, points: float, severity: RiskTier, message: str) -> None:
+        self.findings.append(Finding(self.category, severity, message, points))
+
+    def flag_destructive(self, message: str) -> None:
+        self.findings.append(Finding(self.category, RiskTier.DESTRUCTIVE, message))
+
+    def score(self) -> float | None:
+        if self.known_count == 0:
+            return None
+        total = 100.0 - sum(f.deduction for f in self.findings)
+        return max(0.0, min(100.0, total))
+
+
+class SecurityAnalyzer:
+    """Scores a token's security profile per the Part 4/18/33 investigation steps."""
+
+    def __init__(self, thresholds: SecurityThresholds, weights: SecuritySubWeights):
+        self._t = thresholds
+        self._w = weights
+        self._logger = get_logger("analyzers.security")
+
+    def assess(self, profile: SecurityProfile, market: DexPair | None = None) -> SecurityAssessment:
+        """Run the full security investigation.
+
+        ``market`` supplies USD liquidity depth (from the market collectors);
+        GoPlus reports LP lock structure but not pool depth (Rule 9 —
+        combining sources gives the full liquidity picture).
+        """
+        contract = self._assess_contract(profile)
+        liquidity = self._assess_liquidity(profile, market)
+        distribution = self._assess_distribution(profile)
+        developer = self._assess_developer(profile)
+        manipulation = self._assess_manipulation(profile)
+
+        parts = [contract, liquidity, distribution, developer, manipulation]
+        weight_map = dataclasses.asdict(self._w)
+
+        sub_scores: dict[str, float | None] = {}
+        findings: list[Finding] = []
+        unknowns: list[str] = []
+        weighted_sum = 0.0
+        available_weight = 0.0
+        for part in parts:
+            score = part.score()
+            sub_scores[part.category] = score
+            findings.extend(part.findings)
+            unknowns.extend(part.unknowns)
+            if score is not None:
+                weight = weight_map[part.category]
+                weighted_sum += score * weight
+                available_weight += weight
+
+        if available_weight == 0.0:
+            raise InsufficientDataError(
+                f"no security data available for {profile.token.address} on {profile.token.chain}"
+            )
+
+        overall = weighted_sum / available_weight
+        destructive = any(f.severity is RiskTier.DESTRUCTIVE for f in findings)
+        if destructive:
+            overall = 0.0  # security overrides opportunity (Part 4 final rule)
+
+        tier = self._tier(findings, overall)
+        confidence = self._confidence(unknowns, parts)
+
+        self._logger.info(
+            "security assessment %s/%s: score=%.0f band=%s tier=%s findings=%d unknown=%d",
+            profile.token.chain, profile.token.address, overall,
+            self._band(overall), tier.value, len(findings), len(unknowns),
+        )
+
+        return SecurityAssessment(
+            token=profile.token,
+            source=profile.source,
+            sub_scores=sub_scores,
+            overall_score=overall,
+            band=self._band(overall),
+            tier=tier,
+            confidence=confidence,
+            findings=tuple(findings),
+            unknown_fields=tuple(unknowns),
+            coverage=available_weight,
+        )
+
+    # ---- Step 1-2: contract permissions & ownership (Part 4 Sections 2-3) ----
+
+    def _assess_contract(self, p: SecurityProfile) -> _SubScore:
+        s = _SubScore("contract")
+
+        # Honeypot behavior invalidates everything else (Part 4 Section 3).
+        if s.observe("is_honeypot", p.is_honeypot) and p.is_honeypot:
+            s.flag_destructive("confirmed honeypot: buying allowed but selling blocked")
+        if s.observe("cannot_buy", p.cannot_buy) and p.cannot_buy:
+            s.flag_destructive("buying is blocked by the contract")
+        if s.observe("cannot_sell_all", p.cannot_sell_all) and p.cannot_sell_all:
+            s.flag_destructive("holders cannot sell their full balance")
+
+        if s.observe("is_open_source", p.is_open_source) and not p.is_open_source:
+            s.deduct(20, RiskTier.SERIOUS_WARNING, "contract source code is not verified")
+        if s.observe("is_proxy", p.is_proxy) and p.is_proxy:
+            s.deduct(15, RiskTier.SERIOUS_WARNING, "proxy contract: logic can be upgraded after launch")
+        if s.observe("is_mintable", p.is_mintable) and p.is_mintable:
+            s.deduct(25, RiskTier.SERIOUS_WARNING, "mint authority active: supply can be inflated")
+        if s.observe("is_freezable", p.is_freezable) and p.is_freezable:
+            s.deduct(25, RiskTier.SERIOUS_WARNING, "freeze authority active: wallets can be frozen")
+        if s.observe("balance_mutable", p.balance_mutable) and p.balance_mutable:
+            s.deduct(25, RiskTier.SERIOUS_WARNING, "authority can modify wallet balances")
+        if s.observe("ownership_renounced", p.ownership_renounced) and not p.ownership_renounced:
+            s.deduct(10, RiskTier.ACCEPTABLE_UNCERTAINTY, "ownership not renounced: owner retains control")
+        if s.observe("hidden_owner", p.hidden_owner) and p.hidden_owner:
+            s.deduct(25, RiskTier.SERIOUS_WARNING, "hidden owner detected")
+        if s.observe("can_take_back_ownership", p.can_take_back_ownership) and p.can_take_back_ownership:
+            s.deduct(20, RiskTier.SERIOUS_WARNING, "renounced ownership can be reclaimed")
+        if s.observe("has_blacklist", p.has_blacklist) and p.has_blacklist:
+            s.deduct(10, RiskTier.SERIOUS_WARNING, "blacklist function: specific wallets can be blocked")
+        if s.observe("trading_pausable", p.trading_pausable) and p.trading_pausable:
+            s.deduct(15, RiskTier.SERIOUS_WARNING, "trading can be paused by the contract")
+        if s.observe("selfdestruct", p.selfdestruct) and p.selfdestruct:
+            s.deduct(30, RiskTier.SERIOUS_WARNING, "contract contains self-destruct capability")
+
+        # Taxes (Part 4 Section 2 — tax functions).
+        worst_tax = max((t for t in (p.buy_tax_percent, p.sell_tax_percent) if t is not None), default=None)
+        if s.observe("tax_percent", worst_tax):
+            if worst_tax >= self._t.extreme_tax_percent:
+                s.deduct(30, RiskTier.SERIOUS_WARNING, f"extreme trading tax ({worst_tax:.0f}%)")
+            elif worst_tax > self._t.max_tax_percent:
+                s.deduct(15, RiskTier.ACCEPTABLE_UNCERTAINTY, f"elevated trading tax ({worst_tax:.0f}%)")
+        if s.observe("tax_modifiable", p.tax_modifiable) and p.tax_modifiable:
+            s.deduct(10, RiskTier.SERIOUS_WARNING, "trading tax can be changed by the owner")
+
+        return s
+
+    # ---- Step 3: liquidity safety (Part 4 Section 4) ----
+
+    def _assess_liquidity(self, p: SecurityProfile, market: DexPair | None) -> _SubScore:
+        s = _SubScore("liquidity")
+
+        liquidity_usd = market.liquidity_usd if market is not None else None
+        if s.observe("liquidity_usd", liquidity_usd):
+            if liquidity_usd < self._t.min_liquidity_usd:
+                s.deduct(40, RiskTier.SERIOUS_WARNING,
+                         f"liquidity ${liquidity_usd:,.0f} below minimum ${self._t.min_liquidity_usd:,.0f}")
+            elif liquidity_usd < self._t.healthy_liquidity_usd:
+                s.deduct(15, RiskTier.ACCEPTABLE_UNCERTAINTY,
+                         f"liquidity ${liquidity_usd:,.0f} below healthy level "
+                         f"${self._t.healthy_liquidity_usd:,.0f}")
+
+        if s.observe("lp_locked_percent", p.lp_locked_percent):
+            if p.lp_locked_percent < self._t.min_lp_locked_percent:
+                s.deduct(30, RiskTier.SERIOUS_WARNING,
+                         f"only {p.lp_locked_percent:.0f}% of LP locked/burned: liquidity can be pulled")
+            elif p.lp_locked_percent < self._t.good_lp_locked_percent:
+                s.deduct(10, RiskTier.ACCEPTABLE_UNCERTAINTY,
+                         f"{p.lp_locked_percent:.0f}% of LP locked/burned (below "
+                         f"{self._t.good_lp_locked_percent:.0f}% comfort level)")
+
+        return s
+
+    # ---- Step 4: holder distribution (Part 4 Section 5) ----
+
+    def _assess_distribution(self, p: SecurityProfile) -> _SubScore:
+        s = _SubScore("distribution")
+
+        if s.observe("top_holder_percent", p.top_holder_percent):
+            if p.top_holder_percent > self._t.max_top_holder_percent:
+                s.deduct(25, RiskTier.SERIOUS_WARNING,
+                         f"top holder controls {p.top_holder_percent:.1f}% of circulating supply")
+            elif p.top_holder_percent > self._t.warn_top_holder_percent:
+                s.deduct(10, RiskTier.ACCEPTABLE_UNCERTAINTY,
+                         f"top holder holds {p.top_holder_percent:.1f}% of circulating supply")
+
+        if s.observe("top10_holder_percent", p.top10_holder_percent):
+            if p.top10_holder_percent > self._t.max_top10_holder_percent:
+                s.deduct(30, RiskTier.SERIOUS_WARNING,
+                         f"top 10 holders control {p.top10_holder_percent:.1f}% of supply")
+            elif p.top10_holder_percent > self._t.warn_top10_holder_percent:
+                s.deduct(15, RiskTier.ACCEPTABLE_UNCERTAINTY,
+                         f"top 10 holders hold {p.top10_holder_percent:.1f}% of supply")
+
+        if s.observe("holder_count", p.holder_count) and p.holder_count < self._t.min_holder_count:
+            s.deduct(15, RiskTier.ACCEPTABLE_UNCERTAINTY,
+                     f"only {p.holder_count} holders (very early or very weak)")
+
+        return s
+
+    # ---- Step 6: developer risk (Part 4 Section 8) ----
+
+    def _assess_developer(self, p: SecurityProfile) -> _SubScore:
+        s = _SubScore("developer")
+
+        if s.observe("creator_percent", p.creator_percent):
+            if p.creator_percent > self._t.max_creator_percent:
+                s.deduct(25, RiskTier.SERIOUS_WARNING,
+                         f"creator wallet holds {p.creator_percent:.1f}% of supply")
+            elif p.creator_percent > self._t.warn_creator_percent:
+                s.deduct(10, RiskTier.ACCEPTABLE_UNCERTAINTY,
+                         f"creator wallet holds {p.creator_percent:.1f}% of supply")
+
+        if s.observe("owner_percent", p.owner_percent) and p.owner_percent > self._t.max_creator_percent:
+            s.deduct(15, RiskTier.SERIOUS_WARNING,
+                     f"owner wallet holds {p.owner_percent:.1f}% of supply")
+
+        if (
+            s.observe("honeypot_same_creator_count", p.honeypot_same_creator_count)
+            and p.honeypot_same_creator_count > 0
+        ):
+            s.deduct(40, RiskTier.SERIOUS_WARNING,
+                     f"creator previously deployed {p.honeypot_same_creator_count} honeypot token(s)")
+
+        return s
+
+    # ---- Manipulation indicators (Part 18 Sections 7-9) ----
+
+    def _assess_manipulation(self, p: SecurityProfile) -> _SubScore:
+        s = _SubScore("manipulation")
+
+        if s.observe("fake_token", p.fake_token) and p.fake_token:
+            s.flag_destructive("flagged as a counterfeit of another token")
+        if s.observe("is_airdrop_scam", p.is_airdrop_scam) and p.is_airdrop_scam:
+            s.flag_destructive("flagged as an airdrop scam")
+        if (
+            s.observe("personal_slippage_modifiable", p.personal_slippage_modifiable)
+            and p.personal_slippage_modifiable
+        ):
+            s.deduct(15, RiskTier.SERIOUS_WARNING,
+                     "per-wallet tax can be set: selective honeypot capability")
+        if s.observe("slippage_modifiable", p.slippage_modifiable) and p.slippage_modifiable:
+            s.deduct(10, RiskTier.SERIOUS_WARNING, "global slippage/tax is modifiable")
+        if s.observe("anti_whale_modifiable", p.anti_whale_modifiable) and p.anti_whale_modifiable:
+            s.deduct(10, RiskTier.ACCEPTABLE_UNCERTAINTY, "anti-whale limits can be modified")
+        if s.observe("trading_cooldown", p.trading_cooldown) and p.trading_cooldown:
+            s.deduct(10, RiskTier.ACCEPTABLE_UNCERTAINTY, "trading cooldown mechanism present")
+
+        return s
+
+    # ---- Verdict helpers ----
+
+    @staticmethod
+    def _tier(findings: list[Finding], overall: float) -> RiskTier:
+        if any(f.severity is RiskTier.DESTRUCTIVE for f in findings):
+            return RiskTier.DESTRUCTIVE
+        if overall < 50.0 or any(f.severity is RiskTier.SERIOUS_WARNING for f in findings):
+            return RiskTier.SERIOUS_WARNING
+        return RiskTier.ACCEPTABLE_UNCERTAINTY
+
+    @staticmethod
+    def _confidence(unknowns: list[str], parts: list[_SubScore]) -> ConfidenceLevel:
+        """Confidence from the ratio of known facts to all facts checked.
+
+        Capped at MEDIUM while security data comes from a single source —
+        HIGH requires a second confirming provider (Rule 9). The cap is
+        lifted when multi-source verification lands with the provider pool.
+        """
+        known = sum(part.known_count for part in parts)
+        total = known + len(unknowns)
+        if total == 0:
+            return ConfidenceLevel.LOW
+        known_ratio = known / total
+        if known_ratio >= _MEDIUM_CONFIDENCE_KNOWN_RATIO:
+            return ConfidenceLevel.MEDIUM
+        return ConfidenceLevel.LOW
+
+    @staticmethod
+    def _band(score: float) -> str:
+        for minimum, label in _BANDS:
+            if score >= minimum:
+                return label
+        return _BANDS[-1][1]

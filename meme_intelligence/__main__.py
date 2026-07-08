@@ -1,13 +1,17 @@
-"""Minimal CLI for exercising the data infrastructure end-to-end.
+"""CLI for exercising the intelligence pipeline end-to-end.
 
 Usage::
 
     python -m meme_intelligence search PEPE
     python -m meme_intelligence token <contract-address> [--chain solana]
+    python -m meme_intelligence discover --network solana [--limit 10]
+    python -m meme_intelligence security <contract-address> --chain <chain>
+    python -m meme_intelligence scan --network solana [--top 5]
 
-This is a verification harness for the collection layer; the full scanner
-controller (Spec Part 22, Section 2) replaces it as the primary entry point
-in a later phase.
+``scan`` runs the Layer 1 -> Layer 2 flow (Spec Part 2, Section 4): discover
+new pools, then security-screen the best candidates. The full continuous
+controller (Part 22, Section 2) replaces this CLI as the primary entry
+point in a later phase.
 """
 
 from __future__ import annotations
@@ -16,12 +20,50 @@ import argparse
 import asyncio
 import sys
 
-from meme_intelligence.collectors.market_data import DexScreenerClient
-from meme_intelligence.config.settings import get_settings
+from meme_intelligence.analyzers.security_analyzer import SecurityAnalyzer
+from meme_intelligence.collectors.market_data import DexScreenerClient, GeckoTerminalClient
+from meme_intelligence.collectors.security_data import GoPlusClient
+from meme_intelligence.config.settings import Settings, get_settings
 from meme_intelligence.core.cache import TTLCache
+from meme_intelligence.core.errors import CollectorError, InsufficientDataError
 from meme_intelligence.core.logging_setup import setup_logging
 from meme_intelligence.core.models import DexPair
 from meme_intelligence.core.rate_limiter import RateLimiter
+from meme_intelligence.scanners.discovery import DiscoveryEngine, scan_new_pools
+
+
+def _shared_collector_kwargs(settings: Settings) -> dict:
+    return {
+        "cache": TTLCache(settings.http.cache_max_entries, settings.http.cache_ttl_seconds),
+        "timeout_seconds": settings.http.timeout_seconds,
+        "retry_attempts": settings.http.retry_attempts,
+        "retry_base_delay": settings.http.retry_base_delay,
+        "retry_max_delay": settings.http.retry_max_delay,
+    }
+
+
+def build_dexscreener(settings: Settings) -> DexScreenerClient:
+    return DexScreenerClient(
+        base_url=settings.providers.dexscreener_base_url,
+        rate_limiter=RateLimiter.per_minute(settings.providers.dexscreener_requests_per_minute),
+        **_shared_collector_kwargs(settings),
+    )
+
+
+def build_geckoterminal(settings: Settings) -> GeckoTerminalClient:
+    return GeckoTerminalClient(
+        base_url=settings.providers.geckoterminal_base_url,
+        rate_limiter=RateLimiter.per_minute(settings.providers.geckoterminal_requests_per_minute),
+        **_shared_collector_kwargs(settings),
+    )
+
+
+def build_goplus(settings: Settings) -> GoPlusClient:
+    return GoPlusClient(
+        base_url=settings.providers.goplus_base_url,
+        rate_limiter=RateLimiter.per_minute(settings.providers.goplus_requests_per_minute),
+        **_shared_collector_kwargs(settings),
+    )
 
 
 def _format_pair(pair: DexPair) -> str:
@@ -30,45 +72,126 @@ def _format_pair(pair: DexPair) -> str:
 
     symbol = pair.base_token.symbol or "?"
     price = f"${pair.price_usd:.8f}" if pair.price_usd is not None else "unknown"
-    created = pair.pair_created_at.strftime("%Y-%m-%d") if pair.pair_created_at else "unknown"
+    created = pair.pair_created_at.strftime("%Y-%m-%d %H:%M") if pair.pair_created_at else "unknown"
     return (
-        f"{symbol:>10} | {pair.chain:<10} | price {price:>15} | "
+        f"{symbol:>10} | {pair.chain:<8} | price {price:>15} | "
         f"liq {money(pair.liquidity_usd):>12} | vol24h {money(pair.volume_24h):>12} | "
-        f"mcap {money(pair.market_cap):>12} | created {created}"
+        f"created {created}"
     )
+
+
+async def _cmd_search(args, settings) -> int:
+    async with build_dexscreener(settings) as client:
+        pairs = await client.search_pairs(args.query)
+    return _print_pairs(pairs, args.limit)
+
+
+async def _cmd_token(args, settings) -> int:
+    async with build_dexscreener(settings) as client:
+        pairs = await client.get_token_pairs(args.address, chain=args.chain)
+    return _print_pairs(pairs, args.limit)
+
+
+def _print_pairs(pairs: list[DexPair], limit: int) -> int:
+    if not pairs:
+        print("No pairs found.")
+        return 1
+    pairs.sort(key=lambda p: p.liquidity_usd or 0.0, reverse=True)
+    print(f"Found {len(pairs)} pair(s); top {min(len(pairs), limit)} by liquidity:\n")
+    for pair in pairs[:limit]:
+        print(_format_pair(pair))
+    return 0
+
+
+async def _cmd_discover(args, settings) -> int:
+    engine = DiscoveryEngine(settings.discovery)
+    async with build_geckoterminal(settings) as client:
+        candidates, rejected = await scan_new_pools(client, engine, args.network)
+
+    print(f"Discovery scan across {', '.join(args.network)}: "
+          f"{len(candidates)} candidate(s), {len(rejected)} rejected.\n")
+    for candidate in candidates[: args.limit]:
+        print(f"score {candidate.discovery_score:5.1f} | {_format_pair(candidate.pair)}")
+        print(f"{'':>12}  {'; '.join(candidate.reasons)}")
+    if args.show_rejected:
+        print("\nRejected:")
+        for r in rejected[: args.limit]:
+            symbol = r.pair.base_token.symbol or r.pair.base_token.address[:8]
+            print(f"  {symbol:>10} | {r.reason}")
+    return 0
+
+
+async def _cmd_security(args, settings) -> int:
+    analyzer = SecurityAnalyzer(settings.security, settings.security_weights)
+    async with build_goplus(settings) as goplus, build_dexscreener(settings) as dex:
+        profile = await goplus.get_token_security(args.chain, args.address)
+        if profile is None:
+            print(f"GoPlus has no security data for {args.address} on {args.chain}.")
+            return 1
+        market = None
+        try:
+            pairs = await dex.get_token_pairs(args.address)
+            if pairs:
+                market = max(pairs, key=lambda p: p.liquidity_usd or 0.0)
+        except CollectorError as exc:
+            print(f"(market data unavailable, assessing without liquidity depth: {exc})")
+
+    try:
+        assessment = analyzer.assess(profile, market)
+    except InsufficientDataError as exc:
+        print(f"Cannot assess: {exc}")
+        return 1
+    print(assessment.summary())
+    return 0 if not assessment.is_destructive else 2
+
+
+async def _cmd_scan(args, settings) -> int:
+    """Layer 1 discovery -> Layer 2 security screening (Part 2, Section 4)."""
+    engine = DiscoveryEngine(settings.discovery)
+    analyzer = SecurityAnalyzer(settings.security, settings.security_weights)
+
+    async with build_geckoterminal(settings) as gecko, build_goplus(settings) as goplus:
+        candidates, rejected = await scan_new_pools(gecko, engine, args.network)
+        print(f"Layer 1 discovery: {len(candidates)} candidate(s), {len(rejected)} rejected.\n")
+
+        survivors = 0
+        for candidate in candidates[: args.top]:
+            pair = candidate.pair
+            symbol = pair.base_token.symbol or pair.base_token.address[:8]
+            print(f"--- {symbol} ({pair.chain}) discovery={candidate.discovery_score:.1f} ---")
+            try:
+                profile = await goplus.get_token_security(pair.chain, pair.base_token.address)
+            except CollectorError as exc:
+                print(f"  security data unavailable: {exc}\n")
+                continue
+            if profile is None:
+                print("  security data unavailable: provider has not indexed this token yet\n")
+                continue
+            try:
+                assessment = analyzer.assess(profile, pair)
+            except InsufficientDataError as exc:
+                print(f"  cannot assess: {exc}\n")
+                continue
+            print("  " + assessment.summary().replace("\n", "\n  ") + "\n")
+            if not assessment.is_destructive:
+                survivors += 1
+
+    print(f"Layer 2 security screen: {survivors}/{min(len(candidates), args.top)} "
+          f"candidate(s) free of destructive risk.")
+    return 0
 
 
 async def _run(args: argparse.Namespace) -> int:
     settings = get_settings()
-    logger = setup_logging(settings.log_level, settings.log_dir)
-
-    client = DexScreenerClient(
-        base_url=settings.providers.dexscreener_base_url,
-        rate_limiter=RateLimiter.per_minute(settings.providers.dexscreener_requests_per_minute),
-        cache=TTLCache(settings.http.cache_max_entries, settings.http.cache_ttl_seconds),
-        timeout_seconds=settings.http.timeout_seconds,
-        retry_attempts=settings.http.retry_attempts,
-        retry_base_delay=settings.http.retry_base_delay,
-        retry_max_delay=settings.http.retry_max_delay,
-    )
-
-    async with client:
-        if args.command == "search":
-            logger.info("searching DexScreener pairs for %r", args.query)
-            pairs = await client.search_pairs(args.query)
-        else:
-            logger.info("fetching DexScreener pairs for token %s", args.address)
-            pairs = await client.get_token_pairs(args.address, chain=args.chain)
-
-    if not pairs:
-        print("No pairs found.")
-        return 1
-
-    pairs.sort(key=lambda p: p.liquidity_usd or 0.0, reverse=True)
-    print(f"Found {len(pairs)} pair(s); top {min(len(pairs), args.limit)} by liquidity:\n")
-    for pair in pairs[: args.limit]:
-        print(_format_pair(pair))
-    return 0
+    setup_logging(settings.log_level, settings.log_dir)
+    handler = {
+        "search": _cmd_search,
+        "token": _cmd_token,
+        "discover": _cmd_discover,
+        "security": _cmd_security,
+        "scan": _cmd_scan,
+    }[args.command]
+    return await handler(args, settings)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -84,7 +207,24 @@ def main(argv: list[str] | None = None) -> int:
     token.add_argument("--chain", default=None, help="filter to one chain id (e.g. solana)")
     token.add_argument("--limit", type=int, default=5)
 
+    discover = sub.add_parser("discover", help="scan for newly launched pools")
+    discover.add_argument("--network", action="append", default=None,
+                          help="network id (repeatable); default: solana")
+    discover.add_argument("--limit", type=int, default=10)
+    discover.add_argument("--show-rejected", action="store_true")
+
+    security = sub.add_parser("security", help="run a security assessment for one token")
+    security.add_argument("address")
+    security.add_argument("--chain", required=True, help="chain id (e.g. solana, ethereum, base)")
+
+    scan = sub.add_parser("scan", help="discover new pools, then security-screen the best")
+    scan.add_argument("--network", action="append", default=None,
+                      help="network id (repeatable); default: solana")
+    scan.add_argument("--top", type=int, default=5, help="candidates to security-screen")
+
     args = parser.parse_args(argv)
+    if getattr(args, "network", None) is None and args.command in ("discover", "scan"):
+        args.network = ["solana"]
     return asyncio.run(_run(args))
 
 
