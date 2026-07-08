@@ -28,7 +28,8 @@ human operator.
 | Part 13 — Automation & agent architecture | Continuous scanner (crash-tolerant loop, graceful shutdown, seen-set dedupe), automation rules (opportunity gates, emergency review, score-drop review), notification engine with cooldown | ✅ Built (console sink; Telegram/Discord in Part 29 phase) |
 | Part 14 — Trading intelligence & momentum | Momentum analyzer (price/volume/social/on-chain lenses, acceleration over level, fake-momentum detection), entry zones, preferred action; multi-window (1h/6h/24h) market data | ✅ Built |
 | Part 15 — Scanner configuration & anti-throttling | MarketDataService: provider failover pool (DexScreener ⇄ GeckoTerminal, shared interface + chain aliases), multi-source liquidity verification with alert downgrade on disagreement, momentum alert, multi-speed monitoring (watchlist recheck cadence) | ✅ Built |
-| Parts 16+ — AI execution rules, narrative engine, full alert intelligence, dashboard, backtesting | — | ⏳ Upcoming |
+| Part 16 — AI execution rules & operating instructions | Canonical analyst system prompt (for the LLM layer) + banned-language guard enforced on all generated reports; quick/compare/watchlist commands; alert "watch next" guidance; shared watchlist reviewer | ✅ Built |
+| Parts 17+ — Wallet intelligence, narrative engine, full alert intelligence, dashboard, backtesting | — | ⏳ Upcoming |
 
 ## Project structure
 
@@ -74,7 +75,9 @@ meme_intelligence/
 │   ├── daily_routine.py    # Part 11 daily research-desk orchestration
 │   └── controller.py       # Part 13 continuous 24/7 scanning loop
 ├── ai/
-│   └── report_generator.py # Part 12 canonical intelligence report
+│   ├── report_generator.py # Part 12 canonical intelligence report
+│   ├── comparison.py       # Part 16 multi-token comparison + ranking
+│   └── prompts.py          # analyst system prompt + banned-language guard
 tests/                      # pytest suite (unit tests, no network required)
 ```
 
@@ -89,6 +92,9 @@ python -m meme_intelligence security <address> --chain solana  # rug/security ch
 python -m meme_intelligence scan --network solana --top 5    # discovery -> security -> on-chain
 python -m meme_intelligence plan <address> --chain ethereum --regime neutral  # full pass + trade plan
 python -m meme_intelligence report <address> --chain ethereum  # canonical intelligence report
+python -m meme_intelligence quick <address> --chain solana    # Level 1 fast scan
+python -m meme_intelligence compare ethereum:0xPEPE solana:WIFADDR  # table + ranking
+python -m meme_intelligence watchlist --refresh               # show / re-score tracked tokens
 python -m meme_intelligence daily                             # full daily routine + watchlist
 python -m meme_intelligence monitor --cycles 5 --interval 30  # continuous scanner + alerts
 ```

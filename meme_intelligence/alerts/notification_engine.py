@@ -33,7 +33,9 @@ from meme_intelligence.workflow.pipeline import PipelineResult
 
 @dataclass(frozen=True)
 class AlertEvent:
-    """One alert, carrying its evidence (format per Part 29, Section 7)."""
+    """One alert, carrying its evidence (interpretation format per Part 16
+    Section 9 / Part 29 Section 7: what happened, why it matters, evidence,
+    and what to monitor next)."""
 
     priority: AlertPriority
     alert_type: str
@@ -41,6 +43,7 @@ class AlertEvent:
     title: str
     reasons: tuple[str, ...]
     scores: dict[str, float | None] = field(default_factory=dict)
+    monitoring: tuple[str, ...] = ()  # recommended next checks
 
     def render(self) -> str:
         symbol = self.token.symbol or self.token.address[:8]
@@ -53,6 +56,8 @@ class AlertEvent:
                 f"{k}={v:.0f}" if v is not None else f"{k}=?" for k, v in self.scores.items()
             )
             lines.append(f"  scores: {rendered}")
+        for item in self.monitoring:
+            lines.append(f"  watch next: {item}")
         return "\n".join(lines)
 
 
@@ -94,6 +99,8 @@ class AutomationRules:
                 title="Destructive risk detected — do not enter; review any exposure now",
                 reasons=tuple(critical),
                 scores={"security": result.security.overall_score},
+                monitoring=("verify LP status and contract permissions immediately",
+                            "if holding, decide exit before anything else"),
             ))
         elif high:
             events.append(AlertEvent(
@@ -103,6 +110,7 @@ class AutomationRules:
                 title="Serious risk indicators appeared",
                 reasons=tuple(high[:4]),
                 scores={"security": result.security.overall_score},
+                monitoring=("watch liquidity and top-holder movements closely",),
             ))
         return events
 
@@ -134,6 +142,7 @@ class AutomationRules:
                 title=f"All review gates passed (score {result.master.final_score:.0f})",
                 reasons=(f"classification: {result.master.classification.value}",),
                 scores=scores,
+                monitoring=("track holder growth and volume quality for continuation",),
             )
         return AlertEvent(
             priority=AlertPriority.MEDIUM,
@@ -144,6 +153,8 @@ class AutomationRules:
             reasons=(f"classification: {result.master.classification.value}",
                      "unverified categories are NOT confirmation (Part 31 Section 6)"),
             scores=scores,
+            monitoring=tuple(f"verify the {name} gate before sizing any position"
+                             for name in unverified),
         )
 
     # IF momentum accelerates through the gate in a sane entry zone THEN
@@ -171,6 +182,7 @@ class AutomationRules:
                      "confirm before treating as validated"),
             scores={"momentum": momentum.overall_score,
                     "master": result.master.final_score},
+            monitoring=("watch for volume continuation vs one-hour spike reversal",),
         )
 
     # IF the score drops sharply vs the last snapshot THEN review (Part 13 Section 7).
@@ -190,6 +202,7 @@ class AutomationRules:
             reasons=tuple(f.message for f in result.security.findings[:3]) or
                     ("re-assessment weakened; review the thesis",),
             scores={"master": result.master.final_score},
+            monitoring=("re-read the original thesis; archive if it no longer holds",),
         )
 
 

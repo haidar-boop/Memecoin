@@ -34,19 +34,16 @@ from meme_intelligence.analyzers.scoring_engine import MasterAssessment
 from meme_intelligence.collectors.market_data import MajorsSnapshot
 from meme_intelligence.config.settings import Settings
 from meme_intelligence.core.enums import Classification, MarketRegime, RiskTier, WatchlistTier
-from meme_intelligence.core.errors import AllProvidersFailedError, CollectorError
+from meme_intelligence.core.errors import CollectorError
 from meme_intelligence.core.logging_setup import get_logger
 from meme_intelligence.core.models import DexPair
 from meme_intelligence.database.storage import Storage, WatchlistChange
 from meme_intelligence.scanners.discovery import DiscoveryEngine, scan_new_pools
-from meme_intelligence.workflow.pipeline import ResearchPipeline
-
-_TIER_FOR_CLASSIFICATION = {
-    Classification.ELITE_OPPORTUNITY: WatchlistTier.TIER_1_HIGH_PRIORITY,
-    Classification.STRONG_CANDIDATE: WatchlistTier.TIER_1_HIGH_PRIORITY,
-    Classification.WATCHLIST: WatchlistTier.TIER_2_DEVELOPING,
-    Classification.SPECULATIVE: WatchlistTier.TIER_3_RESEARCH_ONLY,
-}
+from meme_intelligence.workflow.pipeline import PipelineResult, ResearchPipeline
+from meme_intelligence.workflow.watchlist_review import (
+    TIER_FOR_CLASSIFICATION,
+    review_entries,
+)
 
 
 @dataclass(frozen=True)
@@ -263,7 +260,7 @@ class DailyRoutine:
     def _intake(self, pair: DexPair, master: MasterAssessment,
                 discovery_score: float | None, report: DailyReport) -> None:
         symbol = pair.base_token.symbol or pair.base_token.address[:8]
-        tier = _TIER_FOR_CLASSIFICATION.get(master.classification)
+        tier = TIER_FOR_CLASSIFICATION.get(master.classification)
         if tier is None:  # AVOID: never added; journal the rejection for learning
             self._storage.add_journal(
                 pair.base_token, "decision",
@@ -291,36 +288,22 @@ class DailyRoutine:
     async def _review_watchlist(self, report: DailyReport) -> None:
         if self._dexscreener is None:
             return
-        entries = self._storage.get_watchlist()
-        for entry in entries[: self._settings.workflow.watchlist_review_limit]:
-            # Skip tokens just added this run — nothing new to learn yet.
-            if any(c.token.address == entry.token.address for c in report.watchlist_changes):
-                continue
-            try:
-                pairs = await self._dexscreener.get_token_pairs(
-                    entry.token.address, chain=entry.token.chain,
-                )
-            except (CollectorError, AllProvidersFailedError):
-                continue
-            if not pairs:
-                change = self._storage.archive(entry.token, "no active trading pairs remain")
-                report.watchlist_changes.append(change)
-                continue
+        # Skip tokens just added this run — nothing new to learn yet.
+        skip = {c.token.address.lower() for c in report.watchlist_changes}
 
-            pair = max(pairs, key=lambda p: p.liquidity_usd or 0.0)
-            master = await self._analyze(pair, report)
-            if master is None:
-                continue
-            tier = _TIER_FOR_CLASSIFICATION.get(master.classification)
-            if tier is None:
-                change = self._storage.archive(
-                    entry.token,
-                    f"re-assessment fell to Avoid (score {master.final_score:.0f})",
-                )
-            else:
-                change = self._storage.update_watchlist(
-                    entry.token, tier,
-                    score=master.final_score, classification=master.classification,
-                )
-            if change.change != "updated":  # only surface meaningful movements
-                report.watchlist_changes.append(change)
+        async def collect_risks(result: PipelineResult) -> None:
+            for finding in result.security.findings:
+                if finding.severity in (RiskTier.DESTRUCTIVE, RiskTier.SERIOUS_WARNING):
+                    symbol = result.pair.base_token.symbol or result.pair.base_token.address[:8]
+                    report.biggest_risks.append(f"{symbol}: {finding.message}")
+
+        changes = await review_entries(
+            self._storage, self._dexscreener, self._pipeline,
+            regime=report.environment.regime,
+            limit=self._settings.workflow.watchlist_review_limit,
+            skip=skip,
+            snapshot_source="daily_routine",
+            on_result=collect_risks,
+        )
+        # Only surface meaningful movements; silent refreshes stay silent.
+        report.watchlist_changes.extend(c for c in changes if c.change != "updated")

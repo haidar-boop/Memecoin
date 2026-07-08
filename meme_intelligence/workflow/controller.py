@@ -32,23 +32,19 @@ from meme_intelligence.alerts.notification_engine import (
     NotificationEngine,
 )
 from meme_intelligence.config.settings import Settings
-from meme_intelligence.core.enums import AlertPriority, Classification, MarketRegime, WatchlistTier
+from meme_intelligence.core.enums import AlertPriority, MarketRegime, WatchlistTier
 from meme_intelligence.core.errors import MemeIntelError
 from meme_intelligence.core.logging_setup import get_logger
 from meme_intelligence.database.storage import Storage
 from meme_intelligence.scanners.discovery import DiscoveryEngine, scan_new_pools
 from meme_intelligence.workflow.pipeline import PipelineResult, ResearchPipeline
+from meme_intelligence.workflow.watchlist_review import (
+    TIER_FOR_CLASSIFICATION as _TIER_FOR_CLASSIFICATION,
+)
 
 # Alert types whose evidence rests on market data and therefore get
 # multi-source verification before dispatch (Part 15, Section 10).
 _VERIFIABLE_ALERT_TYPES = {"high_priority_opportunity", "early_opportunity", "momentum"}
-
-_TIER_FOR_CLASSIFICATION = {
-    Classification.ELITE_OPPORTUNITY: WatchlistTier.TIER_1_HIGH_PRIORITY,
-    Classification.STRONG_CANDIDATE: WatchlistTier.TIER_1_HIGH_PRIORITY,
-    Classification.WATCHLIST: WatchlistTier.TIER_2_DEVELOPING,
-    Classification.SPECULATIVE: WatchlistTier.TIER_3_RESEARCH_ONLY,
-}
 
 _ERROR_BACKOFF_START = 5.0
 _ERROR_BACKOFF_MAX = 300.0

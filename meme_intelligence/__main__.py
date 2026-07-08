@@ -20,6 +20,7 @@ import argparse
 import asyncio
 import sys
 
+from meme_intelligence.ai.comparison import render_comparison
 from meme_intelligence.ai.report_generator import build_report
 from meme_intelligence.alerts.notification_engine import ConsoleSink, NotificationEngine
 from meme_intelligence.analyzers.onchain_analyzer import OnChainAnalyzer, derive_onchain_profile
@@ -32,6 +33,7 @@ from meme_intelligence.trading.trade_planner import TradePlanner
 from meme_intelligence.workflow.controller import ContinuousScanner
 from meme_intelligence.workflow.daily_routine import DailyRoutine
 from meme_intelligence.workflow.pipeline import ResearchPipeline
+from meme_intelligence.workflow.watchlist_review import review_entries
 from meme_intelligence.collectors.market_data import DexScreenerClient, GeckoTerminalClient
 from meme_intelligence.collectors.security_data import GoPlusClient
 from meme_intelligence.config.settings import Settings, get_settings
@@ -313,6 +315,124 @@ async def _cmd_daily(args, settings) -> int:
     return 0
 
 
+async def _cmd_quick(args, settings) -> int:
+    """Level 1 fast scan (Part 16, Section 6): compact card, red flags never skipped."""
+    gathered, error = await _gather_assessments(args, settings)
+    if error:
+        print(error)
+        return 1
+    result, plan = gathered
+    pair, security, master = result.pair, result.security, result.master
+
+    def money(value):
+        return f"${value:,.0f}" if value is not None else "unknown"
+
+    symbol = pair.base_token.symbol or pair.base_token.address[:8]
+    print(f"QUICK SCAN — {symbol} ({pair.chain})  [Level 1: fast filter, not confirmation]")
+    print(f"  mcap {money(pair.market_cap)} | liq {money(pair.liquidity_usd)} | "
+          f"vol24h {money(pair.volume_24h)}")
+    print(f"  Security: {security.overall_score:.0f}/100 [{security.band}] "
+          f"tier={security.tier.value}")
+
+    # Red flags are NEVER skipped for speed (Part 16, Section 6).
+    if security.destructive_findings:
+        for finding in security.destructive_findings:
+            print(f"  RED FLAG: {finding.message}")
+    else:
+        print("  Red flags: none confirmed "
+              f"({len(security.unknown_fields)} security fact(s) still unverified)")
+
+    top_risks = [f.message for f in security.findings[:3]]
+    if result.risk:
+        top_risks.extend(r for r in result.risk.main_risks[:2] if r not in top_risks)
+    for risk in top_risks[:3]:
+        print(f"  Risk: {risk}")
+
+    if result.momentum:
+        print(f"  Momentum: {result.momentum.overall_score:.0f}/100 "
+              f"zone={result.momentum.entry_zone.value} "
+              f"action={result.momentum.preferred_action.value}")
+    print(f"  Opportunity score: {master.final_score:.0f}/100 "
+          f"(evidence coverage {master.coverage:.0%})")
+    print(f"  Recommendation: {master.classification.value.upper()} — "
+          f"run a full report before acting; quick scan is a filter, not a decision.")
+    return 0 if not security.is_destructive else 2
+
+
+async def _cmd_compare(args, settings) -> int:
+    """Compare command (Part 16, Section 7): table + explicit ranking."""
+    targets = []
+    for raw in args.addresses:
+        if ":" in raw:  # per-token chain override: "ethereum:0xabc..."
+            chain, address = raw.split(":", 1)
+            targets.append((address, chain))
+        else:
+            targets.append((raw, args.chain))
+
+    results = []
+    regime = MarketRegime(args.regime)
+    async with (
+        build_dexscreener(settings) as dex,
+        build_geckoterminal(settings) as gecko,
+        build_goplus(settings) as goplus,
+    ):
+        service = build_market_service(settings, dex, gecko)
+        pipeline = ResearchPipeline(settings, goplus)
+        for address, chain in targets:
+            pair = await service.get_best_pair(address, chain=chain)
+            if pair is None:
+                print(f"skipping {address}: no trading pairs found")
+                continue
+            result = await pipeline.analyze_pair(pair, regime=regime)
+            if result is None:
+                print(f"skipping {address}: security data unavailable")
+                continue
+            results.append(result)
+
+    if len(results) < 2:
+        print("Need at least two analyzable tokens to compare.")
+        return 1
+    print(render_comparison(results))
+    return 0
+
+
+async def _cmd_watchlist(args, settings) -> int:
+    """Watchlist command (Part 16, Section 8): show tracked tokens; --refresh re-scores."""
+    with Storage(settings.database.path) as storage:
+        if args.refresh:
+            async with (
+                build_dexscreener(settings) as dex,
+                build_geckoterminal(settings) as gecko,
+                build_goplus(settings) as goplus,
+            ):
+                service = build_market_service(settings, dex, gecko)
+                pipeline = ResearchPipeline(settings, goplus)
+                changes = await review_entries(
+                    storage, service, pipeline,
+                    limit=settings.workflow.watchlist_review_limit,
+                )
+            print(f"Refreshed: {len(changes)} change(s)")
+            for change in changes:
+                symbol = change.token.symbol or change.token.address[:8]
+                print(f"  - {symbol}: {change.change} ({change.detail})")
+            print()
+
+        entries = storage.get_watchlist(include_archived=args.include_archived)
+        if not entries:
+            print("Watchlist is empty. Run `daily` or `monitor` to populate it.")
+            return 0
+        print(f"WATCHLIST ({len(entries)} tracked)")
+        for entry in entries:
+            symbol = entry.token.symbol or entry.token.address[:8]
+            score = f"{entry.last_score:.0f}" if entry.last_score is not None else "?"
+            print(f"  [{entry.tier.value:>22}] {symbol:>10} ({entry.token.chain}) "
+                  f"score={score} class={entry.last_classification or '?'} "
+                  f"updated={entry.updated_at.strftime('%m-%d %H:%M')}")
+            if entry.thesis:
+                print(f"{'':>26}thesis: {entry.thesis}")
+    return 0
+
+
 async def _cmd_monitor(args, settings) -> int:
     """Run the continuous scanning loop (Part 13). Ctrl-C stops gracefully."""
     import dataclasses as _dc
@@ -360,6 +480,9 @@ async def _run(args: argparse.Namespace) -> int:
         "scan": _cmd_scan,
         "plan": _cmd_plan,
         "report": _cmd_report,
+        "quick": _cmd_quick,
+        "compare": _cmd_compare,
+        "watchlist": _cmd_watchlist,
         "daily": _cmd_daily,
         "monitor": _cmd_monitor,
     }[args.command]
@@ -406,6 +529,23 @@ def main(argv: list[str] | None = None) -> int:
     report.add_argument("--chain", default=None, help="filter to one chain id (e.g. solana)")
     report.add_argument("--regime", default="unknown",
                         choices=["bull", "neutral", "bear", "unknown"])
+
+    quick = sub.add_parser("quick", help="Level 1 fast scan: compact card (Part 16)")
+    quick.add_argument("address")
+    quick.add_argument("--chain", default=None)
+    quick.add_argument("--regime", default="unknown",
+                       choices=["bull", "neutral", "bear", "unknown"])
+
+    compare = sub.add_parser("compare", help="compare tokens: table + ranking (Part 16)")
+    compare.add_argument("addresses", nargs="+",
+                         help="two or more addresses; prefix with chain: for per-token chains")
+    compare.add_argument("--chain", default=None, help="default chain for unprefixed addresses")
+    compare.add_argument("--regime", default="unknown",
+                         choices=["bull", "neutral", "bear", "unknown"])
+
+    watchlist = sub.add_parser("watchlist", help="show tracked tokens; --refresh re-scores")
+    watchlist.add_argument("--refresh", action="store_true")
+    watchlist.add_argument("--include-archived", action="store_true")
 
     daily = sub.add_parser("daily", help="run the full daily research routine (Part 11)")
     daily.add_argument("--network", action="append", default=None,
