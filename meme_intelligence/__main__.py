@@ -20,6 +20,7 @@ import argparse
 import asyncio
 import sys
 
+from meme_intelligence.analyzers.onchain_analyzer import OnChainAnalyzer, derive_onchain_profile
 from meme_intelligence.analyzers.security_analyzer import SecurityAnalyzer
 from meme_intelligence.collectors.market_data import DexScreenerClient, GeckoTerminalClient
 from meme_intelligence.collectors.security_data import GoPlusClient
@@ -146,9 +147,10 @@ async def _cmd_security(args, settings) -> int:
 
 
 async def _cmd_scan(args, settings) -> int:
-    """Layer 1 discovery -> Layer 2 security screening (Part 2, Section 4)."""
+    """Layer 1 discovery -> Layer 2 security -> Layer 3 on-chain intelligence."""
     engine = DiscoveryEngine(settings.discovery)
-    analyzer = SecurityAnalyzer(settings.security, settings.security_weights)
+    security_analyzer = SecurityAnalyzer(settings.security, settings.security_weights)
+    onchain_analyzer = OnChainAnalyzer(settings.onchain, settings.onchain_weights)
 
     async with build_geckoterminal(settings) as gecko, build_goplus(settings) as goplus:
         candidates, rejected = await scan_new_pools(gecko, engine, args.network)
@@ -159,21 +161,32 @@ async def _cmd_scan(args, settings) -> int:
             pair = candidate.pair
             symbol = pair.base_token.symbol or pair.base_token.address[:8]
             print(f"--- {symbol} ({pair.chain}) discovery={candidate.discovery_score:.1f} ---")
+
+            security_profile = None
             try:
-                profile = await goplus.get_token_security(pair.chain, pair.base_token.address)
+                security_profile = await goplus.get_token_security(pair.chain, pair.base_token.address)
             except CollectorError as exc:
-                print(f"  security data unavailable: {exc}\n")
-                continue
-            if profile is None:
-                print("  security data unavailable: provider has not indexed this token yet\n")
+                print(f"  security data unavailable: {exc}")
+
+            if security_profile is None:
+                print("  security: no data (provider has not indexed this token yet)\n")
                 continue
             try:
-                assessment = analyzer.assess(profile, pair)
+                security = security_analyzer.assess(security_profile, pair)
             except InsufficientDataError as exc:
-                print(f"  cannot assess: {exc}\n")
+                print(f"  security: cannot assess ({exc})\n")
                 continue
-            print("  " + assessment.summary().replace("\n", "\n  ") + "\n")
-            if not assessment.is_destructive:
+            print("  " + security.summary().replace("\n", "\n  "))
+
+            # Layer 3 (partial): on-chain intelligence derived from data
+            # already in hand — no additional API calls (Rule 10).
+            try:
+                onchain = onchain_analyzer.assess(derive_onchain_profile(pair, security_profile))
+                print("  " + onchain.summary().replace("\n", "\n  ") + "\n")
+            except InsufficientDataError:
+                print("  on-chain: insufficient data\n")
+
+            if not security.is_destructive:
                 survivors += 1
 
     print(f"Layer 2 security screen: {survivors}/{min(len(candidates), args.top)} "

@@ -21,8 +21,9 @@ sub-score, reported in ``unknown_fields``, and lower the confidence rating
 from __future__ import annotations
 
 import dataclasses
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
+from meme_intelligence.analyzers.common import Finding, SubScore, confidence_from_facts
 from meme_intelligence.config.settings import SecuritySubWeights, SecurityThresholds
 from meme_intelligence.core.enums import ConfidenceLevel, RiskTier
 from meme_intelligence.core.errors import InsufficientDataError
@@ -37,20 +38,6 @@ _BANDS = (
     (25.0, "High Risk"),
     (0.0, "Extreme Risk"),
 )
-
-# Minimum ratio of known-to-total facts for MEDIUM confidence; below this
-# the assessment is flagged LOW (too much of the checklist was unknowable).
-_MEDIUM_CONFIDENCE_KNOWN_RATIO = 0.40
-
-
-@dataclass(frozen=True)
-class Finding:
-    """One security observation: what was found, how bad it is, what it cost."""
-
-    category: str
-    severity: RiskTier
-    message: str
-    deduction: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -99,36 +86,6 @@ class SecurityAssessment:
         if self.unknown_fields:
             lines.append(f"  Unknown: {', '.join(self.unknown_fields)}")
         return "\n".join(lines)
-
-
-class _SubScore:
-    """Accumulates deductions for one security category."""
-
-    def __init__(self, category: str):
-        self.category = category
-        self.findings: list[Finding] = []
-        self.unknowns: list[str] = []
-        self.known_count = 0
-
-    def observe(self, field_name: str, value: object) -> bool:
-        """Record whether a fact is known; returns True when it can be evaluated."""
-        if value is None:
-            self.unknowns.append(field_name)
-            return False
-        self.known_count += 1
-        return True
-
-    def deduct(self, points: float, severity: RiskTier, message: str) -> None:
-        self.findings.append(Finding(self.category, severity, message, points))
-
-    def flag_destructive(self, message: str) -> None:
-        self.findings.append(Finding(self.category, RiskTier.DESTRUCTIVE, message))
-
-    def score(self) -> float | None:
-        if self.known_count == 0:
-            return None
-        total = 100.0 - sum(f.deduction for f in self.findings)
-        return max(0.0, min(100.0, total))
 
 
 class SecurityAnalyzer:
@@ -204,8 +161,8 @@ class SecurityAnalyzer:
 
     # ---- Step 1-2: contract permissions & ownership (Part 4 Sections 2-3) ----
 
-    def _assess_contract(self, p: SecurityProfile) -> _SubScore:
-        s = _SubScore("contract")
+    def _assess_contract(self, p: SecurityProfile) -> SubScore:
+        s = SubScore("contract")
 
         # Honeypot behavior invalidates everything else (Part 4 Section 3).
         if s.observe("is_honeypot", p.is_honeypot) and p.is_honeypot:
@@ -252,8 +209,8 @@ class SecurityAnalyzer:
 
     # ---- Step 3: liquidity safety (Part 4 Section 4) ----
 
-    def _assess_liquidity(self, p: SecurityProfile, market: DexPair | None) -> _SubScore:
-        s = _SubScore("liquidity")
+    def _assess_liquidity(self, p: SecurityProfile, market: DexPair | None) -> SubScore:
+        s = SubScore("liquidity")
 
         liquidity_usd = market.liquidity_usd if market is not None else None
         if s.observe("liquidity_usd", liquidity_usd):
@@ -278,8 +235,8 @@ class SecurityAnalyzer:
 
     # ---- Step 4: holder distribution (Part 4 Section 5) ----
 
-    def _assess_distribution(self, p: SecurityProfile) -> _SubScore:
-        s = _SubScore("distribution")
+    def _assess_distribution(self, p: SecurityProfile) -> SubScore:
+        s = SubScore("distribution")
 
         if s.observe("top_holder_percent", p.top_holder_percent):
             if p.top_holder_percent > self._t.max_top_holder_percent:
@@ -305,8 +262,8 @@ class SecurityAnalyzer:
 
     # ---- Step 6: developer risk (Part 4 Section 8) ----
 
-    def _assess_developer(self, p: SecurityProfile) -> _SubScore:
-        s = _SubScore("developer")
+    def _assess_developer(self, p: SecurityProfile) -> SubScore:
+        s = SubScore("developer")
 
         if s.observe("creator_percent", p.creator_percent):
             if p.creator_percent > self._t.max_creator_percent:
@@ -331,8 +288,8 @@ class SecurityAnalyzer:
 
     # ---- Manipulation indicators (Part 18 Sections 7-9) ----
 
-    def _assess_manipulation(self, p: SecurityProfile) -> _SubScore:
-        s = _SubScore("manipulation")
+    def _assess_manipulation(self, p: SecurityProfile) -> SubScore:
+        s = SubScore("manipulation")
 
         if s.observe("fake_token", p.fake_token) and p.fake_token:
             s.flag_destructive("flagged as a counterfeit of another token")
@@ -364,21 +321,9 @@ class SecurityAnalyzer:
         return RiskTier.ACCEPTABLE_UNCERTAINTY
 
     @staticmethod
-    def _confidence(unknowns: list[str], parts: list[_SubScore]) -> ConfidenceLevel:
-        """Confidence from the ratio of known facts to all facts checked.
-
-        Capped at MEDIUM while security data comes from a single source —
-        HIGH requires a second confirming provider (Rule 9). The cap is
-        lifted when multi-source verification lands with the provider pool.
-        """
+    def _confidence(unknowns: list[str], parts: list[SubScore]) -> ConfidenceLevel:
         known = sum(part.known_count for part in parts)
-        total = known + len(unknowns)
-        if total == 0:
-            return ConfidenceLevel.LOW
-        known_ratio = known / total
-        if known_ratio >= _MEDIUM_CONFIDENCE_KNOWN_RATIO:
-            return ConfidenceLevel.MEDIUM
-        return ConfidenceLevel.LOW
+        return confidence_from_facts(known, len(unknowns))
 
     @staticmethod
     def _band(score: float) -> str:

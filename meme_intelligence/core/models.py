@@ -47,6 +47,8 @@ class DexPair:
     price_change_24h: float | None = None
     buys_24h: int | None = None
     sells_24h: int | None = None
+    buyers_24h: int | None = None   # unique buying wallets (GeckoTerminal only)
+    sellers_24h: int | None = None  # unique selling wallets (GeckoTerminal only)
     pair_created_at: datetime | None = None
     url: str | None = None
 
@@ -110,6 +112,91 @@ class SecurityProfile:
 
     # Liquidity safety (Part 4 Section 4; USD depth comes from market data)
     lp_locked_percent: float | None = None
+
+
+@dataclass(frozen=True)
+class CommunityProfile:
+    """Normalized community metrics for one token (Spec Part 5).
+
+    Populated by the social collectors (X/Twitter, Telegram, Discord,
+    Reddit) once their API integrations land; until then analyzers receive
+    partially-filled profiles and report reduced coverage. Percentages are
+    0-100; rates are per the unit named in the field.
+    """
+
+    token: TokenIdentity
+    source: str
+
+    # X/Twitter (Part 5 Section 6)
+    twitter_followers: int | None = None
+    twitter_engagement_rate_percent: float | None = None  # interactions / followers
+    twitter_growth_rate_7d_percent: float | None = None
+    bot_follower_percent: float | None = None
+
+    # Telegram (Part 5 Section 7)
+    telegram_members: int | None = None
+    telegram_active_members: int | None = None
+    telegram_admin_only_talk: bool | None = None
+    duplicate_message_percent: float | None = None
+
+    # Discord (Part 5 Section 8)
+    discord_members: int | None = None
+    discord_active_percent: float | None = None
+
+    # Reddit (Part 5 Section 9)
+    reddit_subscribers: int | None = None
+    reddit_posts_per_day: float | None = None
+
+    # Loyalty & creativity signals (Part 5 Sections 10-11)
+    member_retention_30d_percent: float | None = None
+    positive_sentiment_percent: float | None = None
+    user_content_per_day: float | None = None
+
+    # Developer relationship (Part 5 Section 5)
+    dev_updates_per_week: float | None = None
+    dev_responds_to_community: bool | None = None
+    dev_appears_only_on_pumps: bool | None = None
+
+
+@dataclass(frozen=True)
+class OnChainProfile:
+    """Normalized on-chain behavior metrics for one token (Spec Part 6).
+
+    Today this is partially derivable from market + security collectors
+    (holders, concentration, trade counts, unique traders). Smart-money,
+    whale-movement, and exchange-flow fields are populated once the wallet
+    intelligence collectors (Helius/Birdeye, Part 17) land — until then
+    they stay ``None`` and their sub-scores honestly report "no data".
+    """
+
+    token: TokenIdentity
+    source: str
+
+    # Holder structure & growth (Part 6 Sections 2-3)
+    holder_count: int | None = None
+    holder_count_24h_ago: int | None = None
+    top_holder_percent: float | None = None
+    top10_holder_percent: float | None = None
+
+    # Developer wallet (Part 6 Section 5)
+    creator_percent: float | None = None
+    owner_percent: float | None = None
+
+    # Trading behavior (Part 6 Sections 11-12)
+    buys_24h: int | None = None
+    sells_24h: int | None = None
+    unique_buyers_24h: int | None = None
+    unique_sellers_24h: int | None = None
+    volume_24h_usd: float | None = None
+    liquidity_usd: float | None = None
+    price_change_24h_percent: float | None = None
+
+    # Wallet intelligence (Part 6 Sections 6-10; needs Part 17 collectors)
+    smart_wallet_count: int | None = None
+    smart_wallet_net_flow_usd: float | None = None
+    whale_net_flow_usd: float | None = None
+    exchange_inflow_usd: float | None = None
+    exchange_outflow_usd: float | None = None
 
 
 @dataclass(frozen=True)

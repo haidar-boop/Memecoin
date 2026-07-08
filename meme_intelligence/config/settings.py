@@ -81,6 +81,50 @@ class SecuritySubWeights:
 
 
 @dataclass(frozen=True)
+class CommunitySubWeights:
+    """Sub-weights inside the community score (Part 5, Section 11 — 5 x 20)."""
+
+    engagement: float = 0.20
+    growth: float = 0.20
+    loyalty: float = 0.20
+    creativity: float = 0.20
+    dev_relationship: float = 0.20
+
+    def __post_init__(self) -> None:
+        _check_weight_sum("community", dataclasses.asdict(self))
+
+
+@dataclass(frozen=True)
+class OnChainSubWeights:
+    """Sub-weights inside the on-chain score (Part 6, Section 15)."""
+
+    holder_health: float = 0.20
+    smart_money: float = 0.20
+    whale_behavior: float = 0.15
+    developer_activity: float = 0.15
+    volume_quality: float = 0.15
+    token_flow: float = 0.15
+
+    def __post_init__(self) -> None:
+        _check_weight_sum("on-chain", dataclasses.asdict(self))
+
+
+@dataclass(frozen=True)
+class FoundationSubWeights:
+    """Sub-weights inside the foundation score (Part 5, Section 12)."""
+
+    meme_strength: float = 0.20
+    narrative: float = 0.20
+    brand: float = 0.15
+    community_quality: float = 0.20
+    dev_communication: float = 0.15
+    long_term: float = 0.10
+
+    def __post_init__(self) -> None:
+        _check_weight_sum("foundation", dataclasses.asdict(self))
+
+
+@dataclass(frozen=True)
 class ClassificationBands:
     """Minimum final score for each classification band (Parts 10/12/20)."""
 
@@ -227,6 +271,55 @@ class SecurityThresholds:
 
 
 @dataclass(frozen=True)
+class CommunityThresholds:
+    """Community-analysis anchors (Part 5, Part 18 Section 8).
+
+    ``target_*`` values earn full marks; the fake-detection values trigger
+    warnings or destructive flags (fake community => Avoid, Part 10 Section 5).
+    """
+
+    excellent_engagement_rate_percent: float = 5.0
+    fake_engagement_rate_percent: float = 0.5     # below this with a big following = fake
+    min_followers_for_fake_check: int = 10000
+    bot_follower_warn_percent: float = 30.0
+    bot_follower_artificial_percent: float = 50.0
+    duplicate_message_warn_percent: float = 20.0
+    telegram_active_target_percent: float = 15.0
+    target_growth_rate_7d_percent: float = 30.0
+    target_dev_updates_per_week: float = 3.0
+    target_user_content_per_day: float = 20.0
+
+    def __post_init__(self) -> None:
+        for name, value in dataclasses.asdict(self).items():
+            if value <= 0:
+                raise ConfigurationError(f"community threshold '{name}' must be positive, got {value}")
+
+
+@dataclass(frozen=True)
+class OnChainThresholds:
+    """On-chain analysis anchors (Part 6 Sections 2-12)."""
+
+    min_holder_count: int = 50
+    target_holder_count: int = 2000
+    holder_growth_target_percent_24h: float = 20.0
+    healthy_trades_per_trader: float = 3.0
+    wash_trades_per_trader: float = 10.0
+    volume_per_holder_healthy_usd: float = 500.0
+    volume_per_holder_suspicious_usd: float = 5000.0
+    buy_ratio_weak: float = 0.35    # below: heavy selling pressure
+    buy_ratio_strong: float = 0.60  # above: healthy demand
+
+    def __post_init__(self) -> None:
+        for name, value in dataclasses.asdict(self).items():
+            if value <= 0:
+                raise ConfigurationError(f"on-chain threshold '{name}' must be positive, got {value}")
+        if self.wash_trades_per_trader <= self.healthy_trades_per_trader:
+            raise ConfigurationError("wash_trades_per_trader must exceed healthy_trades_per_trader")
+        if not (0 < self.buy_ratio_weak < self.buy_ratio_strong < 1):
+            raise ConfigurationError("buy ratios must satisfy 0 < weak < strong < 1")
+
+
+@dataclass(frozen=True)
 class Settings:
     """Root settings object. Build with :func:`Settings.from_env`."""
 
@@ -239,6 +332,11 @@ class Settings:
     providers: ProviderSettings = field(default_factory=ProviderSettings)
     discovery: DiscoverySettings = field(default_factory=DiscoverySettings)
     security: SecurityThresholds = field(default_factory=SecurityThresholds)
+    community: CommunityThresholds = field(default_factory=CommunityThresholds)
+    onchain: OnChainThresholds = field(default_factory=OnChainThresholds)
+    community_weights: CommunitySubWeights = field(default_factory=CommunitySubWeights)
+    onchain_weights: OnChainSubWeights = field(default_factory=OnChainSubWeights)
+    foundation_weights: FoundationSubWeights = field(default_factory=FoundationSubWeights)
     log_level: str = "INFO"
     log_dir: str = "logs"
 
@@ -256,6 +354,11 @@ class Settings:
             providers=_load_group(ProviderSettings, "PROVIDERS", env),
             discovery=_load_group(DiscoverySettings, "DISCOVERY", env),
             security=_load_group(SecurityThresholds, "SECURITY", env),
+            community=_load_group(CommunityThresholds, "COMMUNITY", env),
+            onchain=_load_group(OnChainThresholds, "ONCHAIN", env),
+            community_weights=_load_group(CommunitySubWeights, "COMMUNITY_WEIGHTS", env),
+            onchain_weights=_load_group(OnChainSubWeights, "ONCHAIN_WEIGHTS", env),
+            foundation_weights=_load_group(FoundationSubWeights, "FOUNDATION_WEIGHTS", env),
             log_level=env.get(f"{_ENV_PREFIX}_LOG_LEVEL", "INFO"),
             log_dir=env.get(f"{_ENV_PREFIX}_LOG_DIR", "logs"),
         )

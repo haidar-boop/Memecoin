@@ -16,7 +16,9 @@ human operator.
 | Part 2 — Scanning infrastructure & data architecture | Rate limiting, TTL cache, retry/backoff, provider failover pool, base collector, DexScreener client | ✅ Built |
 | Part 3 — Discovery engine | GeckoTerminal new-pool client, discovery engine with hard filters, dedupe, Discovery Score, rejection tracking | ✅ Built |
 | Part 4 — Rug detection & security analysis | GoPlus client (EVM + Solana), security analyzer with graded risk taxonomy, destructive-risk overrides, confidence/coverage reporting | ✅ Built |
-| Parts 5+ — Community, on-chain engines, scoring, alerts, dashboard, database | — | ⏳ Upcoming |
+| Part 5 — Foundation & community intelligence | Community analyzer (engagement/growth/loyalty/creativity/dev-relationship) with fake-community detection; foundation score combiner | ✅ Built (engines; social collectors need API keys) |
+| Part 6 — On-chain intelligence & wallet behavior | On-chain analyzer (holder health, volume quality, buy/sell pressure, phase classification) running today on market+security data; smart-money/whale/flow slots ready for wallet collectors | ✅ Built (partial data sources) |
+| Parts 7+ — Token evaluation, scoring engine, alerts, dashboard, database | — | ⏳ Upcoming |
 
 ## Project structure
 
@@ -41,7 +43,11 @@ meme_intelligence/
 ├── scanners/
 │   └── discovery.py        # Layer 1: filter/dedupe/score new pools
 ├── analyzers/
-│   └── security_analyzer.py # Layer 2: graded security assessment
+│   ├── common.py           # shared SubScore/Finding/confidence machinery
+│   ├── security_analyzer.py   # Layer 2: graded security assessment
+│   ├── community_analyzer.py  # Layer 3: social strength + fake detection
+│   ├── onchain_analyzer.py    # Layer 3: wallet/volume behavior + phase
+│   └── foundation_analyzer.py # foundation score combiner (AI inputs later)
 tests/                      # pytest suite (unit tests, no network required)
 ```
 
@@ -99,7 +105,9 @@ environment.
 1. ~~Foundation: config, models, collectors~~ ✅
 2. ~~Discovery engine~~ ✅
 3. ~~Security analysis engine (rug detection, honeypot, holder concentration)~~ ✅
-4. Database layer + community / on-chain / momentum / narrative analyzers
-5. Scoring engine with red-flag overrides + AI report generation
-6. Alert system (Telegram/Discord) + dashboard
-7. Backtesting and self-improvement loop
+4. ~~Community / on-chain / foundation analyzers~~ ✅ (social + wallet
+   collectors pending API keys — engines run on partial data honestly)
+5. Token evaluation + momentum analyzers, database layer
+6. Scoring engine with red-flag overrides + AI report generation
+7. Alert system (Telegram/Discord) + dashboard
+8. Backtesting and self-improvement loop

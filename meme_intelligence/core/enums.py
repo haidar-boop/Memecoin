@@ -43,6 +43,25 @@ class ConfidenceLevel(str, Enum):
     LOW = "low"
 
 
+class MarketPhase(str, Enum):
+    """Accumulation vs distribution classification (Spec Part 6, Section 14)."""
+
+    ACCUMULATION = "accumulation"    # price stable, buying pressure, holders growing
+    EXPANSION = "expansion"          # rising demand, volume, and attention
+    DISTRIBUTION = "distribution"    # volume without price progress; sellers active
+    UNCLEAR = "unclear"              # insufficient evidence to classify
+
+
+class CommunityRating(str, Enum):
+    """Community quality rating (Spec Part 12, Section 5)."""
+
+    EXCELLENT = "excellent"
+    STRONG = "strong"
+    AVERAGE = "average"
+    WEAK = "weak"
+    ARTIFICIAL = "artificial"  # fake community detected — red-flag override
+
+
 class ScanLayer(str, Enum):
     """The four monitoring layers of the real-time architecture (Spec Part 2, Section 4)."""
 

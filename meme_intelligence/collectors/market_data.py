@@ -240,6 +240,8 @@ class GeckoTerminalClient(BaseCollector):
             price_change_24h=_to_float(price_change_24h),
             buys_24h=_to_int(txns_24h.get("buys")),
             sells_24h=_to_int(txns_24h.get("sells")),
+            buyers_24h=_to_int(txns_24h.get("buyers")),
+            sellers_24h=_to_int(txns_24h.get("sellers")),
             pair_created_at=_from_iso_timestamp(attrs.get("pool_created_at")),
             url=None,
         )
