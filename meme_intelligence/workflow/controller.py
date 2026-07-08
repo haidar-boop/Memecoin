@@ -30,6 +30,12 @@ from meme_intelligence.alerts.notification_engine import (
     AlertEvent,
     AutomationRules,
     NotificationEngine,
+    events_from_security_changes,
+)
+from meme_intelligence.analyzers.security_monitor import (
+    detect_security_changes,
+    extract_facts,
+    merge_facts,
 )
 from meme_intelligence.config.settings import Settings
 from meme_intelligence.core.enums import AlertPriority, MarketRegime, WatchlistTier
@@ -191,6 +197,13 @@ class ContinuousScanner:
         previous_score = previous[0]["final_score"] if previous else None
         self._storage.record_snapshot(result.master, source=source)
 
+        # Contract-change monitoring (Part 18, Section 10): diff the security
+        # facts against the last known baseline, then update the baseline.
+        previous_facts = self._storage.latest_security_facts(token)
+        changes = detect_security_changes(previous_facts, result.security_profile)
+        current_facts = extract_facts(result.security_profile)
+        self._storage.record_security_facts(token, merge_facts(previous_facts, current_facts))
+
         tier = _TIER_FOR_CLASSIFICATION.get(result.master.classification)
         if tier is not None:
             self._storage.update_watchlist(
@@ -209,6 +222,9 @@ class ContinuousScanner:
 
         events = self._rules.evaluate(result, previous_score=previous_score)
         events = await self._verify_events(events, result)
+        # Security-change events rest on contract facts, not market data, so
+        # they bypass market cross-verification and are appended directly.
+        events.extend(events_from_security_changes(token, changes))
         delivered = await self._notifier.dispatch(events)
         stats.alerts.extend(delivered)
         for event in delivered:

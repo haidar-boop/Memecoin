@@ -70,6 +70,14 @@ CREATE TABLE IF NOT EXISTS journal (
     content TEXT NOT NULL
 );
 
+-- Last-known security facts per token (Part 18 Section 10): the baseline
+-- every new analysis is diffed against for contract-change monitoring.
+CREATE TABLE IF NOT EXISTS security_facts (
+    token_id INTEGER PRIMARY KEY REFERENCES tokens(id),
+    updated_at TEXT NOT NULL,
+    facts TEXT NOT NULL  -- JSON object of FACT_FIELDS
+);
+
 -- Wallet sightings (Part 17 Sections 2-3): every observed wallet action,
 -- the raw material for reputation once outcomes accumulate (Part 24).
 CREATE TABLE IF NOT EXISTS wallet_sightings (
@@ -269,6 +277,29 @@ class Storage:
         change = self.update_watchlist(token, WatchlistTier.ARCHIVED)
         self.add_journal(token, "outcome", f"archived: {reason}")
         return WatchlistChange(token, "archived", WatchlistTier.ARCHIVED, reason)
+
+    # ---- Security facts baseline (Part 18, Section 10) ----
+
+    def latest_security_facts(self, token: TokenIdentity) -> dict | None:
+        """The last-known security facts for a token, or None on first sighting."""
+        row = self._conn.execute(
+            """SELECT f.facts FROM security_facts f JOIN tokens t ON t.id = f.token_id
+               WHERE t.chain = ? AND t.address = ?""",
+            (token.chain, token.address),
+        ).fetchone()
+        return json.loads(row["facts"]) if row else None
+
+    def record_security_facts(self, token: TokenIdentity, facts: dict) -> None:
+        """Persist the merged security-fact baseline for future diffs."""
+        token_id = self.upsert_token(token)
+        self._conn.execute(
+            """INSERT INTO security_facts (token_id, updated_at, facts)
+               VALUES (?, ?, ?)
+               ON CONFLICT (token_id) DO UPDATE SET
+                   updated_at = excluded.updated_at, facts = excluded.facts""",
+            (token_id, self._now().isoformat(), json.dumps(facts)),
+        )
+        self._conn.commit()
 
     # ---- Wallet sightings (Part 17, Sections 2-3) ----
 

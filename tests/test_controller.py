@@ -260,3 +260,33 @@ async def test_source_agreement_annotates_alert():
         opportunity = [e for e in sink.sent if "opportunity" in e.alert_type]
         assert opportunity
         assert any("confirmed" in r for r in opportunity[0].reasons)
+
+
+async def test_security_change_triggers_critical_alert_on_recheck():
+    """Part 18 Section 10 end-to-end: a token turning honeypot between
+    analyses produces a CRITICAL security_change alert."""
+    tracked = TokenIdentity(chain="solana", address="TokenTurn", symbol="TURN")
+    tracked_pair = make_pair(address="TokenTurn", symbol="TURN")
+    sink = RecordingSink()
+
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        storage.update_watchlist(tracked, WatchlistTier.TIER_1_HIGH_PRIORITY, score=80.0)
+
+        # First recheck: clean profile establishes the facts baseline.
+        goplus_profiles = {"TokenTurn": clean_profile(tracked)}
+        market = FakeMarketService({"TokenTurn": tracked_pair})
+        scanner = make_scanner_with_market(storage, [], goplus_profiles, market,
+                                           settings=fast_recheck_settings(), sink=sink)
+        await scanner.run(max_cycles=1)
+        assert not any(e.alert_type == "security_change" for e in sink.sent)
+
+        # Second recheck: the token became a honeypot.
+        import dataclasses as _dc2
+        goplus_profiles["TokenTurn"] = _dc2.replace(clean_profile(tracked), is_honeypot=True)
+        scanner2 = make_scanner_with_market(storage, [], goplus_profiles, market,
+                                            settings=fast_recheck_settings(), sink=sink)
+        await scanner2.run(max_cycles=1)
+
+        changes = [e for e in sink.sent if e.alert_type == "security_change"]
+        assert changes and changes[0].priority is AlertPriority.CRITICAL
+        assert any("honeypot" in r for r in changes[0].reasons)

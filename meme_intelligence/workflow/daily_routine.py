@@ -31,6 +31,11 @@ from datetime import datetime, timezone
 from typing import Callable
 
 from meme_intelligence.analyzers.scoring_engine import MasterAssessment
+from meme_intelligence.analyzers.security_monitor import (
+    detect_security_changes,
+    extract_facts,
+    merge_facts,
+)
 from meme_intelligence.collectors.market_data import MajorsSnapshot
 from meme_intelligence.config.settings import Settings
 from meme_intelligence.core.enums import Classification, MarketRegime, RiskTier, WatchlistTier
@@ -249,11 +254,22 @@ class DailyRoutine:
         result = await self._pipeline.analyze_pair(pair, regime=report.environment.regime)
         if result is None:
             return None
+        token = pair.base_token
+        symbol = token.symbol or token.address[:8]
         self._storage.record_snapshot(result.master, source="daily_routine")
+
+        # Contract-change monitoring (Part 18 Section 10): worsened facts are
+        # front-page risks in the daily report and journaled for the record.
+        previous_facts = self._storage.latest_security_facts(token)
+        changes = detect_security_changes(previous_facts, result.security_profile)
+        self._storage.record_security_facts(
+            token, merge_facts(previous_facts, extract_facts(result.security_profile)))
+        for change in changes:
+            report.biggest_risks.insert(0, f"{symbol}: SECURITY CHANGE — {change.message}")
+            self._storage.add_journal(token, "security_change", change.message)
 
         for finding in result.security.findings:
             if finding.severity in (RiskTier.DESTRUCTIVE, RiskTier.SERIOUS_WARNING):
-                symbol = pair.base_token.symbol or pair.base_token.address[:8]
                 report.biggest_risks.append(f"{symbol}: {finding.message}")
         return result.master
 

@@ -65,6 +65,11 @@ _TIMING_MIXED_SIGNAL = 60.0
 _TIMING_CHASING_SIGNAL = 40.0       # buys concentrated after the run-up
 _TIMING_FLAT_RANGE_FRACTION = 0.02  # <2% price spread = consolidation
 
+# Promotion-and-exit pattern (Part 18, Section 9): price extended while the
+# largest holders distribute into the attention.
+_PUMP_EXIT_PRICE_CHANGE_PERCENT = 50.0
+_PUMP_EXIT_MIN_WHALE_OUTFLOW_USD = 500.0
+
 
 @dataclass(frozen=True)
 class WhaleInfo:
@@ -178,6 +183,10 @@ class WalletIntelligenceAnalyzer:
             raise InsufficientDataError(
                 f"no wallet intelligence available for {data.token.address}"
             )
+
+        pump_exit = self._check_pump_and_exit(pair, personal_whales, net_by_wallet)
+        if pump_exit is not None:
+            findings.append(pump_exit)
 
         overall = weighted_sum / available
         accumulation = self._accumulation_verdict(data, net_by_wallet, findings)
@@ -379,6 +388,28 @@ class WalletIntelligenceAnalyzer:
                      f"{len(insider_buyers)} top holders are still adding: "
                      "watch concentration growth")
         return s
+
+    def _check_pump_and_exit(self, pair: DexPair | None,
+                             personal_whales: list[WhaleInfo],
+                             net_by_wallet: dict[str, float]) -> Finding | None:
+        """Promotion-and-exit pattern (Part 18 Section 9): the on-chain half —
+        attention drives price up while the largest holders sell into it.
+        The social half (promotion spike) joins when social collectors land."""
+        if pair is None or pair.price_change_24h is None:
+            return None
+        if pair.price_change_24h < _PUMP_EXIT_PRICE_CHANGE_PERCENT:
+            return None
+        whale_outflow = -sum(
+            net_by_wallet.get(w.owner, 0.0) for w in personal_whales
+            if net_by_wallet.get(w.owner, 0.0) < 0
+        )
+        if whale_outflow < _PUMP_EXIT_MIN_WHALE_OUTFLOW_USD:
+            return None
+        return Finding(
+            "risk_signals", RiskTier.SERIOUS_WARNING,
+            f"price up {pair.price_change_24h:.0f}% in 24h while top holders sold "
+            f"${whale_outflow:,.0f}: promotion-and-exit pattern",
+        )
 
     # ---- Accumulation verdict (Section 5) ----
 

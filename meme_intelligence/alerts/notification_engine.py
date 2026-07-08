@@ -263,6 +263,41 @@ class AutomationRules:
         )
 
 
+def events_from_security_changes(token: TokenIdentity, changes) -> list[AlertEvent]:
+    """Convert detected security-fact changes into alert events (Part 18, Section 10).
+
+    Changes arrive worst-first; one event is emitted per severity level so
+    a critical change is never buried inside a medium digest.
+    """
+    by_severity: dict[AlertPriority, list] = {}
+    for change in changes:
+        by_severity.setdefault(change.severity, []).append(change)
+
+    titles = {
+        AlertPriority.CRITICAL: "SECURITY CHANGE — high-priority review required now",
+        AlertPriority.HIGH: "Security facts worsened — review promptly",
+        AlertPriority.MEDIUM: "Security facts drifting — keep watching",
+    }
+    monitoring = {
+        AlertPriority.CRITICAL: ("re-verify the contract and LP status before anything else",
+                                 "if holding, decide exit before anything else"),
+        AlertPriority.HIGH: ("re-run a full security assessment",),
+        AlertPriority.MEDIUM: ("compare again at the next recheck; archive if the drift continues",),
+    }
+
+    events: list[AlertEvent] = []
+    for severity, group in by_severity.items():
+        events.append(AlertEvent(
+            priority=severity,
+            alert_type="security_change",
+            token=token,
+            title=titles.get(severity, "Security facts changed"),
+            reasons=tuple(c.message for c in group[:5]),
+            monitoring=monitoring.get(severity, ()),
+        ))
+    return events
+
+
 class AlertSink(Protocol):
     async def send(self, event: AlertEvent) -> None: ...
 
