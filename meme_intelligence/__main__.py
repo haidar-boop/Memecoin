@@ -709,6 +709,23 @@ async def _cmd_monitor(args, settings) -> int:
         if settings.pumpfun.enable_in_monitor:
             pumpportal = await stack.enter_async_context(build_pumpportal(settings))
             pumpfun = await stack.enter_async_context(build_pumpfun_frontend(settings))
+        # Metered layers (Parts 17/23) join the loop only when their
+        # enable_in_monitor flag is set AND their keys exist; a set flag
+        # with missing keys is reported, not silently ignored (Rule 13).
+        wallet_service = ai_service = None
+        if settings.wallet.enable_in_monitor:
+            wallet_service = build_wallet_service(settings)
+            if wallet_service is None:
+                print("Note: MEMEINTEL_WALLET_ENABLE_IN_MONITOR is on but no "
+                      "MEMEINTEL_HELIUS_API_KEY / MEMEINTEL_BIRDEYE_API_KEY is set — "
+                      "smart-money analysis stays off.")
+            else:
+                stack.push_async_callback(wallet_service.close)
+        if settings.ai.enable_in_monitor:
+            ai_service = build_judgment_service(settings)
+            if ai_service is None:
+                print("Note: MEMEINTEL_AI_ENABLE_IN_MONITOR is on but "
+                      "MEMEINTEL_ANTHROPIC_API_KEY is not set — AI judgments stay off.")
 
         with Storage(settings.database.path) as storage:
             notifier = NotificationEngine(build_sinks(settings), settings.alert_engine)
@@ -719,6 +736,8 @@ async def _cmd_monitor(args, settings) -> int:
                 community_client=coingecko,
                 pumpportal_client=pumpportal,
                 pumpfun_client=pumpfun,
+                wallet_service=wallet_service,
+                ai_service=ai_service,
                 regime=MarketRegime(args.regime),
             )
             try:

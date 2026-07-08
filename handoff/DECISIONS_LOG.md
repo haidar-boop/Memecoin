@@ -402,6 +402,20 @@ launches, basic filtering rejected one whose creator bought 46.2% of
 supply at launch, and zero minutes-old tokens were promoted — exactly
 the "most launches should be filtered out" behavior §3 demands.
 
+### Metered layers wired into the continuous scanner (Parts 17/23 gap-close)
+
+`MEMEINTEL_WALLET_ENABLE_IN_MONITOR` and `MEMEINTEL_AI_ENABLE_IN_MONITOR`
+had existed in settings since Parts 17/23 but were never consumed — the
+`monitor` command never built or passed a wallet/AI service, so smart-
+money analysis and AI judgments could not run in the 24/7 loop at all.
+Now `_cmd_monitor` builds both services when their flag is on and their
+keys exist (a set flag with missing keys prints a note instead of
+failing silently — Rule 13), and `ContinuousScanner` treats the flags as
+authoritative: a wired service with the flag off is dropped with a log
+line, so metered spend can never happen by accident (Rules 10/11). Both
+default off; enabling smart money in production is one Helius (free
+tier) key plus one flag in `.env`.
+
 ## Notable implementation choices (Rule 19)
 
 - **Python 3.11 + asyncio** over Node.js (both allowed by spec): the

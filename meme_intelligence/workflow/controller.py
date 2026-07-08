@@ -87,6 +87,8 @@ class ContinuousScanner:
         community_client=None,  # CoinGeckoClient-compatible (get_community_profile)
         pumpportal_client=None,  # PumpPortalClient-compatible launch stream (Part 32.5)
         pumpfun_client=None,     # PumpFunFrontendClient-compatible traction rechecks
+        wallet_service=None,     # WalletDataService (Part 17); metered credits
+        ai_service=None,         # AIJudgmentService (Part 23); costs API tokens
         regime: MarketRegime = MarketRegime.UNKNOWN,
         now_func: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         sleep_func: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -123,8 +125,24 @@ class ContinuousScanner:
         # same guard).
         if community_client is not None and not hasattr(community_client, "get_community_profile"):
             community_client = None
+        # Metered layers run in the 24/7 loop only when explicitly opted in
+        # (Rule 10/11 — expensive analysis only after filtering, and never
+        # by accident). The settings flags are authoritative regardless of
+        # what the caller wired in.
+        if wallet_service is not None and not settings.wallet.enable_in_monitor:
+            self._logger.info(
+                "wallet service wired but MEMEINTEL_WALLET_ENABLE_IN_MONITOR is off; "
+                "smart-money analysis stays out of the scan loop")
+            wallet_service = None
+        if ai_service is not None and not settings.ai.enable_in_monitor:
+            self._logger.info(
+                "AI service wired but MEMEINTEL_AI_ENABLE_IN_MONITOR is off; "
+                "AI judgments stay out of the scan loop")
+            ai_service = None
         self._pipeline = ResearchPipeline(settings, goplus_client,
                                           community_client=community_client,
+                                          wallet_service=wallet_service,
+                                          ai_service=ai_service,
                                           now_func=now_func)
         self._rules = AutomationRules(settings.alerts, settings.alert_engine)
         self._seen: set[tuple[str, str]] = set()

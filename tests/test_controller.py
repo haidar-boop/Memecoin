@@ -262,6 +262,91 @@ async def test_source_agreement_annotates_alert():
         assert any("confirmed" in r for r in opportunity[0].reasons)
 
 
+# ---- Parts 17/23 in the monitor: metered layers behind enable_in_monitor ----
+
+
+class RecordingWalletService:
+    """Wallet-service double: records gather() calls, reports no data."""
+
+    def __init__(self):
+        self.gather_calls: list[str] = []
+        self.closed = False
+
+    async def gather(self, token):
+        from meme_intelligence.core.errors import InsufficientDataError
+        self.gather_calls.append(token.address)
+        raise InsufficientDataError("no wallet data in this test double")
+
+    async def close(self):
+        self.closed = True
+
+
+class RecordingAIService:
+    """AI-service double: records judge() calls, returns no judgment."""
+
+    def __init__(self):
+        self.judge_calls = 0
+
+    async def judge(self, result, *, mode):
+        self.judge_calls += 1
+        return None
+
+
+def metered_on_settings() -> Settings:
+    return Settings.from_env(env={
+        "MEMEINTEL_WALLET_ENABLE_IN_MONITOR": "true",
+        "MEMEINTEL_AI_ENABLE_IN_MONITOR": "true",
+    })
+
+
+def make_scanner_with_metered(storage, pools, profiles, *, wallet=None, ai=None,
+                              settings=None):
+    async def fake_sleep(seconds):
+        pass
+
+    notifier = NotificationEngine([RecordingSink()], AlertEngineSettings(),
+                                  time_func=lambda: 0.0)
+    return ContinuousScanner(
+        settings or SETTINGS, storage, notifier,
+        gecko_client=FakeGecko(pools),
+        goplus_client=FakeGoPlus(profiles),
+        wallet_service=wallet,
+        ai_service=ai,
+        now_func=lambda: NOW,
+        sleep_func=fake_sleep,
+    )
+
+
+async def test_metered_services_off_by_default_even_when_wired():
+    """Rule 10/11: wallet/AI never run in the loop without explicit opt-in —
+    the settings flags are authoritative over what the caller wired in."""
+    pair = make_pair()
+    wallet, ai = RecordingWalletService(), RecordingAIService()
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner = make_scanner_with_metered(
+            storage, [pair], {pair.base_token.address: clean_profile(pair.base_token)},
+            wallet=wallet, ai=ai,  # wired, but default settings say off
+        )
+        history = await scanner.run(max_cycles=1)
+        assert history[0].analyzed == 1
+        assert wallet.gather_calls == []
+        assert ai.judge_calls == 0
+
+
+async def test_metered_services_run_when_opted_in():
+    pair = make_pair()
+    wallet, ai = RecordingWalletService(), RecordingAIService()
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner = make_scanner_with_metered(
+            storage, [pair], {pair.base_token.address: clean_profile(pair.base_token)},
+            wallet=wallet, ai=ai, settings=metered_on_settings(),
+        )
+        history = await scanner.run(max_cycles=1)
+        assert history[0].analyzed == 1  # a no-data wallet answer never blocks analysis
+        assert wallet.gather_calls == [pair.base_token.address]
+        assert ai.judge_calls == 1
+
+
 async def test_security_change_triggers_critical_alert_on_recheck():
     """Part 18 Section 10 end-to-end: a token turning honeypot between
     analyses produces a CRITICAL security_change alert."""
