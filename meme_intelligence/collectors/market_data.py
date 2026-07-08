@@ -15,6 +15,7 @@ normalized). Default request budgets stay safely below documented limits
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -244,4 +245,52 @@ class GeckoTerminalClient(BaseCollector):
             sellers_24h=_to_int(txns_24h.get("sellers")),
             pair_created_at=_from_iso_timestamp(attrs.get("pool_created_at")),
             url=None,
+        )
+
+
+@dataclass(frozen=True)
+class MajorsSnapshot:
+    """24h state of the majors used for the market-environment check (Part 11, Section 2)."""
+
+    btc_price_usd: float | None = None
+    btc_change_24h_percent: float | None = None
+    eth_change_24h_percent: float | None = None
+    sol_change_24h_percent: float | None = None
+
+
+class CoinGeckoClient(BaseCollector):
+    """Client for the public CoinGecko simple-price API.
+
+    Used only for the morning market-environment check (BTC/ETH/SOL trend);
+    kept to a very small request budget within the free tier (Rule 11).
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        kwargs.setdefault("name", "coingecko")
+        kwargs.setdefault("base_url", "https://api.coingecko.com")
+        super().__init__(**kwargs)
+
+    async def get_majors(self) -> MajorsSnapshot:
+        payload = await self._get_json(
+            "api/v3/simple/price",
+            params={
+                "ids": "bitcoin,ethereum,solana",
+                "vs_currencies": "usd",
+                "include_24hr_change": "true",
+            },
+            cache_key="coingecko:majors",
+            cache_ttl=120.0,
+        )
+        if not isinstance(payload, dict):
+            raise CollectorError(f"{self.name}: expected JSON object, got {type(payload).__name__}")
+
+        def entry(coin: str, field: str) -> float | None:
+            data = payload.get(coin)
+            return _to_float(data.get(field)) if isinstance(data, dict) else None
+
+        return MajorsSnapshot(
+            btc_price_usd=entry("bitcoin", "usd"),
+            btc_change_24h_percent=entry("bitcoin", "usd_24h_change"),
+            eth_change_24h_percent=entry("ethereum", "usd_24h_change"),
+            sol_change_24h_percent=entry("solana", "usd_24h_change"),
         )

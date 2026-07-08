@@ -204,11 +204,13 @@ class ProviderSettings:
     geckoterminal_requests_per_minute: float = 25.0   # documented free limit: 30/min
     goplus_base_url: str = "https://api.gopluslabs.io"
     goplus_requests_per_minute: float = 20.0          # conservative free-tier budget
+    coingecko_base_url: str = "https://api.coingecko.com"
+    coingecko_requests_per_minute: float = 10.0       # documented free limit: ~10-30/min
     failure_threshold: int = 3      # consecutive failures before a provider cools down
     cooldown_seconds: float = 60.0  # how long an unhealthy provider is skipped
 
     def __post_init__(self) -> None:
-        for name in ("dexscreener", "geckoterminal", "goplus"):
+        for name in ("dexscreener", "geckoterminal", "goplus", "coingecko"):
             if getattr(self, f"{name}_requests_per_minute") <= 0:
                 raise ConfigurationError(f"{name}_requests_per_minute must be positive")
         if self.failure_threshold < 1:
@@ -356,6 +358,45 @@ class TradingSettings:
 
 
 @dataclass(frozen=True)
+class DatabaseSettings:
+    """Local persistence (Part 13 Section 5, Part 21 Section 6).
+
+    SQLite by default — simple and reliable (Rule 21); the storage layer is
+    the only module that knows the backend, so PostgreSQL can replace it
+    behind the same interface when scale requires.
+    """
+
+    path: str = "data/meme_intelligence.sqlite3"
+
+    def __post_init__(self) -> None:
+        if not self.path:
+            raise ConfigurationError("database path must be non-empty")
+
+
+@dataclass(frozen=True)
+class WorkflowSettings:
+    """Daily research routine configuration (Part 11)."""
+
+    networks: str = "solana"          # comma-separated network ids to scan
+    top_candidates: int = 5           # discovery candidates to deep-analyze per run
+    watchlist_review_limit: int = 10  # existing entries re-checked per run
+    risk_on_btc_change_percent: float = 2.0   # BTC 24h gain above this = risk-on
+    risk_off_btc_drop_percent: float = 3.0    # BTC 24h drop beyond this = risk-off
+
+    def __post_init__(self) -> None:
+        if not self.networks.strip():
+            raise ConfigurationError("workflow networks must be non-empty")
+        for name in ("top_candidates", "watchlist_review_limit",
+                     "risk_on_btc_change_percent", "risk_off_btc_drop_percent"):
+            if getattr(self, name) <= 0:
+                raise ConfigurationError(f"workflow setting '{name}' must be positive")
+
+    @property
+    def network_list(self) -> list[str]:
+        return [n.strip() for n in self.networks.split(",") if n.strip()]
+
+
+@dataclass(frozen=True)
 class RiskSubWeights:
     """Sub-weights inside the risk score (Part 9, Section 6). Higher risk score = riskier."""
 
@@ -470,6 +511,8 @@ class Settings:
     trade_weights: TradeScoreWeights = field(default_factory=TradeScoreWeights)
     risk: RiskSettings = field(default_factory=RiskSettings)
     risk_weights: RiskSubWeights = field(default_factory=RiskSubWeights)
+    database: DatabaseSettings = field(default_factory=DatabaseSettings)
+    workflow: WorkflowSettings = field(default_factory=WorkflowSettings)
     log_level: str = "INFO"
     log_dir: str = "logs"
 
@@ -498,6 +541,8 @@ class Settings:
             trade_weights=_load_group(TradeScoreWeights, "TRADE_WEIGHTS", env),
             risk=_load_group(RiskSettings, "RISK", env),
             risk_weights=_load_group(RiskSubWeights, "RISK_WEIGHTS", env),
+            database=_load_group(DatabaseSettings, "DATABASE", env),
+            workflow=_load_group(WorkflowSettings, "WORKFLOW", env),
             log_level=env.get(f"{_ENV_PREFIX}_LOG_LEVEL", "INFO"),
             log_dir=env.get(f"{_ENV_PREFIX}_LOG_DIR", "logs"),
         )

@@ -20,13 +20,17 @@ import argparse
 import asyncio
 import sys
 
+from meme_intelligence.ai.report_generator import build_report
 from meme_intelligence.analyzers.onchain_analyzer import OnChainAnalyzer, derive_onchain_profile
 from meme_intelligence.analyzers.risk_analyzer import RiskAnalyzer
 from meme_intelligence.analyzers.scoring_engine import ScoringEngine, derive_timing_score
 from meme_intelligence.analyzers.security_analyzer import SecurityAnalyzer
 from meme_intelligence.analyzers.token_analyzer import TokenAnalyzer
+from meme_intelligence.collectors.market_data import CoinGeckoClient
 from meme_intelligence.core.enums import MarketRegime
+from meme_intelligence.database.storage import Storage
 from meme_intelligence.trading.trade_planner import TradePlanner
+from meme_intelligence.workflow.daily_routine import DailyRoutine
 from meme_intelligence.collectors.market_data import DexScreenerClient, GeckoTerminalClient
 from meme_intelligence.collectors.security_data import GoPlusClient
 from meme_intelligence.config.settings import Settings, get_settings
@@ -68,6 +72,14 @@ def build_goplus(settings: Settings) -> GoPlusClient:
     return GoPlusClient(
         base_url=settings.providers.goplus_base_url,
         rate_limiter=RateLimiter.per_minute(settings.providers.goplus_requests_per_minute),
+        **_shared_collector_kwargs(settings),
+    )
+
+
+def build_coingecko(settings: Settings) -> CoinGeckoClient:
+    return CoinGeckoClient(
+        base_url=settings.providers.coingecko_base_url,
+        rate_limiter=RateLimiter.per_minute(settings.providers.coingecko_requests_per_minute),
         **_shared_collector_kwargs(settings),
     )
 
@@ -264,6 +276,95 @@ async def _cmd_plan(args, settings) -> int:
     return 0 if not security.is_destructive else 2
 
 
+async def _gather_assessments(args, settings):
+    """Shared research pass used by the plan and report commands."""
+    security_analyzer = SecurityAnalyzer(settings.security, settings.security_weights)
+    onchain_analyzer = OnChainAnalyzer(settings.onchain, settings.onchain_weights)
+    token_analyzer = TokenAnalyzer(settings.token, settings.token_weights)
+
+    async with build_dexscreener(settings) as dex, build_goplus(settings) as goplus:
+        pairs = await dex.get_token_pairs(args.address, chain=args.chain)
+        if not pairs:
+            return None, f"No trading pairs found for {args.address}."
+        pair = max(pairs, key=lambda p: p.liquidity_usd or 0.0)
+        security_profile = await goplus.get_token_security(pair.chain, pair.base_token.address)
+        if security_profile is None:
+            return None, f"GoPlus has no security data for {args.address} on {pair.chain}."
+
+    try:
+        security = security_analyzer.assess(security_profile, pair)
+    except InsufficientDataError as exc:
+        return None, f"Cannot assess security: {exc}"
+
+    onchain = token_assessment = None
+    try:
+        onchain = onchain_analyzer.assess(derive_onchain_profile(pair, security_profile))
+    except InsufficientDataError:
+        pass
+    try:
+        token_assessment = token_analyzer.assess(pair, security_profile)
+    except InsufficientDataError:
+        pass
+
+    regime = MarketRegime(args.regime)
+    risk_assessment = RiskAnalyzer(settings.risk_weights).assess(
+        security, pair=pair, token=token_assessment, onchain=onchain, regime=regime,
+    )
+    master = ScoringEngine(settings.weights, settings.bands).evaluate(
+        security, onchain=onchain, token_structure=token_assessment, risk=risk_assessment,
+        timing_score=derive_timing_score(pair, token_assessment, onchain),
+    )
+    plan = TradePlanner(settings.trading, settings.trade_weights).build_plan(
+        pair, security, onchain=onchain, token=token_assessment, regime=regime,
+    )
+    return (pair, security, onchain, token_assessment, risk_assessment, master, plan), None
+
+
+async def _cmd_report(args, settings) -> int:
+    """Full canonical intelligence report (Part 12), persisted to the database."""
+    result, error = await _gather_assessments(args, settings)
+    if error:
+        print(error)
+        return 1
+    pair, security, onchain, token_assessment, risk_assessment, master, plan = result
+
+    report = build_report(
+        pair, master, security,
+        onchain=onchain, token=token_assessment, risk=risk_assessment, plan=plan,
+    )
+    print(report.text)
+
+    with Storage(settings.database.path) as storage:
+        storage.record_snapshot(master, source="report_cli")
+    return 0 if not security.is_destructive else 2
+
+
+async def _cmd_daily(args, settings) -> int:
+    """Run the full daily research routine (Part 11) and print the report."""
+    if args.network:
+        # CLI overrides the configured scan networks for this run only
+        import dataclasses as _dc
+        settings = _dc.replace(
+            settings, workflow=_dc.replace(settings.workflow, networks=",".join(args.network))
+        )
+
+    async with (
+        build_geckoterminal(settings) as gecko,
+        build_goplus(settings) as goplus,
+        build_coingecko(settings) as coingecko,
+        build_dexscreener(settings) as dex,
+    ):
+        with Storage(settings.database.path) as storage:
+            routine = DailyRoutine(
+                settings, storage,
+                gecko_client=gecko, goplus_client=goplus,
+                coingecko_client=coingecko, dexscreener_client=dex,
+            )
+            report = await routine.run()
+    print(report.render())
+    return 0
+
+
 async def _run(args: argparse.Namespace) -> int:
     settings = get_settings()
     setup_logging(settings.log_level, settings.log_dir)
@@ -274,6 +375,8 @@ async def _run(args: argparse.Namespace) -> int:
         "security": _cmd_security,
         "scan": _cmd_scan,
         "plan": _cmd_plan,
+        "report": _cmd_report,
+        "daily": _cmd_daily,
     }[args.command]
     return await handler(args, settings)
 
@@ -312,6 +415,16 @@ def main(argv: list[str] | None = None) -> int:
     plan.add_argument("--regime", default="unknown",
                       choices=["bull", "neutral", "bear", "unknown"],
                       help="current market regime (Part 8 Section 10)")
+
+    report = sub.add_parser("report", help="canonical intelligence report for one token")
+    report.add_argument("address")
+    report.add_argument("--chain", default=None, help="filter to one chain id (e.g. solana)")
+    report.add_argument("--regime", default="unknown",
+                        choices=["bull", "neutral", "bear", "unknown"])
+
+    daily = sub.add_parser("daily", help="run the full daily research routine (Part 11)")
+    daily.add_argument("--network", action="append", default=None,
+                       help="network id (repeatable); default from settings")
 
     args = parser.parse_args(argv)
     if getattr(args, "network", None) is None and args.command in ("discover", "scan"):

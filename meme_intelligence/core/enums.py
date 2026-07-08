@@ -133,6 +133,15 @@ class RiskPosture(str, Enum):
     DEFENSIVE = "defensive"    # capital preservation only
 
 
+class WatchlistTier(str, Enum):
+    """Watchlist tracking tiers (Spec Part 11, Section 5 / Part 3, Section 10)."""
+
+    TIER_1_HIGH_PRIORITY = "tier_1_high_priority"  # monitor frequently
+    TIER_2_DEVELOPING = "tier_2_developing"        # review daily
+    TIER_3_RESEARCH_ONLY = "tier_3_research_only"  # monitor occasionally
+    ARCHIVED = "archived"                          # failed criteria; kept for learning
+
+
 class ScanLayer(str, Enum):
     """The four monitoring layers of the real-time architecture (Spec Part 2, Section 4)."""
 

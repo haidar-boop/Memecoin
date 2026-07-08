@@ -22,7 +22,10 @@ human operator.
 | Part 8 — Trading strategy & execution framework | Trade planner: trade score, setup classification, conviction + sizing guidance, entry checklist, required confirmations, invalidation conditions, FOMO questions — plans only, never orders | ✅ Built |
 | Part 9 — Risk management & capital protection | Risk analyzer (5-component risk score, higher = riskier), portfolio exposure limits, drawdown posture, emergency exit flags | ✅ Built |
 | Part 10 — Scoring algorithm & decision engine | Master scoring engine: Part 31-locked weights, red-flag overrides forcing Avoid, 6-question decision tree with caps, timing derivation, full decision trace | ✅ Built |
-| Parts 11+ — Momentum/narrative analyzers, database, alerts, dashboard, AI reports | — | ⏳ Upcoming |
+| Part 11 — Daily operating routine | Daily routine: market-environment check (CoinGecko), discovery→analysis pipeline, tiered watchlist with review/archival, research journal, daily report — all persisted | ✅ Built |
+| Part 12 — Final report template | Canonical intelligence report renderer: evidence-derived bull/bear cases, scoring table, decision trace, trade planning, final verdict | ✅ Built |
+| Database foundation | SQLite storage: tokens, assessment snapshots (feeds Part 24 backtesting), watchlist, journal | ✅ Built |
+| Parts 13+ — Momentum/narrative analyzers, alerts, dashboard, AI/LLM integration, backtesting | — | ⏳ Upcoming |
 
 ## Project structure
 
@@ -57,6 +60,12 @@ meme_intelligence/
 │   └── scoring_engine.py      # master score: overrides, decision tree, weights
 ├── trading/
 │   └── trade_planner.py    # trade plans: checklist, sizing guidance, invalidations
+├── database/
+│   └── storage.py          # SQLite: tokens, snapshots, watchlist, journal
+├── workflow/
+│   └── daily_routine.py    # Part 11 daily research-desk orchestration
+├── ai/
+│   └── report_generator.py # Part 12 canonical intelligence report
 tests/                      # pytest suite (unit tests, no network required)
 ```
 
@@ -70,6 +79,8 @@ python -m meme_intelligence discover --network solana        # find new launches
 python -m meme_intelligence security <address> --chain solana  # rug/security check
 python -m meme_intelligence scan --network solana --top 5    # discovery -> security -> on-chain
 python -m meme_intelligence plan <address> --chain ethereum --regime neutral  # full pass + trade plan
+python -m meme_intelligence report <address> --chain ethereum  # canonical intelligence report
+python -m meme_intelligence daily                             # full daily routine + watchlist
 ```
 
 Configuration is entirely environment-driven — see `.env.example` for every
@@ -119,6 +130,6 @@ environment.
    collectors pending API keys — engines run on partial data honestly)
 5. ~~Token structure analyzer + trade planner~~ ✅
 6. ~~Risk management framework + master scoring engine~~ ✅
-7. Momentum/narrative analyzers, database layer, daily workflow
-8. Alert system (Telegram/Discord) + dashboard + AI report generation
-9. Backtesting and self-improvement loop
+7. ~~Daily workflow + database + report template~~ ✅
+8. Momentum/narrative analyzers, alert system (Telegram/Discord), dashboard
+9. AI/LLM integration for qualitative judgments, backtesting loop
