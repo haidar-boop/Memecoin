@@ -271,6 +271,91 @@ class SecurityThresholds:
 
 
 @dataclass(frozen=True)
+class TokenSubWeights:
+    """Sub-weights inside the token structure score (Part 7, Section 13)."""
+
+    valuation: float = 0.20
+    liquidity: float = 0.20
+    supply: float = 0.15
+    volume: float = 0.15
+    competition: float = 0.15
+    catalysts: float = 0.15
+
+    def __post_init__(self) -> None:
+        _check_weight_sum("token", dataclasses.asdict(self))
+
+
+@dataclass(frozen=True)
+class TradeScoreWeights:
+    """Sub-weights inside the pre-entry trade score (Part 8, Section 13)."""
+
+    setup_quality: float = 0.20
+    security: float = 0.20
+    community: float = 0.15
+    onchain: float = 0.15
+    market_conditions: float = 0.15
+    risk_reward: float = 0.15
+
+    def __post_init__(self) -> None:
+        _check_weight_sum("trade", dataclasses.asdict(self))
+
+
+@dataclass(frozen=True)
+class TokenThresholds:
+    """Token structure anchors (Part 7)."""
+
+    early_stage_mcap_usd: float = 1_000_000.0
+    mature_stage_mcap_usd: float = 100_000_000.0
+    fdv_dilution_warn_ratio: float = 1.5     # FDV / market cap above this = dilution overhang
+    fdv_dilution_severe_ratio: float = 3.0
+    low_liquidity_to_mcap_percent: float = 1.0
+    healthy_liquidity_to_mcap_percent: float = 5.0
+    min_volume_to_mcap_percent: float = 1.0
+    target_volume_to_mcap_percent: float = 20.0
+    excessive_volume_to_mcap_percent: float = 500.0  # daily churn > 5x mcap = suspicious
+    min_circulating_fraction: float = 0.3    # market cap / FDV
+    healthy_circulating_fraction: float = 0.9
+
+    def __post_init__(self) -> None:
+        for name, value in dataclasses.asdict(self).items():
+            if value <= 0:
+                raise ConfigurationError(f"token threshold '{name}' must be positive, got {value}")
+        if self.early_stage_mcap_usd >= self.mature_stage_mcap_usd:
+            raise ConfigurationError("early_stage_mcap_usd must be below mature_stage_mcap_usd")
+        if self.fdv_dilution_warn_ratio >= self.fdv_dilution_severe_ratio:
+            raise ConfigurationError("fdv_dilution_warn_ratio must be below fdv_dilution_severe_ratio")
+        if not (self.min_volume_to_mcap_percent < self.target_volume_to_mcap_percent
+                < self.excessive_volume_to_mcap_percent):
+            raise ConfigurationError("volume/mcap thresholds must satisfy min < target < excessive")
+
+
+@dataclass(frozen=True)
+class TradingSettings:
+    """Trade-planning discipline settings (Part 8, Part 9 Section 3).
+
+    Position percentages are *guidance ceilings* written into generated
+    plans — this system never executes trades (Part 13, Section 8).
+    """
+
+    high_conviction_min_score: float = 80.0
+    medium_conviction_min_score: float = 65.0
+    high_conviction_min_security: float = 75.0
+    min_confirmation_coverage: float = 0.5   # below this, conviction caps at SPECULATIVE
+    high_conviction_max_position_percent: float = 5.0
+    medium_conviction_max_position_percent: float = 2.0
+    speculative_max_position_percent: float = 0.5
+
+    def __post_init__(self) -> None:
+        for name, value in dataclasses.asdict(self).items():
+            if value <= 0:
+                raise ConfigurationError(f"trading setting '{name}' must be positive, got {value}")
+        if self.medium_conviction_min_score >= self.high_conviction_min_score:
+            raise ConfigurationError("medium_conviction_min_score must be below high_conviction_min_score")
+        if not (0 < self.min_confirmation_coverage <= 1):
+            raise ConfigurationError("min_confirmation_coverage must be within (0, 1]")
+
+
+@dataclass(frozen=True)
 class CommunityThresholds:
     """Community-analysis anchors (Part 5, Part 18 Section 8).
 
@@ -337,6 +422,10 @@ class Settings:
     community_weights: CommunitySubWeights = field(default_factory=CommunitySubWeights)
     onchain_weights: OnChainSubWeights = field(default_factory=OnChainSubWeights)
     foundation_weights: FoundationSubWeights = field(default_factory=FoundationSubWeights)
+    token: TokenThresholds = field(default_factory=TokenThresholds)
+    token_weights: TokenSubWeights = field(default_factory=TokenSubWeights)
+    trading: TradingSettings = field(default_factory=TradingSettings)
+    trade_weights: TradeScoreWeights = field(default_factory=TradeScoreWeights)
     log_level: str = "INFO"
     log_dir: str = "logs"
 
@@ -359,6 +448,10 @@ class Settings:
             community_weights=_load_group(CommunitySubWeights, "COMMUNITY_WEIGHTS", env),
             onchain_weights=_load_group(OnChainSubWeights, "ONCHAIN_WEIGHTS", env),
             foundation_weights=_load_group(FoundationSubWeights, "FOUNDATION_WEIGHTS", env),
+            token=_load_group(TokenThresholds, "TOKEN", env),
+            token_weights=_load_group(TokenSubWeights, "TOKEN_WEIGHTS", env),
+            trading=_load_group(TradingSettings, "TRADING", env),
+            trade_weights=_load_group(TradeScoreWeights, "TRADE_WEIGHTS", env),
             log_level=env.get(f"{_ENV_PREFIX}_LOG_LEVEL", "INFO"),
             log_dir=env.get(f"{_ENV_PREFIX}_LOG_DIR", "logs"),
         )

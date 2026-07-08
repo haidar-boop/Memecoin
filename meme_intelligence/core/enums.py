@@ -62,6 +62,60 @@ class CommunityRating(str, Enum):
     ARTIFICIAL = "artificial"  # fake community detected — red-flag override
 
 
+class MarketCapStage(str, Enum):
+    """Market-cap maturity staging (Spec Part 7, Section 2)."""
+
+    EARLY = "early"        # low cap, low awareness: higher upside, higher risk
+    GROWTH = "growth"      # increasing attention and liquidity
+    MATURE = "mature"      # large cap: lower upside, lower volatility
+    UNKNOWN = "unknown"
+
+
+class ValuationClassification(str, Enum):
+    """Structural valuation assessment (Spec Part 7, Section 14)."""
+
+    UNDERVALUED = "undervalued"
+    FAIRLY_VALUED = "fairly_valued"
+    EXPENSIVE = "expensive"
+    OVERVALUED = "overvalued"
+    UNKNOWN = "unknown"
+
+
+class SetupType(str, Enum):
+    """Trading setup classification (Spec Part 8, Section 2)."""
+
+    EARLY_DISCOVERY = "early_discovery"        # highest upside, highest uncertainty
+    CONFIRMATION = "confirmation"              # evidence appeared, higher entry
+    TREND_CONTINUATION = "trend_continuation"  # established momentum
+    WATCH_ONLY = "watch_only"                  # not currently tradable
+
+
+class ConvictionLevel(str, Enum):
+    """Position conviction driving size guidance (Spec Part 8, Section 5)."""
+
+    HIGH = "high"
+    MEDIUM = "medium"
+    SPECULATIVE = "speculative"
+    NO_TRADE = "no_trade"  # destructive risk or failed gates
+
+
+class MarketRegime(str, Enum):
+    """Overall market environment (Spec Part 8, Section 10)."""
+
+    BULL = "bull"
+    NEUTRAL = "neutral"
+    BEAR = "bear"
+    UNKNOWN = "unknown"
+
+
+class CheckStatus(str, Enum):
+    """Entry-checklist item status (Spec Part 8, Section 3)."""
+
+    PASS = "pass"
+    FAIL = "fail"
+    UNKNOWN = "unknown"  # unverified is not a pass (Rule 8)
+
+
 class ScanLayer(str, Enum):
     """The four monitoring layers of the real-time architecture (Spec Part 2, Section 4)."""
 

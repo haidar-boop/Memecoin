@@ -18,7 +18,9 @@ human operator.
 | Part 4 — Rug detection & security analysis | GoPlus client (EVM + Solana), security analyzer with graded risk taxonomy, destructive-risk overrides, confidence/coverage reporting | ✅ Built |
 | Part 5 — Foundation & community intelligence | Community analyzer (engagement/growth/loyalty/creativity/dev-relationship) with fake-community detection; foundation score combiner | ✅ Built (engines; social collectors need API keys) |
 | Part 6 — On-chain intelligence & wallet behavior | On-chain analyzer (holder health, volume quality, buy/sell pressure, phase classification) running today on market+security data; smart-money/whale/flow slots ready for wallet collectors | ✅ Built (partial data sources) |
-| Parts 7+ — Token evaluation, scoring engine, alerts, dashboard, database | — | ⏳ Upcoming |
+| Part 7 — Token evaluation & market structure | Token analyzer: market-cap staging, FDV dilution, liquidity/volume-to-mcap ratios, supply concentration, valuation classification, competition percentile helper | ✅ Built |
+| Part 8 — Trading strategy & execution framework | Trade planner: trade score, setup classification, conviction + sizing guidance, entry checklist, required confirmations, invalidation conditions, FOMO questions — plans only, never orders | ✅ Built |
+| Parts 9+ — Risk management, scoring engine, alerts, dashboard, database | — | ⏳ Upcoming |
 
 ## Project structure
 
@@ -47,7 +49,10 @@ meme_intelligence/
 │   ├── security_analyzer.py   # Layer 2: graded security assessment
 │   ├── community_analyzer.py  # Layer 3: social strength + fake detection
 │   ├── onchain_analyzer.py    # Layer 3: wallet/volume behavior + phase
-│   └── foundation_analyzer.py # foundation score combiner (AI inputs later)
+│   ├── foundation_analyzer.py # foundation score combiner (AI inputs later)
+│   └── token_analyzer.py      # token structure: staging, dilution, ratios
+├── trading/
+│   └── trade_planner.py    # trade plans: checklist, sizing guidance, invalidations
 tests/                      # pytest suite (unit tests, no network required)
 ```
 
@@ -59,7 +64,8 @@ python -m pytest                          # run the test suite
 python -m meme_intelligence search PEPE   # live market lookup (no API key needed)
 python -m meme_intelligence discover --network solana        # find new launches
 python -m meme_intelligence security <address> --chain solana  # rug/security check
-python -m meme_intelligence scan --network solana --top 5    # discovery -> security pipeline
+python -m meme_intelligence scan --network solana --top 5    # discovery -> security -> on-chain
+python -m meme_intelligence plan <address> --chain ethereum --regime neutral  # full pass + trade plan
 ```
 
 Configuration is entirely environment-driven — see `.env.example` for every
@@ -107,7 +113,8 @@ environment.
 3. ~~Security analysis engine (rug detection, honeypot, holder concentration)~~ ✅
 4. ~~Community / on-chain / foundation analyzers~~ ✅ (social + wallet
    collectors pending API keys — engines run on partial data honestly)
-5. Token evaluation + momentum analyzers, database layer
-6. Scoring engine with red-flag overrides + AI report generation
-7. Alert system (Telegram/Discord) + dashboard
-8. Backtesting and self-improvement loop
+5. ~~Token structure analyzer + trade planner~~ ✅
+6. Risk management framework, momentum analyzer, database layer
+7. Scoring engine with red-flag overrides + AI report generation
+8. Alert system (Telegram/Discord) + dashboard
+9. Backtesting and self-improvement loop

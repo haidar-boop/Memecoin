@@ -22,6 +22,9 @@ import sys
 
 from meme_intelligence.analyzers.onchain_analyzer import OnChainAnalyzer, derive_onchain_profile
 from meme_intelligence.analyzers.security_analyzer import SecurityAnalyzer
+from meme_intelligence.analyzers.token_analyzer import TokenAnalyzer
+from meme_intelligence.core.enums import MarketRegime
+from meme_intelligence.trading.trade_planner import TradePlanner
 from meme_intelligence.collectors.market_data import DexScreenerClient, GeckoTerminalClient
 from meme_intelligence.collectors.security_data import GoPlusClient
 from meme_intelligence.config.settings import Settings, get_settings
@@ -194,6 +197,57 @@ async def _cmd_scan(args, settings) -> int:
     return 0
 
 
+async def _cmd_plan(args, settings) -> int:
+    """Full research pass for one token, ending in a trade plan (Part 8)."""
+    security_analyzer = SecurityAnalyzer(settings.security, settings.security_weights)
+    onchain_analyzer = OnChainAnalyzer(settings.onchain, settings.onchain_weights)
+    token_analyzer = TokenAnalyzer(settings.token, settings.token_weights)
+    planner = TradePlanner(settings.trading, settings.trade_weights)
+
+    async with build_dexscreener(settings) as dex, build_goplus(settings) as goplus:
+        pairs = await dex.get_token_pairs(args.address, chain=args.chain)
+        if not pairs:
+            print(f"No trading pairs found for {args.address}.")
+            return 1
+        pair = max(pairs, key=lambda p: p.liquidity_usd or 0.0)
+
+        security_profile = await goplus.get_token_security(pair.chain, pair.base_token.address)
+        if security_profile is None:
+            print(f"GoPlus has no security data for {args.address} on {pair.chain}.")
+            return 1
+
+    try:
+        security = security_analyzer.assess(security_profile, pair)
+    except InsufficientDataError as exc:
+        print(f"Cannot assess security: {exc}")
+        return 1
+
+    onchain = None
+    try:
+        onchain = onchain_analyzer.assess(derive_onchain_profile(pair, security_profile))
+    except InsufficientDataError:
+        pass
+
+    token_assessment = None
+    try:
+        token_assessment = token_analyzer.assess(pair, security_profile)
+    except InsufficientDataError:
+        pass
+
+    print(security.summary() + "\n")
+    if onchain:
+        print(onchain.summary() + "\n")
+    if token_assessment:
+        print(token_assessment.summary() + "\n")
+
+    plan = planner.build_plan(
+        pair, security, onchain=onchain, token=token_assessment,
+        regime=MarketRegime(args.regime),
+    )
+    print(plan.render())
+    return 0 if not security.is_destructive else 2
+
+
 async def _run(args: argparse.Namespace) -> int:
     settings = get_settings()
     setup_logging(settings.log_level, settings.log_dir)
@@ -203,6 +257,7 @@ async def _run(args: argparse.Namespace) -> int:
         "discover": _cmd_discover,
         "security": _cmd_security,
         "scan": _cmd_scan,
+        "plan": _cmd_plan,
     }[args.command]
     return await handler(args, settings)
 
@@ -234,6 +289,13 @@ def main(argv: list[str] | None = None) -> int:
     scan.add_argument("--network", action="append", default=None,
                       help="network id (repeatable); default: solana")
     scan.add_argument("--top", type=int, default=5, help="candidates to security-screen")
+
+    plan = sub.add_parser("plan", help="full research pass + trade plan for one token")
+    plan.add_argument("address")
+    plan.add_argument("--chain", default=None, help="filter to one chain id (e.g. solana)")
+    plan.add_argument("--regime", default="unknown",
+                      choices=["bull", "neutral", "bear", "unknown"],
+                      help="current market regime (Part 8 Section 10)")
 
     args = parser.parse_args(argv)
     if getattr(args, "network", None) is None and args.command in ("discover", "scan"):
