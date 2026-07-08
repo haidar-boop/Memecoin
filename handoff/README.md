@@ -4,6 +4,18 @@ This folder is a complete snapshot of project state as of **2026-07-08**,
 written so that any developer (or a fresh AI session with no memory of
 prior conversations) can pick up exactly where this session left off.
 
+## Start here
+
+**[FULL_PROJECT_HANDOFF.md](./FULL_PROJECT_HANDOFF.md)** is the single
+portable handoff file — hand this one file to a new session and nothing
+else is required. It contains the 21 Project Rules and the complete
+original project specification (Parts 1–32.5), copied verbatim with no
+paraphrasing or added commentary mixed into the text. A short, clearly
+separated status preamble sits at the top of that file only.
+
+Everything else in this folder (below) is supplementary reference material
+that breaks the same information into smaller, topic-specific files.
+
 ## Read these in order
 
 1. **[STATUS.md](./STATUS.md)** — what has been built (Parts 1–18), file
