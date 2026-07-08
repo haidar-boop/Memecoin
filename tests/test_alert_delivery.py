@@ -1,0 +1,345 @@
+"""Tests for Part 29: sinks, message format, ranking, history, performance."""
+
+from datetime import datetime, timezone
+
+import pytest
+
+from meme_intelligence.alerts.notification_engine import (
+    AlertEvent,
+    NotificationEngine,
+    rank_alert,
+)
+from meme_intelligence.alerts.sinks import (
+    DiscordSink,
+    TelegramSink,
+    channel_for,
+    format_alert,
+    parse_routes,
+)
+from meme_intelligence.ai.prompts import check_language
+from meme_intelligence.config.settings import (
+    AlertDeliverySettings,
+    AlertEngineSettings,
+    Settings,
+)
+from meme_intelligence.core.cache import TTLCache
+from meme_intelligence.core.enums import AlertPriority
+from meme_intelligence.core.errors import CollectorError, ConfigurationError
+from meme_intelligence.core.models import TokenIdentity
+from meme_intelligence.core.rate_limiter import RateLimiter
+from meme_intelligence.database.storage import Storage
+
+TOKEN = TokenIdentity(chain="solana", address="TokenAddr1", name="Meme", symbol="MEME")
+
+
+def make_event(priority=AlertPriority.HIGH, alert_type="high_priority_opportunity",
+               **overrides) -> AlertEvent:
+    defaults = dict(
+        priority=priority, alert_type=alert_type, token=TOKEN,
+        title="All review gates passed (score 88)",
+        reasons=("classification: strong_candidate",),
+        scores={"master": 88.0, "security": 92.0},
+        why_it_matters="Every measurable gate passed with data.",
+        monitoring=("track holder growth",),
+        detected_at=datetime(2026, 7, 8, 12, 0, tzinfo=timezone.utc),
+    )
+    defaults.update(overrides)
+    return AlertEvent(**defaults)
+
+
+# ---- Section 7 message format ----
+
+def test_format_alert_has_every_section7_field():
+    text = format_alert(make_event())
+    for expected in (
+        "HIGH IMPORTANCE UPDATE",          # Section 2 output header
+        "HIGH PRIORITY OPPORTUNITY",       # alert type
+        "Name: Meme", "Symbol: MEME", "Contract: TokenAddr1", "Chain: solana",
+        "Time detected: 2026-07-08 12:00 UTC",
+        "Event summary", "All review gates passed",
+        "Why it matters", "Evidence", "classification: strong_candidate",
+        "Current scores", "master: 88/100",
+        "Risk assessment: High",
+        "Recommended monitoring", "track holder growth",
+    ):
+        assert expected in text, f"missing: {expected}"
+    assert check_language(text) == []
+
+
+def test_priority_headers_and_risk_mapping():
+    critical = format_alert(make_event(priority=AlertPriority.CRITICAL,
+                                       alert_type="emergency_review"))
+    assert "CRITICAL RISK EVENT" in critical and "Risk assessment: High" in critical
+    low = format_alert(make_event(priority=AlertPriority.LOW, alert_type="info"))
+    assert "INFORMATION UPDATE" in low and "Risk assessment: Low" in low
+
+
+# ---- Section 8 channel routing ----
+
+def test_channel_categories():
+    assert channel_for(make_event()) == "discoveries"
+    assert channel_for(make_event(alert_type="whale_exit")) == "smart_money"
+    assert channel_for(make_event(alert_type="security_change")) == "security"
+    assert channel_for(make_event(alert_type="momentum")) == "momentum"
+    assert channel_for(make_event(alert_type="something_future")) == "reports"
+
+
+def test_parse_routes_validates_categories():
+    routes = parse_routes("security=-100123, momentum=-100456")
+    assert routes == {"security": "-100123", "momentum": "-100456"}
+    assert parse_routes("") == {}
+    with pytest.raises(ValueError):
+        parse_routes("secruity=-100123")  # typo must fail loudly
+    with pytest.raises(ValueError):
+        parse_routes("security=")
+
+
+# ---- Sinks ----
+
+def make_telegram(**kwargs) -> TelegramSink:
+    return TelegramSink("BOT_TOKEN", "-100999",
+                        rate_limiter=RateLimiter(100.0, burst=10), cache=TTLCache(),
+                        **kwargs)
+
+
+async def test_telegram_sends_formatted_message(monkeypatch):
+    sink = make_telegram()
+    calls = []
+
+    async def fake_get_json(path, params=None, *, cache_key=None, cache_ttl=None,
+                            headers=None, json_body=None):
+        calls.append({"path": path, "body": json_body})
+        return {"ok": True}
+
+    monkeypatch.setattr(sink, "_get_json", fake_get_json)
+    await sink.send(make_event())
+    assert len(calls) == 1
+    assert calls[0]["path"] == "botBOT_TOKEN/sendMessage"
+    assert calls[0]["body"]["chat_id"] == "-100999"
+    assert "HIGH IMPORTANCE UPDATE" in calls[0]["body"]["text"]
+
+
+async def test_telegram_routes_by_category(monkeypatch):
+    sink = make_telegram(routes={"security": "-100SEC"})
+    calls = []
+
+    async def fake_get_json(path, params=None, *, cache_key=None, cache_ttl=None,
+                            headers=None, json_body=None):
+        calls.append(json_body["chat_id"])
+        return {"ok": True}
+
+    monkeypatch.setattr(sink, "_get_json", fake_get_json)
+    await sink.send(make_event(alert_type="risk_warning"))     # security category
+    await sink.send(make_event(alert_type="momentum", priority=AlertPriority.MEDIUM))
+    assert calls == ["-100SEC", "-100999"]
+
+
+async def test_min_priority_filters_low_noise(monkeypatch):
+    sink = make_telegram(min_priority=AlertPriority.MEDIUM)
+    calls = []
+
+    async def fake_get_json(*a, **k):
+        calls.append(1)
+        return {"ok": True}
+
+    monkeypatch.setattr(sink, "_get_json", fake_get_json)
+    await sink.send(make_event(priority=AlertPriority.LOW, alert_type="info"))
+    assert calls == []  # phones don't buzz for background information
+    await sink.send(make_event(priority=AlertPriority.CRITICAL,
+                               alert_type="emergency_review"))
+    assert len(calls) == 1
+
+
+async def test_delivery_failure_never_raises(monkeypatch):
+    sink = make_telegram()
+
+    async def broken(*a, **k):
+        raise CollectorError("telegram: unexpected status 502")
+
+    monkeypatch.setattr(sink, "_get_json", broken)
+    await sink.send(make_event())  # must not raise (Rule 7)
+
+
+async def test_discord_appends_wait_and_wraps_content(monkeypatch):
+    sink = DiscordSink("https://discord.com/api/webhooks/1/abc",
+                       rate_limiter=RateLimiter(100.0, burst=10), cache=TTLCache())
+    calls = []
+
+    async def fake_get_json(path, params=None, *, cache_key=None, cache_ttl=None,
+                            headers=None, json_body=None):
+        calls.append({"path": path, "body": json_body})
+        return {"id": "1"}
+
+    monkeypatch.setattr(sink, "_get_json", fake_get_json)
+    await sink.send(make_event())
+    assert calls[0]["path"].endswith("?wait=true")
+    assert calls[0]["body"]["content"].startswith("```")
+
+
+# ---- Section 10 ranking ----
+
+def test_ranking_orders_critical_and_novel_first():
+    critical = make_event(priority=AlertPriority.CRITICAL, alert_type="emergency_review")
+    medium = make_event(priority=AlertPriority.MEDIUM, alert_type="momentum")
+    assert rank_alert(critical, is_novel=True) > rank_alert(medium, is_novel=True)
+    # Novelty moves the rank (10% weight) but never outranks priority.
+    assert rank_alert(medium, is_novel=True) > rank_alert(medium, is_novel=False)
+    assert rank_alert(medium, is_novel=True) < rank_alert(critical, is_novel=False)
+
+
+class RecordingSink:
+    def __init__(self):
+        self.events = []
+
+    async def send(self, event):
+        self.events.append(event)
+
+
+async def test_dispatch_ranks_and_stamps_detected_at():
+    sink = RecordingSink()
+    engine = NotificationEngine([sink], AlertEngineSettings())
+    medium = make_event(priority=AlertPriority.MEDIUM, alert_type="momentum",
+                        detected_at=None)
+    critical = make_event(priority=AlertPriority.CRITICAL, alert_type="emergency_review",
+                          detected_at=None)
+    delivered = await engine.dispatch([medium, critical])  # arrives unordered
+    assert [e.priority for e in delivered] == [AlertPriority.CRITICAL, AlertPriority.MEDIUM]
+    assert all(e.detected_at is not None for e in sink.events)
+
+
+# ---- Sections 11-12: history and performance ----
+
+def make_master(score: float):
+    """Minimal MasterAssessment stand-in for snapshot recording."""
+    from meme_intelligence.analyzers.scoring_engine import MasterAssessment
+    from meme_intelligence.core.enums import Classification, ConfidenceLevel
+    from meme_intelligence.core.models import CategoryScores
+
+    return MasterAssessment(
+        token=TOKEN, generated_at=datetime.now(timezone.utc),
+        category_scores=CategoryScores(security=score), final_score=score,
+        coverage=0.15, classification=Classification.WATCHLIST,
+        overrides=(), decision_trace=(), confidence=ConfidenceLevel.MEDIUM,
+    )
+
+
+def test_alert_history_and_performance(tmp_path):
+    ticks = iter(datetime(2026, 7, 8, 12, minute, tzinfo=timezone.utc)
+                 for minute in range(0, 60, 10))
+    with Storage(str(tmp_path / "t.sqlite3"), now_func=lambda: next(ticks)) as storage:
+        storage.record_snapshot(make_master(70.0), source="test")       # t0: baseline
+        storage.record_alert(make_event(scores={"master": 70.0}), source="test")  # t1
+        storage.record_snapshot(make_master(84.0), source="test")       # t2: follow-up
+
+        history = storage.alert_history()
+        assert len(history) == 1
+        assert history[0]["alert_type"] == "high_priority_opportunity"
+        assert history[0]["score_at_alert"] == pytest.approx(70.0)
+        assert history[0]["symbol"] == "MEME"
+
+        performance = storage.alert_performance()
+        assert len(performance) == 1
+        row = performance[0]
+        assert row["alerts_measured"] == 1
+        assert row["avg_score_drift"] == pytest.approx(14.0)  # 84 after vs 70 at alert
+        assert row["improved_count"] == 1
+
+
+def test_alert_performance_empty_without_followups(tmp_path):
+    with Storage(str(tmp_path / "t.sqlite3")) as storage:
+        storage.record_alert(make_event(scores={"master": 70.0}), source="test")
+        assert storage.alert_performance() == []  # no snapshot after the alert yet
+
+
+# ---- Settings ----
+
+def test_delivery_settings_validated_and_loaded():
+    with pytest.raises(ConfigurationError):
+        AlertDeliverySettings(external_min_priority="loud")
+    settings = Settings.from_env(env={
+        "MEMEINTEL_TELEGRAM_BOT_TOKEN": "123:abc",
+        "MEMEINTEL_TELEGRAM_CHAT_ID": "-100777",
+        "MEMEINTEL_DISCORD_WEBHOOK_URL": "https://discord.com/api/webhooks/1/x",
+        "MEMEINTEL_ALERT_DELIVERY_TELEGRAM_ROUTES": "security=-100SEC",
+        "MEMEINTEL_ALERT_DELIVERY_EXTERNAL_MIN_PRIORITY": "high",
+    })
+    assert settings.telegram_bot_token == "123:abc"
+    assert settings.alert_delivery.telegram_routes == "security=-100SEC"
+    assert settings.alert_delivery.external_min_priority == "high"
+
+
+def test_build_sinks_activates_on_secrets():
+    from meme_intelligence.__main__ import build_sinks
+
+    assert len(build_sinks(Settings.from_env(env={}))) == 1  # console only
+    sinks = build_sinks(Settings.from_env(env={
+        "MEMEINTEL_TELEGRAM_BOT_TOKEN": "123:abc",
+        "MEMEINTEL_TELEGRAM_CHAT_ID": "-100777",
+        "MEMEINTEL_DISCORD_WEBHOOK_URL": "https://discord.com/api/webhooks/1/x",
+    }))
+    assert [type(s).__name__ for s in sinks] == ["ConsoleSink", "TelegramSink", "DiscordSink"]
+
+
+# ---- Community-aware rules (gate now fed by the live collector) ----
+
+def make_rule_result(community):
+    """Minimal PipelineResult stand-in for targeted rule tests."""
+    from types import SimpleNamespace
+
+    security = SimpleNamespace(
+        overall_score=90.0, is_destructive=False,
+        sub_scores={"liquidity": 85.0}, findings=(),
+    )
+    return SimpleNamespace(
+        pair=SimpleNamespace(base_token=TOKEN),
+        security=security,
+        onchain=SimpleNamespace(overall_score=80.0),
+        community=community,
+        master=SimpleNamespace(
+            final_score=88.0,
+            classification=SimpleNamespace(value="strong_candidate"),
+        ),
+    )
+
+
+def test_opportunity_gate_uses_live_community_score():
+    from meme_intelligence.alerts.notification_engine import AutomationRules
+    from meme_intelligence.config.settings import AlertThresholds
+    from types import SimpleNamespace
+
+    rules = AutomationRules(AlertThresholds(), AlertEngineSettings())
+
+    # Community verified and passing -> full HIGH qualification.
+    strong = SimpleNamespace(overall_score=78.0, is_artificial=False, findings=())
+    event = rules._opportunity_rule(make_rule_result(strong))
+    assert event.alert_type == "high_priority_opportunity"
+    assert event.priority is AlertPriority.HIGH
+
+    # Community verified and failing -> no opportunity alert at all.
+    weak = SimpleNamespace(overall_score=40.0, is_artificial=False, findings=())
+    assert rules._opportunity_rule(make_rule_result(weak)) is None
+
+    # No community data -> provisional MEDIUM, exactly as before (Rule 8).
+    event = rules._opportunity_rule(make_rule_result(None))
+    assert event.alert_type == "early_opportunity"
+    assert event.priority is AlertPriority.MEDIUM
+
+
+def test_fake_community_fires_high_alert():
+    from meme_intelligence.alerts.notification_engine import AutomationRules
+    from meme_intelligence.config.settings import AlertThresholds
+    from meme_intelligence.analyzers.common import Finding
+    from meme_intelligence.core.enums import RiskTier
+    from types import SimpleNamespace
+
+    rules = AutomationRules(AlertThresholds(), AlertEngineSettings())
+    fake = SimpleNamespace(
+        overall_score=0.0, is_artificial=True,
+        findings=(Finding("growth", RiskTier.DESTRUCTIVE,
+                          "62% bot followers: fake community"),),
+    )
+    event = rules._community_rule(make_rule_result(fake))
+    assert event is not None
+    assert event.alert_type == "community_fake"
+    assert event.priority is AlertPriority.HIGH
+    assert channel_for(event) == "security"

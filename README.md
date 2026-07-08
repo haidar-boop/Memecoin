@@ -33,7 +33,8 @@ human operator.
 | Part 18 — Advanced rug detection & scam prevention | Continuous contract-change monitoring: security facts persisted per token and diffed on every re-analysis (honeypot appearing / ownership un-renounced / mint authority / LP unlock → CRITICAL; blacklist/pause/tax hikes → HIGH; concentration creep / holder drain → MEDIUM); promotion-and-exit pattern detector | ✅ Built (deep dev-history indexing deferred — needs a data source we don't have) |
 | Part 19 — Narrative intelligence & viral potential | Viral score (memorability/shareability/emotional impact/cultural timing/participation, 5×20%); narrative intelligence score (meme strength/timing/viral potential/creativity/long-term, 5×20%) feeding the master framework's 15% narrative category; category + life-cycle stage classification; sentiment; three narrative risk factors → Low/Medium/High; viral catalysts; evidence-derived strengths/weaknesses; community-engine cross-fill for participation/creativity | ✅ Built (judgment slots await the AI layer / social collectors — engine reports partial coverage honestly) |
 | Part 23 — AI agent integration & intelligence pipeline | LLM reasoning layer (Claude, structured outputs): one validated judgment call fills the foundation/narrative qualitative slots + bull/bear reasoning + confidence; structured Section-3 snapshots (never raw data); layered validation (schema → ranges → banned-language guard → confidence floor); research modes (fast/standard/deep); runs post-pipeline only, never on destructive tokens, degrades to deterministic evidence on any failure; `report --ai` / `plan --ai` | ✅ Built (live-verified; memory/feedback loop lands with Part 24) |
-| Parts 20+ — Full alert intelligence, dashboard, backtesting | — | ⏳ Upcoming |
+| Part 29 — Real-time alert intelligence & notification | Telegram bot + Discord webhook sinks (channel-category routing, min-priority noise control, Section 7 message format with why-it-matters/evidence/risk); Section 10 dispatch ranking (impact/confidence/urgency/novelty); alert history DB + per-type performance measurement (score drift after alert); community-fed opportunity gate + fake-community alert; `alerts` CLI with `--test` delivery check | ✅ Built (add a bot token / webhook to activate delivery) |
+| Parts 20+ — Dashboard, backtesting, remaining consolidation parts | — | ⏳ Upcoming |
 
 ## Project structure
 
@@ -75,7 +76,8 @@ meme_intelligence/
 ├── trading/
 │   └── trade_planner.py    # trade plans: checklist, sizing guidance, invalidations
 ├── alerts/
-│   └── notification_engine.py # automation rules + alert dispatch with cooldown
+│   ├── notification_engine.py # automation rules + ranked dispatch with cooldown
+│   └── sinks.py            # Part 29: Telegram/Discord delivery + Section 7 format
 ├── database/
 │   └── storage.py          # SQLite: tokens, snapshots, watchlist, journal
 ├── workflow/
@@ -107,6 +109,7 @@ python -m meme_intelligence compare ethereum:0xPEPE solana:WIFADDR  # table + ra
 python -m meme_intelligence watchlist --refresh               # show / re-score tracked tokens
 python -m meme_intelligence daily                             # full daily routine + watchlist
 python -m meme_intelligence monitor --cycles 5 --interval 30  # continuous scanner + alerts
+python -m meme_intelligence alerts --test                      # check alert delivery setup
 ```
 
 Configuration is entirely environment-driven — see `.env.example` for every
@@ -158,5 +161,5 @@ environment.
 6. ~~Risk management framework + master scoring engine~~ ✅
 7. ~~Daily workflow + database + report template~~ ✅
 8. ~~Momentum analyzer + continuous scanner + automation rules~~ ✅
-9. ~~Narrative engine~~ ✅ (Telegram/Discord sinks, dashboard still pending)
+9. ~~Narrative engine, Telegram/Discord sinks~~ ✅ (dashboard still pending)
 10. ~~AI/LLM integration for qualitative judgments~~ ✅ (backtesting loop still pending)

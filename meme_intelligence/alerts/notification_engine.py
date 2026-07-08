@@ -19,8 +19,10 @@ sinks arrive with the Part 29 build.
 
 from __future__ import annotations
 
+import dataclasses
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Callable, Protocol
 
 from meme_intelligence.analyzers.risk_analyzer import emergency_flags
@@ -44,11 +46,15 @@ class AlertEvent:
     reasons: tuple[str, ...]
     scores: dict[str, float | None] = field(default_factory=dict)
     monitoring: tuple[str, ...] = ()  # recommended next checks
+    why_it_matters: str = ""          # potential impact (Part 29, Section 7)
+    detected_at: datetime | None = None  # stamped at dispatch when unset
 
     def render(self) -> str:
         symbol = self.token.symbol or self.token.address[:8]
         lines = [f"[{self.priority.value.upper()}] {self.alert_type}: {symbol} ({self.token.chain})",
                  f"  {self.title}"]
+        if self.why_it_matters:
+            lines.append(f"  why it matters: {self.why_it_matters}")
         for reason in self.reasons:
             lines.append(f"  - {reason}")
         if self.scores:
@@ -83,6 +89,9 @@ class AutomationRules:
         if momentum is not None:
             events.append(momentum)
         events.extend(self._smart_money_rules(result))
+        community = self._community_rule(result)
+        if community is not None:
+            events.append(community)
         drop = self._score_drop_rule(result, previous_score)
         if drop is not None:
             events.append(drop)
@@ -100,6 +109,8 @@ class AutomationRules:
                 title="Destructive risk detected — do not enter; review any exposure now",
                 reasons=tuple(critical),
                 scores={"security": result.security.overall_score},
+                why_it_matters="Destructive findings invalidate the opportunity outright; "
+                               "capital in this token is at immediate structural risk.",
                 monitoring=("verify LP status and contract permissions immediately",
                             "if holding, decide exit before anything else"),
             ))
@@ -125,7 +136,10 @@ class AutomationRules:
             "security": (result.security.overall_score, self._t.security),
             "onchain": (result.onchain.overall_score if result.onchain else None, self._t.onchain),
             "liquidity": (result.security.sub_scores.get("liquidity"), self._t.liquidity),
-            "community": (None, self._t.community),  # collector pending; stays unverified
+            # Live since the community collector landed; unlisted tokens
+            # still report None and stay honestly unverified (Rule 8).
+            "community": (result.community.overall_score if result.community else None,
+                          self._t.community),
         }
 
         unverified = [name for name, (value, _) in gates.items() if value is None]
@@ -143,6 +157,8 @@ class AutomationRules:
                 title=f"All review gates passed (score {result.master.final_score:.0f})",
                 reasons=(f"classification: {result.master.classification.value}",),
                 scores=scores,
+                why_it_matters="Every measurable human-review gate passed with data — "
+                               "the rare setup the scanner exists to find.",
                 monitoring=("track holder growth and volume quality for continuation",),
             )
         return AlertEvent(
@@ -224,6 +240,8 @@ class AutomationRules:
                 title=f"{wallet.whales_selling} whale(s) selling"
                       + (f"; net flow ${wallet.whale_net_flow_usd:,.0f}"
                          if wallet.whale_net_flow_usd is not None else ""),
+                why_it_matters="Large-holder distribution can absorb all organic demand "
+                               "and often precedes sharp drawdowns.",
                 reasons=tuple(f"{w.owner[:8]}… {w.percent:.1f}% [{w.classification.value}]"
                               for w in wallet.whales[:4]),
                 scores={"smart_money": wallet.overall_score},
@@ -241,6 +259,26 @@ class AutomationRules:
                 monitoring=("treat volume and holder growth as untrustworthy until this clears",),
             ))
         return events
+
+    # Community alert (Part 29, Section 3): a confirmed-fake community is a
+    # decision-changing event — the master score already forces Avoid, and
+    # this surfaces WHY to anyone tracking the token.
+    def _community_rule(self, result: PipelineResult) -> AlertEvent | None:
+        community = result.community
+        if community is None or not community.is_artificial:
+            return None
+        return AlertEvent(
+            priority=AlertPriority.HIGH,
+            alert_type="community_fake",
+            token=result.pair.base_token,
+            title="Community engagement is artificial",
+            reasons=tuple(f.message for f in community.findings[:4]),
+            scores={"community": community.overall_score,
+                    "master": result.master.final_score},
+            why_it_matters="Fake communities exist to exit on real buyers; social "
+                           "traction cannot be trusted as demand evidence here.",
+            monitoring=("treat all social signals for this token as untrustworthy",),
+        )
 
     # IF the score drops sharply vs the last snapshot THEN review (Part 13 Section 7).
     def _score_drop_rule(self, result: PipelineResult,
@@ -298,6 +336,30 @@ def events_from_security_changes(token: TokenIdentity, changes) -> list[AlertEve
     return events
 
 
+# Alert ranking components (Part 29, Section 10). The spec fixes the
+# weights (impact 40 / confidence 30 / urgency 20 / novelty 10); the
+# component scales are documented implementation choices: impact and
+# urgency derive from the priority level (Section 2 defines priority AS
+# the impact/urgency grading), confidence from evidence density, novelty
+# from whether this token+type was alerted before.
+_RANK_WEIGHTS = {"impact": 0.40, "confidence": 0.30, "urgency": 0.20, "novelty": 0.10}
+_IMPACT_POINTS = {AlertPriority.CRITICAL: 100.0, AlertPriority.HIGH: 75.0,
+                  AlertPriority.MEDIUM: 50.0, AlertPriority.LOW: 25.0}
+_URGENCY_POINTS = {AlertPriority.CRITICAL: 100.0, AlertPriority.HIGH: 70.0,
+                   AlertPriority.MEDIUM: 40.0, AlertPriority.LOW: 10.0}
+
+
+def rank_alert(event: AlertEvent, *, is_novel: bool) -> float:
+    """0-100 dispatch rank (Part 29, Section 10). Higher ranks send first."""
+    confidence = min(100.0, 30.0 + 20.0 * len(event.reasons))
+    return (
+        _RANK_WEIGHTS["impact"] * _IMPACT_POINTS[event.priority]
+        + _RANK_WEIGHTS["confidence"] * confidence
+        + _RANK_WEIGHTS["urgency"] * _URGENCY_POINTS[event.priority]
+        + _RANK_WEIGHTS["novelty"] * (100.0 if is_novel else 25.0)
+    )
+
+
 class AlertSink(Protocol):
     async def send(self, event: AlertEvent) -> None: ...
 
@@ -333,17 +395,34 @@ class NotificationEngine:
         self._logger = get_logger("alerts.engine")
 
     async def dispatch(self, events: list[AlertEvent]) -> list[AlertEvent]:
-        """Send events not in cooldown; returns those actually delivered."""
-        delivered: list[AlertEvent] = []
+        """Send events not in cooldown; returns those actually delivered.
+
+        Events are ranked before sending (Part 29 Section 10) so the most
+        decision-relevant alert always arrives first, and each is stamped
+        with its detection time for the Section 7 message format.
+        """
         now = self._time()
-        for event in events:
-            key = (event.token.chain, event.token.address.lower(), event.alert_type)
+
+        def key_of(event: AlertEvent) -> tuple[str, str, str]:
+            return (event.token.chain, event.token.address.lower(), event.alert_type)
+
+        ranked = sorted(
+            events,
+            key=lambda e: rank_alert(e, is_novel=key_of(e) not in self._last_sent),
+            reverse=True,
+        )
+
+        delivered: list[AlertEvent] = []
+        for event in ranked:
+            key = key_of(event)
             last = self._last_sent.get(key)
             if last is not None and now - last < self._cooldown:
                 self._logger.debug("alert suppressed by cooldown: %s %s",
                                    event.alert_type, event.token.address)
                 continue
             self._last_sent[key] = now
+            if event.detected_at is None:
+                event = dataclasses.replace(event, detected_at=datetime.now(timezone.utc))
             for sink in self._sinks:
                 await sink.send(event)
             delivered.append(event)

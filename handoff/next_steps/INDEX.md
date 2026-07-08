@@ -33,7 +33,7 @@ to the genuinely new material within it.
 | PART_26_MOMENTUM_DETECTION.md | 26 | Advanced Entry Signal & Momentum Detection Engine | Low — momentum analyzer already built in Part 14 against this doctrine |
 | PART_27_LAUNCH_SCANNER.md | 27 | Automated Token Discovery & Early Launch Scanner | Low — discovery engine already built; first-5-minute/first-hour framing is new |
 | PART_28_PORTFOLIO_MANAGEMENT.md | 28 | Portfolio Management, Tracking & Opportunity Rotation System | Medium — watchlist tiers/thesis tracking exist; explicit rotation ranking formula does not |
-| PART_29_ALERT_INTELLIGENCE.md | 29 | Real-Time Alert Intelligence & Notification System | Medium — alert engine exists; Telegram/Discord sinks and alert-history-performance tracking do not |
+| PART_29_ALERT_INTELLIGENCE.md | 29 | Real-Time Alert Intelligence & Notification System | ✅ **Built** — `alerts/sinks.py`, alert history + performance (see `../STATUS.md`); add a bot token/webhook to activate delivery |
 | PART_30_SYSTEM_OPTIMIZATION.md | 30 | Complete System Optimization & Final Professional Deployment Framework | Low — consolidation part |
 | PART_31_IMPLEMENTATION_BLUEPRINT_AND_CONSISTENCY_LOCK.md | 31 | Implementation Blueprint for AI Coding Agents + Framework Consistency Lock | Already applied — this is the part that determined current scoring weights |
 | PART_32_DATA_SOURCE_BLUEPRINT.md | 32 | Data Source & API Integration Blueprint | Low — architecture already built |
@@ -51,8 +51,9 @@ Given what's already built, the genuinely high-value next targets are:
    verified against the live API: the qualitative slots
    (`FoundationInputs`, `NarrativeInputs`, bull/bear reasoning) are now
    real AI judgments via `report --ai` / `plan --ai`
-3. **Part 29** (Alert Intelligence) — Telegram/Discord sinks; small,
-   contained, immediately useful once a bot token exists
+3. ~~**Part 29** (Alert Intelligence)~~ — ✅ built: Telegram/Discord
+   sinks, §7 format, §10 ranking, alert history + performance; delivery
+   activates when a bot token/webhook lands in `.env`
 4. **Part 24** (Backtesting) — highest long-term value, but needs weeks
    of accumulated snapshot data to be meaningful; the data collection
    side is already running

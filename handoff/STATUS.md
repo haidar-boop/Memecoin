@@ -1,6 +1,6 @@
-# Build Status — Parts 1 through 19, plus 23
+# Build Status — Parts 1 through 19, plus 23 and 29
 
-**332 tests passing.** ~10,700 lines of source, ~4,900 lines of tests.
+**349 tests passing.** ~11,100 lines of source, ~5,200 lines of tests.
 Parts 1–18 were built on `claude/large-prompt-review-l49wp1`; Parts 19
 and 23 on `claude/handoff-folder-review-fuu9dq`.
 
@@ -327,9 +327,48 @@ The classification/scoring framework, config system, and logging.
 
 ---
 
+## Part 29 — Real-Time Alert Intelligence & Notification System → 🟡
+
+- `alerts/sinks.py` — `TelegramSink` (bot API) and `DiscordSink`
+  (webhooks), built on the shared collector machinery (rate limit /
+  retry / timeout for free); delivery failures are logged and swallowed —
+  a dead messenger never stops the scanner (Rule 7). §8 channel
+  organization: every alert type maps to one of the five spec categories
+  (discoveries / smart_money / security / momentum / reports) with
+  optional per-category routing (`MEMEINTEL_ALERT_DELIVERY_*_ROUTES`);
+  external sinks deliver MEDIUM+ by default (§1 noise doctrine),
+  configurable.
+- `format_alert()` — the full §7 message format: §2 priority header,
+  token block, time detected, event summary, why it matters, evidence,
+  current scores, risk assessment (derived from the priority grading),
+  recommended monitoring. `AlertEvent` gained `why_it_matters` and
+  `detected_at` (stamped at dispatch).
+- §10 ranking — `rank_alert()`: impact 40% / confidence 30% / urgency
+  20% / novelty 10%; dispatch sends the most decision-relevant alert
+  first. Component scales are documented implementation choices.
+- §§11-12 — `alerts` table (every delivered alert, with score-at-alert);
+  `Storage.alert_history()` and `alert_performance()` (score drift after
+  each alert, per type — the measurement layer Part 24's learning loop
+  builds on). Wired into the continuous scanner.
+- Community rules went live with the collector: the opportunity gate now
+  reads the real community score (full HIGH qualification is finally
+  reachable), and a confirmed-fake community fires a `community_fake`
+  HIGH alert.
+- CLI: `alerts` (history + performance), `alerts --test` (synthetic
+  delivery check through every configured sink).
+- §§4-6 (filtering, confirmation, cooldown) were already built in Parts
+  13/15; §9's daily summary is Part 11's `DailyReport`.
+- **Gap (why 🟡):** no Telegram bot token / Discord webhook configured
+  yet — sinks are built, tested against mocks, and activate the moment
+  `MEMEINTEL_TELEGRAM_BOT_TOKEN` + `MEMEINTEL_TELEGRAM_CHAT_ID` (or
+  `MEMEINTEL_DISCORD_WEBHOOK_URL`) land in `.env`. Verify with
+  `python -m meme_intelligence alerts --test`.
+
+---
+
 ## What's NOT built yet
 
-Everything in `next_steps/` — **Parts 20-22 and 24 through 33** (see
+Everything in `next_steps/` — **Parts 20-22, 24-28, and 30-33** (see
 `next_steps/INDEX.md`). Some of these (20, 21, 22, 23, 30, 31, 32, 32.5)
 substantially overlap with what's already built, since they're
 architecture/consolidation parts written before the earlier build parts
@@ -355,9 +394,9 @@ earlier parts.
    pipeline is ready; the join/scoring logic isn't written.
 3. **EVM wallet intelligence** (Alchemy or similar) is not built — Part
    17 is Solana-only.
-4. **No Telegram/Discord alert sinks yet** — `NotificationEngine`
-   supports pluggable sinks; only `ConsoleSink` exists. Needs a Telegram
-   bot token (see SETUP.md — not created yet).
+4. ~~No Telegram/Discord alert sinks yet~~ **Resolved — Part 29 built.**
+   Sinks activate when the bot token / webhook URL lands in `.env`
+   (still pending on the user's side).
 5. ~~No Anthropic/LLM integration yet.~~ **Resolved — Part 23 built and
    live.** The AI reasoning layer fills the qualitative judgment slots
    via `report --ai` / `plan --ai`; only the social-data half of those

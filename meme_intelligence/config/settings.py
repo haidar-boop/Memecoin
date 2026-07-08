@@ -527,6 +527,32 @@ class AlertEngineSettings:
 
 
 @dataclass(frozen=True)
+class AlertDeliverySettings:
+    """External alert delivery (Part 29, Section 8).
+
+    Sinks activate only when their secrets exist on :class:`Settings`
+    (telegram_bot_token + telegram_chat_id; discord_webhook_url).
+    ``*_routes`` optionally split Section 8's channel categories
+    (discoveries / smart_money / security / momentum / reports) across
+    destinations: ``"security=-100123,momentum=-100456"``. External sinks
+    deliver ``external_min_priority`` and above so phones only buzz for
+    decision-relevant alerts (Section 1); the console still shows all.
+    """
+
+    telegram_routes: str = ""     # category=chat_id[,category=chat_id...]
+    discord_routes: str = ""      # category=webhook_url[,...]
+    external_min_priority: str = "medium"  # critical | high | medium | low
+    requests_per_minute: float = 20.0      # per external sink (Rule 11)
+
+    def __post_init__(self) -> None:
+        if self.external_min_priority not in ("critical", "high", "medium", "low"):
+            raise ConfigurationError(
+                f"external_min_priority must be a valid priority, got {self.external_min_priority!r}")
+        if self.requests_per_minute <= 0:
+            raise ConfigurationError("alert delivery requests_per_minute must be positive")
+
+
+@dataclass(frozen=True)
 class RiskSubWeights:
     """Sub-weights inside the risk score (Part 9, Section 6). Higher risk score = riskier."""
 
@@ -698,6 +724,7 @@ class Settings:
     narrative_weights: NarrativeSubWeights = field(default_factory=NarrativeSubWeights)
     viral_weights: ViralSubWeights = field(default_factory=ViralSubWeights)
     alert_engine: AlertEngineSettings = field(default_factory=AlertEngineSettings)
+    alert_delivery: AlertDeliverySettings = field(default_factory=AlertDeliverySettings)
     wallet: WalletIntelSettings = field(default_factory=WalletIntelSettings)
     smart_money_weights: SmartMoneySubWeights = field(default_factory=SmartMoneySubWeights)
     ai: AISettings = field(default_factory=AISettings)
@@ -710,6 +737,10 @@ class Settings:
     anthropic_api_key: str = ""
     # Optional free demo key: raises CoinGecko's rate limit for community data.
     coingecko_api_key: str = ""
+    # Alert delivery secrets (Part 29): sinks stay off while these are empty.
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+    discord_webhook_url: str = ""
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Settings":
@@ -744,6 +775,7 @@ class Settings:
             narrative_weights=_load_group(NarrativeSubWeights, "NARRATIVE_WEIGHTS", env),
             viral_weights=_load_group(ViralSubWeights, "VIRAL_WEIGHTS", env),
             alert_engine=_load_group(AlertEngineSettings, "ALERT_ENGINE", env),
+            alert_delivery=_load_group(AlertDeliverySettings, "ALERT_DELIVERY", env),
             wallet=_load_group(WalletIntelSettings, "WALLET", env),
             smart_money_weights=_load_group(SmartMoneySubWeights, "SMART_MONEY_WEIGHTS", env),
             ai=_load_group(AISettings, "AI", env),
@@ -753,6 +785,9 @@ class Settings:
             birdeye_api_key=env.get(f"{_ENV_PREFIX}_BIRDEYE_API_KEY", ""),
             anthropic_api_key=env.get(f"{_ENV_PREFIX}_ANTHROPIC_API_KEY", ""),
             coingecko_api_key=env.get(f"{_ENV_PREFIX}_COINGECKO_API_KEY", ""),
+            telegram_bot_token=env.get(f"{_ENV_PREFIX}_TELEGRAM_BOT_TOKEN", ""),
+            telegram_chat_id=env.get(f"{_ENV_PREFIX}_TELEGRAM_CHAT_ID", ""),
+            discord_webhook_url=env.get(f"{_ENV_PREFIX}_DISCORD_WEBHOOK_URL", ""),
         )
 
 

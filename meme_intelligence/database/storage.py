@@ -91,6 +91,25 @@ CREATE TABLE IF NOT EXISTS wallet_sightings (
 );
 CREATE INDEX IF NOT EXISTS idx_sightings_wallet ON wallet_sightings(wallet, seen_at);
 CREATE INDEX IF NOT EXISTS idx_sightings_token ON wallet_sightings(token_id);
+
+-- Alert history (Part 29 Section 11): every delivered alert, joinable
+-- against later snapshots so Section 12 / Part 24 can measure which
+-- alerts were useful and which were noise.
+CREATE TABLE IF NOT EXISTS alerts (
+    id INTEGER PRIMARY KEY,
+    token_id INTEGER NOT NULL REFERENCES tokens(id),
+    created_at TEXT NOT NULL,
+    priority TEXT NOT NULL,
+    alert_type TEXT NOT NULL,
+    title TEXT NOT NULL,
+    reasons TEXT NOT NULL,       -- JSON array
+    scores TEXT NOT NULL,        -- JSON object
+    score_at_alert REAL,         -- master score when the alert fired
+    source TEXT NOT NULL,
+    outcome TEXT                 -- filled by performance analysis (Part 24)
+);
+CREATE INDEX IF NOT EXISTS idx_alerts_token ON alerts(token_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_alerts_type ON alerts(alert_type, created_at);
 """
 
 
@@ -367,4 +386,79 @@ class Storage:
                    ORDER BY j.id DESC LIMIT ?""",
                 (token.chain, token.address, limit),
             ).fetchall()
+        return [dict(row) for row in rows]
+
+    # ---- Alert history & performance (Part 29, Sections 11-12) ----
+
+    def record_alert(self, event, source: str) -> int:
+        """Persist one delivered alert (Part 29, Section 11).
+
+        ``event`` is an :class:`~meme_intelligence.alerts.notification_engine.AlertEvent`
+        (duck-typed to avoid an alerts->database->alerts import cycle).
+        """
+        token_id = self.upsert_token(event.token)
+        cursor = self._conn.execute(
+            """INSERT INTO alerts
+               (token_id, created_at, priority, alert_type, title, reasons,
+                scores, score_at_alert, source)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (token_id, self._now().isoformat(), event.priority.value,
+             event.alert_type, event.title, json.dumps(list(event.reasons)),
+             json.dumps({k: v for k, v in event.scores.items()}),
+             event.scores.get("master") or event.scores.get("overall"),
+             source),
+        )
+        self._conn.commit()
+        return int(cursor.lastrowid)
+
+    def alert_history(self, token: TokenIdentity | None = None, limit: int = 50) -> list[dict]:
+        """Recent alerts, newest first (Part 29, Section 11)."""
+        if token is None:
+            rows = self._conn.execute(
+                """SELECT a.id, a.created_at, a.priority, a.alert_type, a.title,
+                          a.score_at_alert, a.outcome, t.chain, t.address, t.symbol
+                   FROM alerts a JOIN tokens t ON t.id = a.token_id
+                   ORDER BY a.id DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                """SELECT a.id, a.created_at, a.priority, a.alert_type, a.title,
+                          a.score_at_alert, a.outcome, t.chain, t.address, t.symbol
+                   FROM alerts a JOIN tokens t ON t.id = a.token_id
+                   WHERE t.chain = ? AND t.address = ?
+                   ORDER BY a.id DESC LIMIT ?""",
+                (token.chain, token.address, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def alert_performance(self, *, min_followups: int = 1) -> list[dict]:
+        """Per-alert-type outcome measurement (Part 29, Section 12).
+
+        For every alert, the token's master score at alert time is compared
+        with its latest snapshot afterwards. Positive average drift means
+        the alert type tends to precede improvement (useful); near zero
+        means noise; negative means it precedes deterioration — which for
+        risk alerts is the alert WORKING. Interpretation stays with the
+        reader; this reports the measurements (Rule 8).
+        """
+        rows = self._conn.execute(
+            """SELECT a.alert_type,
+                      COUNT(*) AS alerts_measured,
+                      AVG(s.final_score - a.score_at_alert) AS avg_score_drift,
+                      SUM(CASE WHEN s.final_score > a.score_at_alert THEN 1 ELSE 0 END)
+                          AS improved_count
+               FROM alerts a
+               JOIN tokens t ON t.id = a.token_id
+               JOIN snapshots s ON s.id = (
+                   SELECT s2.id FROM snapshots s2
+                   WHERE s2.token_id = a.token_id AND s2.created_at > a.created_at
+                   ORDER BY s2.created_at DESC LIMIT 1
+               )
+               WHERE a.score_at_alert IS NOT NULL
+               GROUP BY a.alert_type
+               HAVING COUNT(*) >= ?
+               ORDER BY alerts_measured DESC""",
+            (min_followups,),
+        ).fetchall()
         return [dict(row) for row in rows]

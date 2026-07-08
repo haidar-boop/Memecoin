@@ -23,7 +23,12 @@ import sys
 from meme_intelligence.ai.comparison import render_comparison
 from meme_intelligence.ai.reasoning import build_judgment_service
 from meme_intelligence.ai.report_generator import build_report
-from meme_intelligence.alerts.notification_engine import ConsoleSink, NotificationEngine
+from meme_intelligence.alerts.notification_engine import (
+    AlertEvent,
+    ConsoleSink,
+    NotificationEngine,
+)
+from meme_intelligence.alerts.sinks import DiscordSink, TelegramSink, parse_routes
 from meme_intelligence.analyzers.onchain_analyzer import OnChainAnalyzer, derive_onchain_profile
 from meme_intelligence.analyzers.security_analyzer import SecurityAnalyzer
 from meme_intelligence.analyzers.wallet_intelligence import sightings_from_assessment
@@ -34,7 +39,7 @@ from meme_intelligence.collectors.wallet_data import (
     HeliusClient,
     WalletDataService,
 )
-from meme_intelligence.core.enums import MarketRegime, ResearchMode
+from meme_intelligence.core.enums import AlertPriority, MarketRegime, ResearchMode
 from meme_intelligence.database.storage import Storage
 from meme_intelligence.trading.trade_planner import TradePlanner
 from meme_intelligence.workflow.controller import ContinuousScanner
@@ -129,6 +134,29 @@ def build_wallet_service(settings: Settings) -> WalletDataService | None:
         top_holders_limit=settings.wallet.top_holders_limit,
         recent_trades_limit=settings.wallet.recent_trades_limit,
     )
+
+
+def build_sinks(settings: Settings) -> list:
+    """Console always; Telegram/Discord activate when their secrets exist (Part 29)."""
+    sinks: list = [ConsoleSink()]
+    min_priority = AlertPriority(settings.alert_delivery.external_min_priority)
+    shared = {
+        "rate_limiter": RateLimiter.per_minute(settings.alert_delivery.requests_per_minute),
+        "timeout_seconds": settings.http.timeout_seconds,
+        "retry_attempts": settings.http.retry_attempts,
+        "min_priority": min_priority,
+    }
+    if settings.telegram_bot_token and settings.telegram_chat_id:
+        sinks.append(TelegramSink(
+            settings.telegram_bot_token, settings.telegram_chat_id,
+            routes=parse_routes(settings.alert_delivery.telegram_routes), **shared,
+        ))
+    if settings.discord_webhook_url:
+        sinks.append(DiscordSink(
+            settings.discord_webhook_url,
+            routes=parse_routes(settings.alert_delivery.discord_routes), **shared,
+        ))
+    return sinks
 
 
 def _format_pair(pair: DexPair) -> str:
@@ -460,6 +488,63 @@ async def _cmd_compare(args, settings) -> int:
     return 0
 
 
+async def _cmd_alerts(args, settings) -> int:
+    """Alert history + performance analysis (Part 29, Sections 11-12);
+    --test sends a test alert through every configured sink."""
+    if args.test:
+        from meme_intelligence.core.models import TokenIdentity
+
+        event = AlertEvent(
+            priority=AlertPriority.HIGH,
+            alert_type="high_priority_opportunity",
+            token=TokenIdentity(chain="test", address="TestTokenAddress",
+                                name="Delivery Test", symbol="TEST"),
+            title="Test alert — delivery check for every configured sink",
+            reasons=("this is a synthetic event; no token was analyzed",),
+            scores={"master": 88.0},
+            why_it_matters="If you can read this, alert delivery works.",
+            monitoring=("nothing — this is only a delivery test",),
+        )
+        sinks = build_sinks(settings)
+        engine = NotificationEngine(sinks, settings.alert_engine)
+        await engine.dispatch([event])
+        external = [type(s).__name__ for s in sinks[1:]]
+        print(f"\nTest alert dispatched to: console"
+              + (", " + ", ".join(external) if external else
+                 " only (no Telegram/Discord secrets configured)"))
+        for sink in sinks[1:]:
+            await sink.close()
+        return 0
+
+    with Storage(settings.database.path) as storage:
+        history = storage.alert_history(limit=args.limit)
+        performance = storage.alert_performance()
+
+    if not history:
+        print("No alerts recorded yet — history accumulates while `monitor` runs.")
+        return 0
+
+    print(f"Last {len(history)} alert(s):\n")
+    for row in history:
+        symbol = row["symbol"] or row["address"][:8]
+        score = f"{row['score_at_alert']:.0f}" if row["score_at_alert"] is not None else "?"
+        print(f"  {row['created_at'][:16]}  [{row['priority']:>8}] "
+              f"{row['alert_type']:<26} {symbol:<10} score {score}")
+
+    if performance:
+        print("\nAlert performance (score drift after alert, Part 29 Section 12):")
+        print("  positive drift after opportunity alerts = useful signal;")
+        print("  negative drift after risk alerts = the alert fired correctly.\n")
+        for row in performance:
+            drift = row["avg_score_drift"]
+            print(f"  {row['alert_type']:<26} n={row['alerts_measured']:<4} "
+                  f"avg drift {drift:+.1f}  improved {row['improved_count']}/{row['alerts_measured']}")
+    else:
+        print("\nNo re-assessments after alerts yet — performance analysis needs "
+              "follow-up snapshots (keep `monitor` running).")
+    return 0
+
+
 async def _cmd_watchlist(args, settings) -> int:
     """Watchlist command (Part 16, Section 8): show tracked tokens; --refresh re-scores."""
     with Storage(settings.database.path) as storage:
@@ -555,7 +640,7 @@ async def _cmd_monitor(args, settings) -> int:
         build_coingecko(settings) as coingecko,
     ):
         with Storage(settings.database.path) as storage:
-            notifier = NotificationEngine([ConsoleSink()], settings.alert_engine)
+            notifier = NotificationEngine(build_sinks(settings), settings.alert_engine)
             scanner = ContinuousScanner(
                 settings, storage, notifier,
                 gecko_client=gecko, goplus_client=goplus,
@@ -590,6 +675,7 @@ async def _run(args: argparse.Namespace) -> int:
         "quick": _cmd_quick,
         "compare": _cmd_compare,
         "watchlist": _cmd_watchlist,
+        "alerts": _cmd_alerts,
         "wallets": _cmd_wallets,
         "daily": _cmd_daily,
         "monitor": _cmd_monitor,
@@ -660,6 +746,11 @@ def main(argv: list[str] | None = None) -> int:
     compare.add_argument("--chain", default=None, help="default chain for unprefixed addresses")
     compare.add_argument("--regime", default="unknown",
                          choices=["bull", "neutral", "bear", "unknown"])
+
+    alerts = sub.add_parser("alerts", help="alert history + performance; --test checks delivery")
+    alerts.add_argument("--limit", type=int, default=20)
+    alerts.add_argument("--test", action="store_true",
+                        help="send a synthetic alert through every configured sink")
 
     watchlist = sub.add_parser("watchlist", help="show tracked tokens; --refresh re-scores")
     watchlist.add_argument("--refresh", action="store_true")

@@ -153,6 +153,33 @@ untouched. The structured-outputs schema cannot carry numeric
 minimum/maximum constraints (discovered in live testing) — ranges are
 stated in field descriptions and enforced when parsing.
 
+### 12. Part 29 ranking/format derivations, and what was already built
+
+Part 29's §§4-6 (filtering, confirmation, cooldown) were built in Parts
+13/15, and §9's daily summary is Part 11's `DailyReport` — Part 29's
+build covered only the genuinely new surface (sinks, §7 format, §10
+ranking, §§11-12 history/performance). Interpretive choices:
+
+- **§10 ranking components.** The spec fixes the weights (impact 40 /
+  confidence 30 / urgency 20 / novelty 10) but not the component scales.
+  Impact and urgency derive from the §2 priority level (the spec defines
+  priority AS the impact/urgency grading); confidence from evidence
+  density (bullet count); novelty from whether this token+type was
+  alerted before in this run. Ranking orders dispatch — it never
+  suppresses (cooldown and the min-priority filter do that).
+- **§7 "Risk Assessment: Low/Medium/High"** derives from the alert's
+  priority level for the same reason.
+- **§12 performance measure**: score drift between the master score at
+  alert time and the token's latest snapshot afterwards, aggregated per
+  alert type. Deliberately direction-agnostic: positive drift after
+  opportunity alerts = useful; negative drift after risk alerts = the
+  alert fired correctly. Outcome labeling belongs to Part 24's learning
+  loop; the `alerts.outcome` column is ready for it.
+- **External sinks default to MEDIUM+** (§1: information vs signal vs
+  event) while the console shows everything; configurable (Rule 17).
+- Route strings validate loudly — a typo in a category name raises at
+  startup instead of silently sending security alerts nowhere (Rule 6).
+
 ## Deferred, with reasons
 
 ### Social data collectors (Parts 5, 19, and the "community" gate everywhere)

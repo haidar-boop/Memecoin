@@ -231,6 +231,9 @@ class ContinuousScanner:
         delivered = await self._notifier.dispatch(events)
         stats.alerts.extend(delivered)
         for event in delivered:
+            # Structured history for Section 12 / Part 24 performance
+            # measurement, plus the human-readable journal line.
+            self._storage.record_alert(event, source=source)
             self._storage.add_journal(
                 token, "alert", f"{event.priority.value}/{event.alert_type}: {event.title}",
             )
