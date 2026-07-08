@@ -21,16 +21,16 @@ import asyncio
 import sys
 
 from meme_intelligence.ai.report_generator import build_report
+from meme_intelligence.alerts.notification_engine import ConsoleSink, NotificationEngine
 from meme_intelligence.analyzers.onchain_analyzer import OnChainAnalyzer, derive_onchain_profile
-from meme_intelligence.analyzers.risk_analyzer import RiskAnalyzer
-from meme_intelligence.analyzers.scoring_engine import ScoringEngine, derive_timing_score
 from meme_intelligence.analyzers.security_analyzer import SecurityAnalyzer
-from meme_intelligence.analyzers.token_analyzer import TokenAnalyzer
 from meme_intelligence.collectors.market_data import CoinGeckoClient
 from meme_intelligence.core.enums import MarketRegime
 from meme_intelligence.database.storage import Storage
 from meme_intelligence.trading.trade_planner import TradePlanner
+from meme_intelligence.workflow.controller import ContinuousScanner
 from meme_intelligence.workflow.daily_routine import DailyRoutine
+from meme_intelligence.workflow.pipeline import ResearchPipeline
 from meme_intelligence.collectors.market_data import DexScreenerClient, GeckoTerminalClient
 from meme_intelligence.collectors.security_data import GoPlusClient
 from meme_intelligence.config.settings import Settings, get_settings
@@ -217,83 +217,58 @@ async def _cmd_scan(args, settings) -> int:
 
 async def _cmd_plan(args, settings) -> int:
     """Full research pass for one token, ending in a trade plan (Part 8)."""
-    result, error = await _gather_assessments(args, settings)
+    gathered, error = await _gather_assessments(args, settings)
     if error:
         print(error)
         return 1
-    pair, security, onchain, token_assessment, risk_assessment, master, plan = result
+    result, plan = gathered
 
-    for section in (security, onchain, token_assessment, risk_assessment, master):
+    for section in (result.security, result.onchain, result.token,
+                    result.momentum, result.risk, result.master):
         if section is not None:
             print(section.summary() + "\n")
     print(plan.render())
-    return 0 if not security.is_destructive else 2
+    return 0 if not result.security.is_destructive else 2
 
 
 async def _gather_assessments(args, settings):
-    """Shared research pass used by the plan and report commands."""
-    security_analyzer = SecurityAnalyzer(settings.security, settings.security_weights)
-    onchain_analyzer = OnChainAnalyzer(settings.onchain, settings.onchain_weights)
-    token_analyzer = TokenAnalyzer(settings.token, settings.token_weights)
-
+    """Shared research pass (via the pipeline) used by plan and report commands."""
+    regime = MarketRegime(args.regime)
     async with build_dexscreener(settings) as dex, build_goplus(settings) as goplus:
         pairs = await dex.get_token_pairs(args.address, chain=args.chain)
         if not pairs:
             return None, f"No trading pairs found for {args.address}."
         pair = max(pairs, key=lambda p: p.liquidity_usd or 0.0)
-        try:
-            security_profile = await goplus.get_token_security(pair.chain, pair.base_token.address)
-        except CollectorError as exc:
-            return None, f"Security data unavailable: {exc}"
-        if security_profile is None:
-            return None, f"GoPlus has no security data for {args.address} on {pair.chain}."
+        result = await ResearchPipeline(settings, goplus).analyze_pair(pair, regime=regime)
 
-    try:
-        security = security_analyzer.assess(security_profile, pair)
-    except InsufficientDataError as exc:
-        return None, f"Cannot assess security: {exc}"
+    if result is None:
+        return None, (f"Security data unavailable for {args.address} on {pair.chain} "
+                      "(chain unsupported or token not indexed yet).")
 
-    onchain = token_assessment = None
-    try:
-        onchain = onchain_analyzer.assess(derive_onchain_profile(pair, security_profile))
-    except InsufficientDataError:
-        pass
-    try:
-        token_assessment = token_analyzer.assess(pair, security_profile)
-    except InsufficientDataError:
-        pass
-
-    regime = MarketRegime(args.regime)
-    risk_assessment = RiskAnalyzer(settings.risk_weights).assess(
-        security, pair=pair, token=token_assessment, onchain=onchain, regime=regime,
-    )
-    master = ScoringEngine(settings.weights, settings.bands).evaluate(
-        security, onchain=onchain, token_structure=token_assessment, risk=risk_assessment,
-        timing_score=derive_timing_score(pair, token_assessment, onchain),
-    )
     plan = TradePlanner(settings.trading, settings.trade_weights).build_plan(
-        pair, security, onchain=onchain, token=token_assessment, regime=regime,
+        pair, result.security, onchain=result.onchain, token=result.token, regime=regime,
     )
-    return (pair, security, onchain, token_assessment, risk_assessment, master, plan), None
+    return (result, plan), None
 
 
 async def _cmd_report(args, settings) -> int:
     """Full canonical intelligence report (Part 12), persisted to the database."""
-    result, error = await _gather_assessments(args, settings)
+    gathered, error = await _gather_assessments(args, settings)
     if error:
         print(error)
         return 1
-    pair, security, onchain, token_assessment, risk_assessment, master, plan = result
+    result, plan = gathered
 
     report = build_report(
-        pair, master, security,
-        onchain=onchain, token=token_assessment, risk=risk_assessment, plan=plan,
+        result.pair, result.master, result.security,
+        onchain=result.onchain, token=result.token, momentum=result.momentum,
+        risk=result.risk, plan=plan,
     )
     print(report.text)
 
     with Storage(settings.database.path) as storage:
-        storage.record_snapshot(master, source="report_cli")
-    return 0 if not security.is_destructive else 2
+        storage.record_snapshot(result.master, source="report_cli")
+    return 0 if not result.security.is_destructive else 2
 
 
 async def _cmd_daily(args, settings) -> int:
@@ -322,6 +297,37 @@ async def _cmd_daily(args, settings) -> int:
     return 0
 
 
+async def _cmd_monitor(args, settings) -> int:
+    """Run the continuous scanning loop (Part 13). Ctrl-C stops gracefully."""
+    import dataclasses as _dc
+    workflow = settings.workflow
+    if args.network:
+        workflow = _dc.replace(workflow, networks=",".join(args.network))
+    if args.interval:
+        workflow = _dc.replace(workflow, monitor_interval_seconds=args.interval)
+    settings = _dc.replace(settings, workflow=workflow)
+
+    async with build_geckoterminal(settings) as gecko, build_goplus(settings) as goplus:
+        with Storage(settings.database.path) as storage:
+            notifier = NotificationEngine([ConsoleSink()], settings.alert_engine)
+            scanner = ContinuousScanner(
+                settings, storage, notifier,
+                gecko_client=gecko, goplus_client=goplus,
+                regime=MarketRegime(args.regime),
+            )
+            try:
+                history = await scanner.run(max_cycles=args.cycles)
+            except KeyboardInterrupt:
+                scanner.request_stop()
+                history = []
+
+    analyzed = sum(s.analyzed for s in history)
+    alerts = sum(len(s.alerts) for s in history)
+    print(f"\nMonitor finished: {len(history)} cycle(s), {analyzed} token(s) analyzed, "
+          f"{alerts} alert(s) dispatched.")
+    return 0
+
+
 async def _run(args: argparse.Namespace) -> int:
     settings = get_settings()
     setup_logging(settings.log_level, settings.log_dir)
@@ -334,6 +340,7 @@ async def _run(args: argparse.Namespace) -> int:
         "plan": _cmd_plan,
         "report": _cmd_report,
         "daily": _cmd_daily,
+        "monitor": _cmd_monitor,
     }[args.command]
     return await handler(args, settings)
 
@@ -382,6 +389,16 @@ def main(argv: list[str] | None = None) -> int:
     daily = sub.add_parser("daily", help="run the full daily research routine (Part 11)")
     daily.add_argument("--network", action="append", default=None,
                        help="network id (repeatable); default from settings")
+
+    monitor = sub.add_parser("monitor", help="continuous scanning loop (Part 13)")
+    monitor.add_argument("--network", action="append", default=None,
+                         help="network id (repeatable); default from settings")
+    monitor.add_argument("--cycles", type=int, default=None,
+                         help="stop after N cycles (default: run until Ctrl-C)")
+    monitor.add_argument("--interval", type=float, default=None,
+                         help="seconds between cycles (default from settings)")
+    monitor.add_argument("--regime", default="unknown",
+                         choices=["bull", "neutral", "bear", "unknown"])
 
     args = parser.parse_args(argv)
     if getattr(args, "network", None) is None and args.command in ("discover", "scan"):

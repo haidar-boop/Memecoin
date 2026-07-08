@@ -1,0 +1,154 @@
+"""Tests for the continuous scanning controller (Spec Part 13)."""
+
+from datetime import datetime, timedelta, timezone
+
+from meme_intelligence.alerts.notification_engine import NotificationEngine
+from meme_intelligence.config.settings import AlertEngineSettings, Settings
+from meme_intelligence.core.errors import TransientCollectorError
+from meme_intelligence.core.models import DexPair, SecurityProfile, TokenIdentity
+from meme_intelligence.database.storage import Storage
+from meme_intelligence.workflow.controller import ContinuousScanner
+
+NOW = datetime(2026, 7, 8, 12, 0, tzinfo=timezone.utc)
+SETTINGS = Settings.from_env(env={})
+
+
+def make_pair(address="TokenA", symbol="MEMA") -> DexPair:
+    token = TokenIdentity(chain="solana", address=address, symbol=symbol)
+    return DexPair(
+        chain="solana", pair_address=f"Pool{address}", base_token=token,
+        market_cap=400_000.0, fdv=420_000.0, liquidity_usd=90_000.0,
+        volume_24h=120_000.0, volume_1h=8_000.0,
+        buys_24h=400, sells_24h=250, buys_1h=40, sells_1h=15,
+        buyers_24h=300, sellers_24h=180,
+        price_change_24h=15.0, price_change_6h=8.0, price_change_1h=2.0,
+        pair_created_at=NOW - timedelta(hours=3),
+    )
+
+
+def clean_profile(token: TokenIdentity) -> SecurityProfile:
+    return SecurityProfile(
+        token=token, source="goplus",
+        is_honeypot=False, cannot_buy=False, cannot_sell_all=False,
+        is_open_source=True, is_proxy=False, is_mintable=False,
+        ownership_renounced=True, hidden_owner=False, can_take_back_ownership=False,
+        has_blacklist=False, trading_pausable=False, is_freezable=False,
+        balance_mutable=False, selfdestruct=False,
+        buy_tax_percent=0.0, sell_tax_percent=0.0, tax_modifiable=False,
+        fake_token=False, is_airdrop_scam=False, anti_whale_modifiable=False,
+        slippage_modifiable=False, personal_slippage_modifiable=False,
+        trading_cooldown=False, honeypot_same_creator_count=0,
+        holder_count=2500, top_holder_percent=3.0, top10_holder_percent=22.0,
+        creator_percent=1.5, owner_percent=0.0, lp_locked_percent=95.0,
+    )
+
+
+class FakeGecko:
+    def __init__(self, pools, fail_on_call: int | None = None):
+        self.pools = pools
+        self.calls = 0
+        self.fail_on_call = fail_on_call
+
+    async def get_new_pools(self, network):
+        self.calls += 1
+        if self.fail_on_call is not None and self.calls == self.fail_on_call:
+            raise TransientCollectorError("provider hiccup")
+        return self.pools
+
+
+class FakeGoPlus:
+    def __init__(self, profiles):
+        self.profiles = profiles
+
+    async def get_token_security(self, chain, address):
+        return self.profiles.get(address)
+
+
+class RecordingSink:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, event):
+        self.sent.append(event)
+
+
+def make_scanner(storage, pools, profiles, fail_on_call=None, sink=None):
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    notifier = NotificationEngine([sink or RecordingSink()], AlertEngineSettings(),
+                                  time_func=lambda: 0.0)
+    scanner = ContinuousScanner(
+        SETTINGS, storage, notifier,
+        gecko_client=FakeGecko(pools, fail_on_call=fail_on_call),
+        goplus_client=FakeGoPlus(profiles),
+        now_func=lambda: NOW,
+        sleep_func=fake_sleep,
+    )
+    return scanner, sleeps
+
+
+async def test_bounded_run_analyzes_and_persists():
+    pair = make_pair()
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner, _ = make_scanner(storage, [pair],
+                                  {pair.base_token.address: clean_profile(pair.base_token)})
+        history = await scanner.run(max_cycles=2)
+
+        assert len(history) == 2
+        assert history[0].analyzed == 1
+        assert history[1].analyzed == 0  # seen-set prevents re-analysis
+        assert storage.score_history(pair.base_token)
+        assert storage.get_watchlist()  # tiered in
+
+
+async def test_alerts_dispatched_and_journaled():
+    pair = make_pair()
+    sink = RecordingSink()
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner, _ = make_scanner(storage, [pair],
+                                  {pair.base_token.address: clean_profile(pair.base_token)},
+                                  sink=sink)
+        history = await scanner.run(max_cycles=1)
+
+        assert history[0].alerts  # provisional opportunity alert fired
+        assert sink.sent
+        journal = storage.journal_entries(pair.base_token)
+        assert any(e["kind"] == "alert" for e in journal)
+
+
+async def test_failed_cycle_backs_off_and_recovers():
+    pair = make_pair()
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner, sleeps = make_scanner(
+            storage, [pair],
+            {pair.base_token.address: clean_profile(pair.base_token)},
+            fail_on_call=1,  # first discovery call raises
+        )
+        history = await scanner.run(max_cycles=2)
+
+        # cycle 1 failed (no stats), cycle 2 succeeded after backoff
+        assert len(history) == 1
+        assert history[0].analyzed == 1
+        assert sleeps and sleeps[0] == 5.0  # error backoff, not the normal interval
+
+
+async def test_request_stop_ends_loop():
+    pair = make_pair()
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner, _ = make_scanner(storage, [pair],
+                                  {pair.base_token.address: clean_profile(pair.base_token)})
+        scanner.request_stop()
+        history = await scanner.run(max_cycles=10)
+        assert history == []  # stopped before the first cycle
+
+
+async def test_unindexed_tokens_skipped():
+    pair = make_pair()
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner, _ = make_scanner(storage, [pair], {})  # goplus knows nothing
+        history = await scanner.run(max_cycles=1)
+        assert history[0].analyzed == 0
+        assert storage.get_watchlist() == []

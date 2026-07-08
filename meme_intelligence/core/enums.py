@@ -142,6 +142,33 @@ class WatchlistTier(str, Enum):
     ARCHIVED = "archived"                          # failed criteria; kept for learning
 
 
+class EntryZone(str, Enum):
+    """Entry timing zone (Spec Part 14, Section 6)."""
+
+    EARLY = "early"                # strong fundamentals, limited hype: highest upside
+    CONFIRMATION = "confirmation"  # market validating: higher confidence, higher price
+    LATE = "late"                  # extreme extension: risk of buying into distribution
+    UNCLEAR = "unclear"
+
+
+class PreferredAction(str, Enum):
+    """Momentum-report preferred action (Spec Part 14, Section 14)."""
+
+    MONITOR = "monitor"
+    WAIT_FOR_CONFIRMATION = "wait_for_confirmation"
+    CONSIDER_RESEARCH_ENTRY = "consider_research_entry"
+    AVOID = "avoid"
+
+
+class AlertPriority(str, Enum):
+    """Alert priority levels (Spec Part 29, Section 2)."""
+
+    CRITICAL = "critical"  # immediate attention: rug indicators, destructive risk
+    HIGH = "high"          # important opportunity or risk
+    MEDIUM = "medium"      # useful information
+    LOW = "low"            # background information
+
+
 class ScanLayer(str, Enum):
     """The four monitoring layers of the real-time architecture (Spec Part 2, Section 4)."""
 

@@ -30,23 +30,16 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable
 
-from meme_intelligence.analyzers.onchain_analyzer import OnChainAnalyzer, derive_onchain_profile
-from meme_intelligence.analyzers.risk_analyzer import RiskAnalyzer
-from meme_intelligence.analyzers.scoring_engine import (
-    MasterAssessment,
-    ScoringEngine,
-    derive_timing_score,
-)
-from meme_intelligence.analyzers.security_analyzer import SecurityAnalyzer
-from meme_intelligence.analyzers.token_analyzer import TokenAnalyzer
+from meme_intelligence.analyzers.scoring_engine import MasterAssessment
 from meme_intelligence.collectors.market_data import MajorsSnapshot
 from meme_intelligence.config.settings import Settings
 from meme_intelligence.core.enums import Classification, MarketRegime, RiskTier, WatchlistTier
-from meme_intelligence.core.errors import CollectorError, InsufficientDataError
+from meme_intelligence.core.errors import CollectorError
 from meme_intelligence.core.logging_setup import get_logger
 from meme_intelligence.core.models import DexPair
 from meme_intelligence.database.storage import Storage, WatchlistChange
 from meme_intelligence.scanners.discovery import DiscoveryEngine, scan_new_pools
+from meme_intelligence.workflow.pipeline import ResearchPipeline
 
 _TIER_FOR_CLASSIFICATION = {
     Classification.ELITE_OPPORTUNITY: WatchlistTier.TIER_1_HIGH_PRIORITY,
@@ -196,11 +189,7 @@ class DailyRoutine:
         self._logger = get_logger("workflow.daily")
 
         self._discovery = DiscoveryEngine(settings.discovery, now_func=now_func)
-        self._security = SecurityAnalyzer(settings.security, settings.security_weights)
-        self._onchain = OnChainAnalyzer(settings.onchain, settings.onchain_weights)
-        self._token = TokenAnalyzer(settings.token, settings.token_weights)
-        self._risk = RiskAnalyzer(settings.risk_weights)
-        self._scoring = ScoringEngine(settings.weights, settings.bands, now_func=now_func)
+        self._pipeline = ResearchPipeline(settings, goplus_client, now_func=now_func)
 
     async def run(self) -> DailyReport:
         report = DailyReport(date=self._now(), environment=await self._market_check())
@@ -259,44 +248,17 @@ class DailyRoutine:
             self._intake(candidate.pair, master, candidate.discovery_score, report)
 
     async def _analyze(self, pair: DexPair, report: DailyReport) -> MasterAssessment | None:
-        """Layers 2-3 for one pair; returns None when security data is missing."""
-        try:
-            profile = await self._goplus.get_token_security(pair.chain, pair.base_token.address)
-        except CollectorError as exc:
-            report.notes.append(f"{pair.base_token.symbol or pair.base_token.address[:8]}: "
-                                f"security data unavailable ({exc})")
+        """Layers 2-3 for one pair via the shared pipeline; None when unanalyzable."""
+        result = await self._pipeline.analyze_pair(pair, regime=report.environment.regime)
+        if result is None:
             return None
-        if profile is None:
-            return None
+        self._storage.record_snapshot(result.master, source="daily_routine")
 
-        try:
-            security = self._security.assess(profile, pair)
-        except InsufficientDataError:
-            return None
-
-        onchain = token = None
-        try:
-            onchain = self._onchain.assess(derive_onchain_profile(pair, profile))
-        except InsufficientDataError:
-            pass
-        try:
-            token = self._token.assess(pair, profile)
-        except InsufficientDataError:
-            pass
-
-        risk = self._risk.assess(security, pair=pair, token=token, onchain=onchain,
-                                 regime=report.environment.regime)
-        master = self._scoring.evaluate(
-            security, onchain=onchain, token_structure=token, risk=risk,
-            timing_score=derive_timing_score(pair, token, onchain, now_func=self._now),
-        )
-        self._storage.record_snapshot(master, source="daily_routine")
-
-        for finding in security.findings:
+        for finding in result.security.findings:
             if finding.severity in (RiskTier.DESTRUCTIVE, RiskTier.SERIOUS_WARNING):
                 symbol = pair.base_token.symbol or pair.base_token.address[:8]
                 report.biggest_risks.append(f"{symbol}: {finding.message}")
-        return master
+        return result.master
 
     def _intake(self, pair: DexPair, master: MasterAssessment,
                 discovery_score: float | None, report: DailyReport) -> None:

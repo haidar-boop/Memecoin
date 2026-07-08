@@ -21,9 +21,9 @@ FIXTURE = {
             "baseToken": {"address": "BaseAddr1", "name": "Test Meme", "symbol": "MEME"},
             "quoteToken": {"address": "QuoteAddr", "name": "Wrapped SOL", "symbol": "SOL"},
             "priceUsd": "0.00012345",
-            "txns": {"h24": {"buys": 150, "sells": 90}},
-            "volume": {"h24": 250000.5},
-            "priceChange": {"h24": 42.7},
+            "txns": {"h1": {"buys": 12, "sells": 5}, "h24": {"buys": 150, "sells": 90}},
+            "volume": {"h1": 9000.5, "h6": 60000.0, "h24": 250000.5},
+            "priceChange": {"h1": 3.2, "h6": 15.0, "h24": 42.7},
             "liquidity": {"usd": 85000.25, "base": 1000, "quote": 500},
             "fdv": 1200000,
             "marketCap": 1100000,
@@ -76,6 +76,11 @@ async def test_full_pair_is_normalized(client):
     assert pair.liquidity_usd == pytest.approx(85000.25)
     assert pair.market_cap == pytest.approx(1100000)
     assert pair.buys_24h == 150 and pair.sells_24h == 90
+    assert pair.buys_1h == 12 and pair.sells_1h == 5
+    assert pair.price_change_1h == pytest.approx(3.2)
+    assert pair.price_change_6h == pytest.approx(15.0)
+    assert pair.volume_1h == pytest.approx(9000.5)
+    assert pair.volume_6h == pytest.approx(60000.0)
     assert pair.pair_created_at.tzinfo == timezone.utc
     assert pair.pair_created_at.year == 2025
 

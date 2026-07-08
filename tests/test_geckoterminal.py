@@ -23,9 +23,12 @@ FIXTURE = {
                 "fdv_usd": "500000",
                 "market_cap_usd": None,
                 "pool_created_at": "2026-07-07T22:00:00Z",
-                "volume_usd": {"h24": "150000.75"},
-                "price_change_percentage": {"h24": "35.5"},
-                "transactions": {"h24": {"buys": 320, "sells": 180, "buyers": 210, "sellers": 140}},
+                "volume_usd": {"h1": "12000.5", "h6": "48000.0", "h24": "150000.75"},
+                "price_change_percentage": {"h1": "4.1", "h6": "18.0", "h24": "35.5"},
+                "transactions": {
+                    "h1": {"buys": 25, "sells": 10, "buyers": 20, "sellers": 8},
+                    "h24": {"buys": 320, "sells": 180, "buyers": 210, "sellers": 140},
+                },
             },
             "relationships": {
                 "base_token": {"data": {"id": "solana_BaseTokenAddr1", "type": "token"}},
@@ -72,6 +75,9 @@ async def test_new_pool_normalized(client):
     assert pool.volume_24h == pytest.approx(150000.75)
     assert pool.buys_24h == 320 and pool.sells_24h == 180
     assert pool.buyers_24h == 210 and pool.sellers_24h == 140
+    assert pool.buys_1h == 25 and pool.sells_1h == 10
+    assert pool.price_change_1h == pytest.approx(4.1)
+    assert pool.volume_1h == pytest.approx(12000.5)
     assert pool.market_cap is None
     assert pool.pair_created_at.tzinfo == timezone.utc
     assert pool.pair_created_at.hour == 22

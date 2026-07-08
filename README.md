@@ -25,7 +25,9 @@ human operator.
 | Part 11 — Daily operating routine | Daily routine: market-environment check (CoinGecko), discovery→analysis pipeline, tiered watchlist with review/archival, research journal, daily report — all persisted | ✅ Built |
 | Part 12 — Final report template | Canonical intelligence report renderer: evidence-derived bull/bear cases, scoring table, decision trace, trade planning, final verdict | ✅ Built |
 | Database foundation | SQLite storage: tokens, assessment snapshots (feeds Part 24 backtesting), watchlist, journal | ✅ Built |
-| Parts 13+ — Momentum/narrative analyzers, alerts, dashboard, AI/LLM integration, backtesting | — | ⏳ Upcoming |
+| Part 13 — Automation & agent architecture | Continuous scanner (crash-tolerant loop, graceful shutdown, seen-set dedupe), automation rules (opportunity gates, emergency review, score-drop review), notification engine with cooldown | ✅ Built (console sink; Telegram/Discord in Part 29 phase) |
+| Part 14 — Trading intelligence & momentum | Momentum analyzer (price/volume/social/on-chain lenses, acceleration over level, fake-momentum detection), entry zones, preferred action; multi-window (1h/6h/24h) market data | ✅ Built |
+| Parts 15+ — Narrative engine, full alert intelligence, dashboard, AI/LLM integration, backtesting | — | ⏳ Upcoming |
 
 ## Project structure
 
@@ -57,13 +59,18 @@ meme_intelligence/
 │   ├── foundation_analyzer.py # foundation score combiner (AI inputs later)
 │   ├── token_analyzer.py      # token structure: staging, dilution, ratios
 │   ├── risk_analyzer.py       # risk score + portfolio limits + emergencies
+│   ├── momentum_analyzer.py   # momentum lenses, entry zones, preferred action
 │   └── scoring_engine.py      # master score: overrides, decision tree, weights
 ├── trading/
 │   └── trade_planner.py    # trade plans: checklist, sizing guidance, invalidations
+├── alerts/
+│   └── notification_engine.py # automation rules + alert dispatch with cooldown
 ├── database/
 │   └── storage.py          # SQLite: tokens, snapshots, watchlist, journal
 ├── workflow/
-│   └── daily_routine.py    # Part 11 daily research-desk orchestration
+│   ├── pipeline.py         # shared per-token analysis chain (one implementation)
+│   ├── daily_routine.py    # Part 11 daily research-desk orchestration
+│   └── controller.py       # Part 13 continuous 24/7 scanning loop
 ├── ai/
 │   └── report_generator.py # Part 12 canonical intelligence report
 tests/                      # pytest suite (unit tests, no network required)
@@ -81,6 +88,7 @@ python -m meme_intelligence scan --network solana --top 5    # discovery -> secu
 python -m meme_intelligence plan <address> --chain ethereum --regime neutral  # full pass + trade plan
 python -m meme_intelligence report <address> --chain ethereum  # canonical intelligence report
 python -m meme_intelligence daily                             # full daily routine + watchlist
+python -m meme_intelligence monitor --cycles 5 --interval 30  # continuous scanner + alerts
 ```
 
 Configuration is entirely environment-driven — see `.env.example` for every
@@ -131,5 +139,6 @@ environment.
 5. ~~Token structure analyzer + trade planner~~ ✅
 6. ~~Risk management framework + master scoring engine~~ ✅
 7. ~~Daily workflow + database + report template~~ ✅
-8. Momentum/narrative analyzers, alert system (Telegram/Discord), dashboard
-9. AI/LLM integration for qualitative judgments, backtesting loop
+8. ~~Momentum analyzer + continuous scanner + automation rules~~ ✅
+9. Narrative engine, Telegram/Discord sinks, dashboard
+10. AI/LLM integration for qualitative judgments, backtesting loop

@@ -130,7 +130,11 @@ class DexScreenerClient(BaseCollector):
     def _parse_pair(raw: dict[str, Any]) -> DexPair:
         base = raw.get("baseToken") or {}
         quote = raw.get("quoteToken") or {}
-        txns_24h = (raw.get("txns") or {}).get("h24") or {}
+        txns = raw.get("txns") or {}
+        txns_24h = txns.get("h24") or {}
+        txns_1h = txns.get("h1") or {}
+        volume = raw.get("volume") or {}
+        price_change = raw.get("priceChange") or {}
         return DexPair(
             chain=raw["chainId"],
             pair_address=raw["pairAddress"],
@@ -146,10 +150,16 @@ class DexScreenerClient(BaseCollector):
             liquidity_usd=_to_float((raw.get("liquidity") or {}).get("usd")),
             fdv=_to_float(raw.get("fdv")),
             market_cap=_to_float(raw.get("marketCap")),
-            volume_24h=_to_float((raw.get("volume") or {}).get("h24")),
-            price_change_24h=_to_float((raw.get("priceChange") or {}).get("h24")),
+            volume_24h=_to_float(volume.get("h24")),
+            price_change_24h=_to_float(price_change.get("h24")),
             buys_24h=_to_int(txns_24h.get("buys")),
             sells_24h=_to_int(txns_24h.get("sells")),
+            price_change_1h=_to_float(price_change.get("h1")),
+            price_change_6h=_to_float(price_change.get("h6")),
+            volume_1h=_to_float(volume.get("h1")),
+            volume_6h=_to_float(volume.get("h6")),
+            buys_1h=_to_int(txns_1h.get("buys")),
+            sells_1h=_to_int(txns_1h.get("sells")),
             pair_created_at=_from_ms_timestamp(raw.get("pairCreatedAt")),
             url=raw.get("url"),
         )
@@ -223,9 +233,11 @@ class GeckoTerminalClient(BaseCollector):
         pool_name = attrs.get("name") or ""
         base_symbol = pool_name.split(" / ")[0].strip() or None
 
-        txns_24h = (attrs.get("transactions") or {}).get("h24") or {}
-        volume_24h = (attrs.get("volume_usd") or {}).get("h24")
-        price_change_24h = (attrs.get("price_change_percentage") or {}).get("h24")
+        transactions = attrs.get("transactions") or {}
+        txns_24h = transactions.get("h24") or {}
+        txns_1h = transactions.get("h1") or {}
+        volume = attrs.get("volume_usd") or {}
+        price_change = attrs.get("price_change_percentage") or {}
 
         return DexPair(
             chain=network,
@@ -237,12 +249,18 @@ class GeckoTerminalClient(BaseCollector):
             liquidity_usd=_to_float(attrs.get("reserve_in_usd")),
             fdv=_to_float(attrs.get("fdv_usd")),
             market_cap=_to_float(attrs.get("market_cap_usd")),
-            volume_24h=_to_float(volume_24h),
-            price_change_24h=_to_float(price_change_24h),
+            volume_24h=_to_float(volume.get("h24")),
+            price_change_24h=_to_float(price_change.get("h24")),
             buys_24h=_to_int(txns_24h.get("buys")),
             sells_24h=_to_int(txns_24h.get("sells")),
             buyers_24h=_to_int(txns_24h.get("buyers")),
             sellers_24h=_to_int(txns_24h.get("sellers")),
+            price_change_1h=_to_float(price_change.get("h1")),
+            price_change_6h=_to_float(price_change.get("h6")),
+            volume_1h=_to_float(volume.get("h1")),
+            volume_6h=_to_float(volume.get("h6")),
+            buys_1h=_to_int(txns_1h.get("buys")),
+            sells_1h=_to_int(txns_1h.get("sells")),
             pair_created_at=_from_iso_timestamp(attrs.get("pool_created_at")),
             url=None,
         )

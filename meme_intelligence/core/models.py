@@ -49,6 +49,13 @@ class DexPair:
     sells_24h: int | None = None
     buyers_24h: int | None = None   # unique buying wallets (GeckoTerminal only)
     sellers_24h: int | None = None  # unique selling wallets (GeckoTerminal only)
+    # Shorter windows for momentum/acceleration analysis (Parts 14/26)
+    price_change_1h: float | None = None
+    price_change_6h: float | None = None
+    volume_1h: float | None = None
+    volume_6h: float | None = None
+    buys_1h: int | None = None
+    sells_1h: int | None = None
     pair_created_at: datetime | None = None
     url: str | None = None
 

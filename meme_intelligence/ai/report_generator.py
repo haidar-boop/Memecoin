@@ -17,6 +17,7 @@ import dataclasses
 from dataclasses import dataclass
 
 from meme_intelligence.analyzers.community_analyzer import CommunityAssessment
+from meme_intelligence.analyzers.momentum_analyzer import MomentumAssessment
 from meme_intelligence.analyzers.onchain_analyzer import OnChainAssessment
 from meme_intelligence.analyzers.risk_analyzer import RiskAssessment
 from meme_intelligence.analyzers.scoring_engine import MasterAssessment
@@ -54,6 +55,7 @@ def build_report(
     onchain: OnChainAssessment | None = None,
     token: TokenAssessment | None = None,
     community: CommunityAssessment | None = None,
+    momentum: MomentumAssessment | None = None,
     risk: RiskAssessment | None = None,
     plan: TradePlan | None = None,
 ) -> IntelligenceReport:
@@ -93,7 +95,7 @@ def build_report(
         add(f"  - {bullet}")
 
     # 3-10. Category sections (each engine renders its own report format)
-    for section in (security, community, onchain, token, risk):
+    for section in (security, community, onchain, token, momentum, risk):
         if section is not None:
             add("")
             add(section.summary())

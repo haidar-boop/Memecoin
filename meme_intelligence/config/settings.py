@@ -382,18 +382,66 @@ class WorkflowSettings:
     watchlist_review_limit: int = 10  # existing entries re-checked per run
     risk_on_btc_change_percent: float = 2.0   # BTC 24h gain above this = risk-on
     risk_off_btc_drop_percent: float = 3.0    # BTC 24h drop beyond this = risk-off
+    monitor_interval_seconds: float = 45.0    # continuous-scanner cycle cadence (fast layer)
 
     def __post_init__(self) -> None:
         if not self.networks.strip():
             raise ConfigurationError("workflow networks must be non-empty")
         for name in ("top_candidates", "watchlist_review_limit",
-                     "risk_on_btc_change_percent", "risk_off_btc_drop_percent"):
+                     "risk_on_btc_change_percent", "risk_off_btc_drop_percent",
+                     "monitor_interval_seconds"):
             if getattr(self, name) <= 0:
                 raise ConfigurationError(f"workflow setting '{name}' must be positive")
 
     @property
     def network_list(self) -> list[str]:
         return [n.strip() for n in self.networks.split(",") if n.strip()]
+
+
+@dataclass(frozen=True)
+class MomentumSubWeights:
+    """Sub-weights inside the momentum score (Part 14, Section 5 — 4 x 25)."""
+
+    price: float = 0.25
+    volume: float = 0.25
+    social: float = 0.25
+    onchain: float = 0.25
+
+    def __post_init__(self) -> None:
+        _check_weight_sum("momentum", dataclasses.asdict(self))
+
+
+@dataclass(frozen=True)
+class MomentumThresholds:
+    """Momentum analysis anchors (Parts 14 and 26)."""
+
+    target_trend_24h_percent: float = 30.0    # 24h gain earning a strong trend signal
+    spike_1h_percent: float = 30.0            # 1h move above this = unsupported-spike risk
+    late_extension_24h_percent: float = 100.0  # 24h gain above this = late entry zone
+    volume_acceleration_ratio: float = 1.5    # (1h volume x24) / 24h volume above = accelerating
+    volume_fade_ratio: float = 0.5            # below = volume fading
+    buy_ratio_shift: float = 0.05             # 1h vs 24h buy-ratio delta that matters
+    target_social_growth_7d_percent: float = 30.0
+
+    def __post_init__(self) -> None:
+        for name, value in dataclasses.asdict(self).items():
+            if value <= 0:
+                raise ConfigurationError(f"momentum threshold '{name}' must be positive, got {value}")
+        if self.volume_fade_ratio >= self.volume_acceleration_ratio:
+            raise ConfigurationError("volume_fade_ratio must be below volume_acceleration_ratio")
+
+
+@dataclass(frozen=True)
+class AlertEngineSettings:
+    """Alert dispatch behavior (Part 13 Section 4, Part 29 Section 6)."""
+
+    cooldown_seconds: float = 900.0  # same token+type alert suppressed within this window
+    score_drop_review_points: float = 15.0  # score drop vs last snapshot triggering review
+
+    def __post_init__(self) -> None:
+        for name, value in dataclasses.asdict(self).items():
+            if value <= 0:
+                raise ConfigurationError(f"alert setting '{name}' must be positive, got {value}")
 
 
 @dataclass(frozen=True)
@@ -513,6 +561,9 @@ class Settings:
     risk_weights: RiskSubWeights = field(default_factory=RiskSubWeights)
     database: DatabaseSettings = field(default_factory=DatabaseSettings)
     workflow: WorkflowSettings = field(default_factory=WorkflowSettings)
+    momentum: MomentumThresholds = field(default_factory=MomentumThresholds)
+    momentum_weights: MomentumSubWeights = field(default_factory=MomentumSubWeights)
+    alert_engine: AlertEngineSettings = field(default_factory=AlertEngineSettings)
     log_level: str = "INFO"
     log_dir: str = "logs"
 
@@ -543,6 +594,9 @@ class Settings:
             risk_weights=_load_group(RiskSubWeights, "RISK_WEIGHTS", env),
             database=_load_group(DatabaseSettings, "DATABASE", env),
             workflow=_load_group(WorkflowSettings, "WORKFLOW", env),
+            momentum=_load_group(MomentumThresholds, "MOMENTUM", env),
+            momentum_weights=_load_group(MomentumSubWeights, "MOMENTUM_WEIGHTS", env),
+            alert_engine=_load_group(AlertEngineSettings, "ALERT_ENGINE", env),
             log_level=env.get(f"{_ENV_PREFIX}_LOG_LEVEL", "INFO"),
             log_dir=env.get(f"{_ENV_PREFIX}_LOG_DIR", "logs"),
         )
