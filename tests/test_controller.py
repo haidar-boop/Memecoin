@@ -262,6 +262,35 @@ async def test_source_agreement_annotates_alert():
         assert any("confirmed" in r for r in opportunity[0].reasons)
 
 
+async def test_dead_watchlist_token_archived_with_postmortem():
+    """Part 29 S1: a tracked token whose pool collapsed gets ONE MEDIUM
+    post-mortem and is archived — not re-tiered on its pump-window score
+    and re-warned at HIGH every recheck."""
+    dying = TokenIdentity(chain="solana", address="TokenDying", symbol="DIE")
+    dead_pair = _dc.replace(make_pair(address="TokenDying", symbol="DIE"),
+                            liquidity_usd=25.0)
+    sink = RecordingSink()
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        storage.update_watchlist(dying, WatchlistTier.TIER_1_HIGH_PRIORITY, score=85.0)
+        market = FakeMarketService({"TokenDying": dead_pair})
+        scanner = make_scanner_with_market(
+            storage, [], {"TokenDying": clean_profile(dying)},
+            market, settings=fast_recheck_settings(), sink=sink,
+        )
+        await scanner.run(max_cycles=1)
+
+        assert storage.get_watchlist() == []  # archived despite a high score
+        archived = storage.get_watchlist(include_archived=True)
+        assert archived and archived[0].tier is WatchlistTier.ARCHIVED
+
+        types = [e.alert_type for e in sink.sent]
+        assert "token_death" in types
+        assert "risk_warning" not in types
+        assert "score_drop_review" not in types
+        death = next(e for e in sink.sent if e.alert_type == "token_death")
+        assert death.priority is AlertPriority.MEDIUM
+
+
 # ---- Parts 17/23 in the monitor: metered layers behind enable_in_monitor ----
 
 

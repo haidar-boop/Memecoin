@@ -313,7 +313,14 @@ class ContinuousScanner:
         current_facts = extract_facts(result.security_profile)
         self._storage.record_security_facts(token, merge_facts(previous_facts, current_facts))
 
-        tier = _TIER_FOR_CLASSIFICATION.get(result.master.classification)
+        # A dead token never (re-)enters the watchlist regardless of its
+        # score — the master number still reflects pump-window data, but a
+        # collapsed pool is a completed failure, and re-tiering it would
+        # re-warn on the corpse every recheck (Part 29 Section 1).
+        liquidity = result.pair.liquidity_usd
+        is_dead = (liquidity is not None
+                   and liquidity < self._settings.alert_engine.dead_liquidity_usd)
+        tier = None if is_dead else _TIER_FOR_CLASSIFICATION.get(result.master.classification)
         if tier is not None:
             self._storage.update_watchlist(
                 token, tier,
@@ -321,13 +328,16 @@ class ContinuousScanner:
                 classification=result.master.classification,
                 thesis=thesis,
             )
-        elif previous_score is not None:
+        elif is_dead or previous_score is not None:
             # Was tracked (or at least scored) before and now fails: archive.
             existing = {e.token.address.lower() for e in self._storage.get_watchlist()}
             if token.address.lower() in existing:
-                self._storage.archive(
-                    token, f"re-assessment fell to Avoid (score {result.master.final_score:.0f})",
+                reason = (
+                    f"liquidity collapsed to ${liquidity:,.0f}: token appears dead"
+                    if is_dead else
+                    f"re-assessment fell to Avoid (score {result.master.final_score:.0f})"
                 )
+                self._storage.archive(token, reason)
 
         events = self._rules.evaluate(result, previous_score=previous_score)
         events = await self._verify_events(events, result)

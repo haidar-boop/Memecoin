@@ -416,6 +416,28 @@ line, so metered spend can never happen by accident (Rules 10/11). Both
 default off; enabling smart money in production is one Helius (free
 tier) key plus one flag in `.env`.
 
+### Dead-token post-mortems replace warning spam (first live-feedback tuning)
+
+First real-world operation (2026-07-08, DigitalOcean droplet) produced
+alert fatigue of a specific shape: tokens pumped, scored 80-90 on
+pump-window data, got tiered into the watchlist, then rugged within
+minutes — and every recheck of the corpse fired a HIGH risk-warning
+plus a HIGH score-drop review. All technically correct, none
+decision-relevant: alerts exist to protect decisions (Part 29 S1), and
+no entry/exit decision remains once liquidity has collapsed.
+
+Change: liquidity below `alert_engine.dead_liquidity_usd` (default
+$500, env `MEMEINTEL_ALERT_ENGINE_DEAD_LIQUIDITY_USD`) marks the token
+dead. One MEDIUM `token_death` post-mortem replaces the warning/drop
+pair (still recorded for Part 24 grading; silent on a HIGH-filtered
+phone), opportunity/momentum/accumulation rules are suppressed for the
+corpse (pump artifacts, not signals), and the controller archives the
+token immediately instead of re-tiering it on its inflated pump score.
+Boundaries kept honest: a confirmed destructive finding still fires
+CRITICAL (holders need it); unknown liquidity is NOT death (Rule 8);
+below-minimum-but-alive liquidity (e.g. $3k) keeps its HIGH warning —
+that deterioration is still decision-relevant.
+
 ## Notable implementation choices (Rule 19)
 
 - **Python 3.11 + asyncio** over Node.js (both allowed by spec): the

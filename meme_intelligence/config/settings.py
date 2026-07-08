@@ -617,6 +617,12 @@ class AlertEngineSettings:
 
     cooldown_seconds: float = 900.0  # same token+type alert suppressed within this window
     score_drop_review_points: float = 15.0  # score drop vs last snapshot triggering review
+    # Below this, liquidity has collapsed and the token is treated as dead:
+    # one MEDIUM post-mortem replaces the HIGH warning/score-drop pair, and
+    # the token is archived instead of re-warned every recheck (Part 29
+    # Section 1 — alerts exist to protect decisions, and there is no
+    # decision left to protect on a completed rug).
+    dead_liquidity_usd: float = 500.0
 
     def __post_init__(self) -> None:
         for name, value in dataclasses.asdict(self).items():

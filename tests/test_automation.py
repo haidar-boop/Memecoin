@@ -129,6 +129,48 @@ async def test_score_drop_rule():
     assert not any(e.alert_type == "score_drop_review" for e in events_small)
 
 
+# ---- Dead-token post-mortem (Part 29 Section 1) ----
+
+async def test_dead_token_gets_single_postmortem_not_warning_spam():
+    """A collapsed pool is a completed failure: one MEDIUM post-mortem, not
+    a HIGH risk-warning + HIGH score-drop pair on a token nobody holds."""
+    result = await pipeline_result(pair=make_pair(liquidity_usd=30.0))
+    events = make_rules().evaluate(result, previous_score=90.0)
+    assert [e.alert_type for e in events] == ["token_death"]
+    death = events[0]
+    assert death.priority is AlertPriority.MEDIUM
+    assert any("collapsed" in r for r in death.reasons)
+    assert any("90" in r for r in death.reasons)  # score history preserved
+
+
+async def test_dead_honeypot_still_raises_critical_emergency():
+    """Anyone already holding still needs the destructive finding."""
+    result = await pipeline_result(honeypot=True, pair=make_pair(liquidity_usd=10.0))
+    events = make_rules().evaluate(result)
+    types = {e.alert_type for e in events}
+    assert "emergency_review" in types
+    assert "token_death" in types
+    assert "risk_warning" not in types
+    assert not any("opportunity" in t or t == "momentum" for t in types)
+
+
+async def test_unknown_liquidity_is_not_death():
+    """Absence of data never becomes a conclusion (Rule 8)."""
+    result = await pipeline_result(pair=make_pair(liquidity_usd=None))
+    events = make_rules().evaluate(result)
+    assert not any(e.alert_type == "token_death" for e in events)
+
+
+async def test_sinking_but_alive_token_keeps_high_risk_warning():
+    """Below the $5k minimum but above the dead floor is still a live,
+    decision-relevant deterioration — the HIGH warning stays."""
+    result = await pipeline_result(pair=make_pair(liquidity_usd=3_000.0))
+    events = make_rules().evaluate(result)
+    warnings = [e for e in events if e.alert_type == "risk_warning"]
+    assert warnings and warnings[0].priority is AlertPriority.HIGH
+    assert not any(e.alert_type == "token_death" for e in events)
+
+
 class RecordingSink:
     def __init__(self):
         self.sent: list[AlertEvent] = []

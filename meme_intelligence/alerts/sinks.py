@@ -42,6 +42,7 @@ ALERT_CHANNELS = {
     "emergency_review": "security",
     "risk_warning": "security",
     "security_change": "security",
+    "token_death": "security",
     "insider_risk": "security",
     "community_fake": "security",
     "momentum": "momentum",

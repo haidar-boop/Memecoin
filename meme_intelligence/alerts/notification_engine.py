@@ -80,6 +80,19 @@ class AutomationRules:
         *,
         previous_score: float | None = None,
     ) -> list[AlertEvent]:
+        # A dead token is a closed case (Part 29 Section 1 — alerts protect
+        # decisions, and no entry/exit decision remains once liquidity has
+        # collapsed): one MEDIUM post-mortem replaces the warning/drop pair,
+        # and opportunity/momentum/accumulation signals on the corpse are
+        # pump artifacts, not information. Only a confirmed destructive
+        # finding still matters — anyone already holding needs to know.
+        death = self._token_death_rule(result, previous_score)
+        if death is not None:
+            events = [event for event in self._emergency_rule(result)
+                      if event.priority is AlertPriority.CRITICAL]
+            events.append(death)
+            return events
+
         events: list[AlertEvent] = []
         events.extend(self._emergency_rule(result))
         opportunity = self._opportunity_rule(result)
@@ -96,6 +109,33 @@ class AutomationRules:
         if drop is not None:
             events.append(drop)
         return events
+
+    # IF liquidity has collapsed below the dead floor THEN the failure is a
+    # completed event, not a warning — emit one post-mortem (Part 29 S1).
+    def _token_death_rule(self, result: PipelineResult,
+                          previous_score: float | None) -> AlertEvent | None:
+        liquidity = result.pair.liquidity_usd
+        # Unknown liquidity is NOT death — absence of data never becomes a
+        # conclusion (Rule 8).
+        if liquidity is None or liquidity >= self._s.dead_liquidity_usd:
+            return None
+        reasons = [f"liquidity collapsed to ${liquidity:,.0f} "
+                   f"(dead floor ${self._s.dead_liquidity_usd:,.0f})"]
+        if previous_score is not None:
+            reasons.append(f"score history: {previous_score:.0f} -> "
+                           f"{result.master.final_score:.0f}")
+        return AlertEvent(
+            priority=AlertPriority.MEDIUM,
+            alert_type="token_death",
+            token=result.pair.base_token,
+            title="Token appears dead: liquidity has collapsed",
+            reasons=tuple(reasons),
+            scores={"master": result.master.final_score},
+            why_it_matters="A completed rug/abandonment closes the case: the "
+                           "outcome is recorded for performance grading, and "
+                           "no further tracking is useful.",
+            monitoring=("none — archived from active tracking",),
+        )
 
     # IF destructive risk appears THEN trigger emergency review (Part 13 Section 7).
     def _emergency_rule(self, result: PipelineResult) -> list[AlertEvent]:
