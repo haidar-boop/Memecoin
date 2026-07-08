@@ -169,6 +169,24 @@ class AlertPriority(str, Enum):
     LOW = "low"            # background information
 
 
+class WhaleType(str, Enum):
+    """Whale behavioral classification (Spec Part 17, Section 6)."""
+
+    LONG_TERM = "long_term"   # holds through volatility, minimal selling
+    TRADING = "trading"       # frequent buys/sells, shorter horizon
+    RISK = "risk"             # concentration large enough to crash the price
+    CUSTODIAL = "custodial"   # pool/exchange/program account, not a person
+
+
+class AccumulationVerdict(str, Enum):
+    """Accumulation pattern classification (Spec Part 17, Section 5)."""
+
+    HEALTHY = "healthy"        # many independent wallets, gradual buying
+    MIXED = "mixed"
+    ARTIFICIAL = "artificial"  # coordinated/same-size/dominated buying
+    UNKNOWN = "unknown"
+
+
 class ScanLayer(str, Enum):
     """The four monitoring layers of the real-time architecture (Spec Part 2, Section 4)."""
 

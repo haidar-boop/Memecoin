@@ -207,6 +207,51 @@ class OnChainProfile:
 
 
 @dataclass(frozen=True)
+class WalletHolding:
+    """One holder's position in a token (Spec Part 17, Section 6)."""
+
+    owner: str                    # wallet (owner) address
+    percent: float                # share of supply, 0-100
+    ui_amount: float | None = None
+
+
+@dataclass(frozen=True)
+class TokenTrade:
+    """One recent trade in a token's market (Spec Part 17, Sections 4-5)."""
+
+    owner: str                    # trading wallet
+    side: str                     # "buy" or "sell"
+    volume_usd: float | None
+    timestamp: datetime | None
+    price_usd: float | None = None
+
+
+@dataclass(frozen=True)
+class TokenTransfer:
+    """One token transfer (Spec Part 17, Section 10 — exchange flow)."""
+
+    from_owner: str | None
+    to_owner: str | None
+    ui_amount: float | None
+    timestamp: datetime | None
+
+
+@dataclass(frozen=True)
+class WalletIntelData:
+    """Normalized wallet-level facts for one token, combined from the
+    wallet collectors (Helius + Birdeye). ``None``/empty means the source
+    did not report it — never assume zero activity (Rule 8)."""
+
+    token: TokenIdentity
+    sources: tuple[str, ...]
+    top_holders: tuple[WalletHolding, ...] = ()
+    recent_trades: tuple[TokenTrade, ...] = ()
+    recent_transfers: tuple[TokenTransfer, ...] = ()
+    holder_count: int | None = None
+    unique_wallets_24h: int | None = None
+
+
+@dataclass(frozen=True)
 class CategoryScores:
     """Per-category scores on a 0-100 scale; ``None`` means "not yet analyzed".
 

@@ -77,7 +77,7 @@ class OnChainAssessment:
         if self.coverage < 1.0:
             lines.append(
                 f"  NOTE: only {self.coverage:.0%} of on-chain categories have data; "
-                "wallet-level intelligence not yet available"
+                "unmeasured categories are excluded, not assumed"
             )
         for name, score in self.sub_scores.items():
             rendered = f"{score:.0f}/100" if score is not None else "no data"

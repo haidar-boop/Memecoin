@@ -27,6 +27,11 @@ from meme_intelligence.analyzers.scoring_engine import (
 )
 from meme_intelligence.analyzers.security_analyzer import SecurityAnalyzer, SecurityAssessment
 from meme_intelligence.analyzers.token_analyzer import TokenAnalyzer, TokenAssessment
+from meme_intelligence.analyzers.wallet_intelligence import (
+    WalletAssessment,
+    WalletIntelligenceAnalyzer,
+    enrich_onchain_profile,
+)
 from meme_intelligence.config.settings import Settings
 from meme_intelligence.core.enums import MarketRegime
 from meme_intelligence.core.errors import CollectorError, InsufficientDataError
@@ -46,6 +51,7 @@ class PipelineResult:
     momentum: MomentumAssessment | None
     risk: RiskAssessment
     master: MasterAssessment
+    wallet: WalletAssessment | None = None
 
 
 class ResearchPipeline:
@@ -56,9 +62,11 @@ class ResearchPipeline:
         settings: Settings,
         goplus_client,  # GoPlusClient-compatible (get_token_security)
         *,
+        wallet_service=None,  # WalletDataService (Solana); costs metered credits
         now_func: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ) -> None:
         self._goplus = goplus_client
+        self._wallet_service = wallet_service
         self._now = now_func
         self._logger = get_logger("workflow.pipeline")
 
@@ -67,6 +75,7 @@ class ResearchPipeline:
         self._token = TokenAnalyzer(settings.token, settings.token_weights)
         self._momentum = MomentumAnalyzer(settings.momentum, settings.momentum_weights,
                                           now_func=now_func)
+        self._wallet = WalletIntelligenceAnalyzer(settings.wallet, settings.smart_money_weights)
         self._risk = RiskAnalyzer(settings.risk_weights)
         self._scoring = ScoringEngine(settings.weights, settings.bands, now_func=now_func)
 
@@ -91,9 +100,22 @@ class ResearchPipeline:
         except InsufficientDataError:
             return None
 
+        # Wallet intelligence (Part 17): Solana-only, costs metered credits,
+        # so it only runs when a wallet service was provided (Rule 10).
+        wallet = None
+        onchain_profile = derive_onchain_profile(pair, profile)
+        if self._wallet_service is not None and pair.chain in ("solana", "sol"):
+            try:
+                data = await self._wallet_service.gather(pair.base_token)
+                wallet = self._wallet.assess(data, pair)
+                onchain_profile = enrich_onchain_profile(onchain_profile, wallet)
+            except (CollectorError, InsufficientDataError) as exc:
+                self._logger.info("wallet intelligence unavailable for %s: %s",
+                                  pair.base_token.address, exc)
+
         onchain = token = momentum = None
         try:
-            onchain = self._onchain.assess(derive_onchain_profile(pair, profile))
+            onchain = self._onchain.assess(onchain_profile)
         except InsufficientDataError:
             pass
         try:
@@ -118,4 +140,5 @@ class ResearchPipeline:
         return PipelineResult(
             pair=pair, security_profile=profile, security=security,
             onchain=onchain, token=token, momentum=momentum, risk=risk, master=master,
+            wallet=wallet,
         )

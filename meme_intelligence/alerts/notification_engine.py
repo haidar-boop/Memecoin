@@ -25,7 +25,7 @@ from typing import Callable, Protocol
 
 from meme_intelligence.analyzers.risk_analyzer import emergency_flags
 from meme_intelligence.config.settings import AlertEngineSettings, AlertThresholds
-from meme_intelligence.core.enums import AlertPriority, EntryZone
+from meme_intelligence.core.enums import AccumulationVerdict, AlertPriority, EntryZone
 from meme_intelligence.core.logging_setup import get_logger
 from meme_intelligence.core.models import TokenIdentity
 from meme_intelligence.workflow.pipeline import PipelineResult
@@ -82,6 +82,7 @@ class AutomationRules:
         momentum = self._momentum_rule(result)
         if momentum is not None:
             events.append(momentum)
+        events.extend(self._smart_money_rules(result))
         drop = self._score_drop_rule(result, previous_score)
         if drop is not None:
             events.append(drop)
@@ -184,6 +185,62 @@ class AutomationRules:
                     "master": result.master.final_score},
             monitoring=("watch for volume continuation vs one-hour spike reversal",),
         )
+
+    # Smart-money alerts (Part 17, Section 13): high-quality accumulation,
+    # whale exit, and insider risk — only when wallet data was gathered.
+    def _smart_money_rules(self, result: PipelineResult) -> list[AlertEvent]:
+        wallet = result.wallet
+        if wallet is None:
+            return []
+        events: list[AlertEvent] = []
+
+        if (
+            wallet.accumulation is AccumulationVerdict.HEALTHY
+            and not result.security.is_destructive
+            and (wallet.sub_scores.get("quality_wallets") or 0) >= 60
+        ):
+            events.append(AlertEvent(
+                priority=AlertPriority.MEDIUM,
+                alert_type="smart_money_accumulation",
+                token=result.pair.base_token,
+                title=f"Healthy accumulation: {wallet.accumulating_wallets} independent "
+                      "wallets are net buyers",
+                reasons=(f"smart-money score {wallet.overall_score:.0f}/100 "
+                         f"(coverage {wallet.coverage:.0%})",
+                         "wallet track records not yet established — behavior-based signal"),
+                scores={"smart_money": wallet.overall_score,
+                        "master": result.master.final_score},
+                monitoring=("watch whether accumulating wallets hold through volatility",),
+            ))
+
+        if wallet.whales_selling >= 2 or (
+            wallet.whale_net_flow_usd is not None and wallet.whale_net_flow_usd < 0
+            and wallet.whales_selling >= 1
+        ):
+            events.append(AlertEvent(
+                priority=AlertPriority.HIGH,
+                alert_type="whale_exit",
+                token=result.pair.base_token,
+                title=f"{wallet.whales_selling} whale(s) selling"
+                      + (f"; net flow ${wallet.whale_net_flow_usd:,.0f}"
+                         if wallet.whale_net_flow_usd is not None else ""),
+                reasons=tuple(f"{w.owner[:8]}… {w.percent:.1f}% [{w.classification.value}]"
+                              for w in wallet.whales[:4]),
+                scores={"smart_money": wallet.overall_score},
+                monitoring=("check exchange inflows and holder-count trend next",),
+            ))
+
+        if wallet.accumulation is AccumulationVerdict.ARTIFICIAL:
+            events.append(AlertEvent(
+                priority=AlertPriority.HIGH,
+                alert_type="insider_risk",
+                token=result.pair.base_token,
+                title="Artificial accumulation pattern detected",
+                reasons=tuple(f.message for f in wallet.findings[:3]),
+                scores={"smart_money": wallet.overall_score},
+                monitoring=("treat volume and holder growth as untrustworthy until this clears",),
+            ))
+        return events
 
     # IF the score drops sharply vs the last snapshot THEN review (Part 13 Section 7).
     def _score_drop_rule(self, result: PipelineResult,

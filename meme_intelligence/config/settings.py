@@ -207,11 +207,17 @@ class ProviderSettings:
     goplus_requests_per_minute: float = 20.0          # conservative free-tier budget
     coingecko_base_url: str = "https://api.coingecko.com"
     coingecko_requests_per_minute: float = 10.0       # documented free limit: ~10-30/min
+    helius_rpc_url: str = "https://mainnet.helius-rpc.com"
+    helius_api_url: str = "https://api.helius.xyz"
+    helius_requests_per_minute: float = 120.0         # free tier allows ~10 rps; stay far below
+    birdeye_base_url: str = "https://public-api.birdeye.so"
+    birdeye_requests_per_minute: float = 20.0         # free tier ~1 rps + monthly CU budget
     failure_threshold: int = 3      # consecutive failures before a provider cools down
     cooldown_seconds: float = 60.0  # how long an unhealthy provider is skipped
 
     def __post_init__(self) -> None:
-        for name in ("dexscreener", "geckoterminal", "goplus", "coingecko"):
+        for name in ("dexscreener", "geckoterminal", "goplus", "coingecko",
+                     "helius", "birdeye"):
             if getattr(self, f"{name}_requests_per_minute") <= 0:
                 raise ConfigurationError(f"{name}_requests_per_minute must be positive")
         if self.failure_threshold < 1:
@@ -402,6 +408,49 @@ class WorkflowSettings:
 
 
 @dataclass(frozen=True)
+class SmartMoneySubWeights:
+    """Sub-weights inside the smart-money confidence score (Part 17, Section 11)."""
+
+    quality_wallets: float = 0.20
+    historical_success: float = 0.20
+    entry_timing: float = 0.20
+    holding_behavior: float = 0.20
+    risk_signals: float = 0.20
+
+    def __post_init__(self) -> None:
+        _check_weight_sum("smart-money", dataclasses.asdict(self))
+
+
+@dataclass(frozen=True)
+class WalletIntelSettings:
+    """Wallet intelligence anchors (Part 17).
+
+    Wallet analysis costs paid API credits, so it runs on demand (report,
+    plan, wallets commands) and stays out of the continuous scanner unless
+    explicitly enabled (Rule 10 — expensive analysis only after filtering).
+    """
+
+    whale_min_percent: float = 1.0        # holder share that counts as a whale
+    risk_whale_percent: float = 5.0       # single-whale share that can crash the price
+    top_holders_limit: int = 20
+    recent_trades_limit: int = 50
+    target_accumulating_wallets: int = 10  # distinct net buyers earning full marks
+    artificial_same_size_fraction: float = 0.30  # identical-size trades above = artificial
+    dominant_buyer_volume_fraction: float = 0.60  # one wallet above = artificial demand
+    min_buy_volume_for_dominance_usd: float = 500.0  # below this, dominance is meaningless dust
+    enable_in_monitor: bool = False       # wallet calls in the continuous scanner
+
+    def __post_init__(self) -> None:
+        for name in ("whale_min_percent", "risk_whale_percent", "top_holders_limit",
+                     "recent_trades_limit", "target_accumulating_wallets"):
+            if getattr(self, name) <= 0:
+                raise ConfigurationError(f"wallet setting '{name}' must be positive")
+        for name in ("artificial_same_size_fraction", "dominant_buyer_volume_fraction"):
+            if not (0 < getattr(self, name) <= 1):
+                raise ConfigurationError(f"wallet setting '{name}' must be within (0, 1]")
+
+
+@dataclass(frozen=True)
 class MomentumSubWeights:
     """Sub-weights inside the momentum score (Part 14, Section 5 — 4 x 25)."""
 
@@ -567,8 +616,14 @@ class Settings:
     momentum: MomentumThresholds = field(default_factory=MomentumThresholds)
     momentum_weights: MomentumSubWeights = field(default_factory=MomentumSubWeights)
     alert_engine: AlertEngineSettings = field(default_factory=AlertEngineSettings)
+    wallet: WalletIntelSettings = field(default_factory=WalletIntelSettings)
+    smart_money_weights: SmartMoneySubWeights = field(default_factory=SmartMoneySubWeights)
     log_level: str = "INFO"
     log_dir: str = "logs"
+    # API keys (Rule 16): read from MEMEINTEL_HELIUS_API_KEY / MEMEINTEL_BIRDEYE_API_KEY
+    # (or a local .env). Empty string = the wallet-intelligence layer stays off.
+    helius_api_key: str = ""
+    birdeye_api_key: str = ""
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Settings":
@@ -600,8 +655,12 @@ class Settings:
             momentum=_load_group(MomentumThresholds, "MOMENTUM", env),
             momentum_weights=_load_group(MomentumSubWeights, "MOMENTUM_WEIGHTS", env),
             alert_engine=_load_group(AlertEngineSettings, "ALERT_ENGINE", env),
+            wallet=_load_group(WalletIntelSettings, "WALLET", env),
+            smart_money_weights=_load_group(SmartMoneySubWeights, "SMART_MONEY_WEIGHTS", env),
             log_level=env.get(f"{_ENV_PREFIX}_LOG_LEVEL", "INFO"),
             log_dir=env.get(f"{_ENV_PREFIX}_LOG_DIR", "logs"),
+            helius_api_key=env.get(f"{_ENV_PREFIX}_HELIUS_API_KEY", ""),
+            birdeye_api_key=env.get(f"{_ENV_PREFIX}_BIRDEYE_API_KEY", ""),
         )
 
 

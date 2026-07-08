@@ -92,24 +92,36 @@ class BaseCollector:
         *,
         cache_key: str | None = None,
         cache_ttl: float | None = None,
+        headers: Mapping[str, str] | None = None,
+        json_body: Any = None,
     ) -> Any:
-        """GET ``base_url + path`` and return the parsed JSON payload.
+        """GET (or POST when ``json_body`` is given) and return parsed JSON.
 
-        When ``cache_key`` is given, a fresh cached response short-circuits
-        the request entirely — no rate-limit token is consumed.
+        ``path`` may be a path under ``base_url`` or an absolute URL (some
+        providers split their APIs across hosts). When ``cache_key`` is
+        given, a fresh cached response short-circuits the request entirely
+        — no rate-limit token is consumed.
         """
         if cache_key is not None and self._cache is not None:
             cached = await self._cache.get(cache_key)
             if cached is not None:
                 return cached
 
-        url = f"{self._base_url}/{path.lstrip('/')}"
+        if path.startswith("http://") or path.startswith("https://"):
+            url = path
+        else:
+            url = f"{self._base_url}/{path.lstrip('/')}"
 
         async def _request() -> Any:
             await self._rate_limiter.acquire()
             session = await self._get_session()
             try:
-                async with session.get(url, params=params) as response:
+                request = (
+                    session.post(url, params=params, headers=headers, json=json_body)
+                    if json_body is not None
+                    else session.get(url, params=params, headers=headers)
+                )
+                async with request as response:
                     if response.status == 429:
                         raise RateLimitedError(f"{self.name}: rate limited (429) on {url}")
                     if response.status >= 500:

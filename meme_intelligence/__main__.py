@@ -25,8 +25,14 @@ from meme_intelligence.ai.report_generator import build_report
 from meme_intelligence.alerts.notification_engine import ConsoleSink, NotificationEngine
 from meme_intelligence.analyzers.onchain_analyzer import OnChainAnalyzer, derive_onchain_profile
 from meme_intelligence.analyzers.security_analyzer import SecurityAnalyzer
+from meme_intelligence.analyzers.wallet_intelligence import sightings_from_assessment
 from meme_intelligence.collectors.market_data import CoinGeckoClient
 from meme_intelligence.collectors.market_service import MarketDataService
+from meme_intelligence.collectors.wallet_data import (
+    BirdeyeClient,
+    HeliusClient,
+    WalletDataService,
+)
 from meme_intelligence.core.enums import MarketRegime
 from meme_intelligence.database.storage import Storage
 from meme_intelligence.trading.trade_planner import TradePlanner
@@ -93,6 +99,33 @@ def build_market_service(settings: Settings, *clients) -> MarketDataService:
         list(clients),
         failure_threshold=settings.providers.failure_threshold,
         cooldown_seconds=settings.providers.cooldown_seconds,
+    )
+
+
+def build_wallet_service(settings: Settings) -> WalletDataService | None:
+    """Wallet intelligence service, or None when no keys are configured (Part 17)."""
+    helius = birdeye = None
+    if settings.helius_api_key:
+        helius = HeliusClient(
+            settings.helius_api_key,
+            rpc_url=settings.providers.helius_rpc_url,
+            api_url=settings.providers.helius_api_url,
+            rate_limiter=RateLimiter.per_minute(settings.providers.helius_requests_per_minute),
+            **_shared_collector_kwargs(settings),
+        )
+    if settings.birdeye_api_key:
+        birdeye = BirdeyeClient(
+            settings.birdeye_api_key,
+            base_url=settings.providers.birdeye_base_url,
+            rate_limiter=RateLimiter.per_minute(settings.providers.birdeye_requests_per_minute),
+            **_shared_collector_kwargs(settings),
+        )
+    if helius is None and birdeye is None:
+        return None
+    return WalletDataService(
+        helius, birdeye,
+        top_holders_limit=settings.wallet.top_holders_limit,
+        recent_trades_limit=settings.wallet.recent_trades_limit,
     )
 
 
@@ -246,16 +279,22 @@ async def _cmd_plan(args, settings) -> int:
 async def _gather_assessments(args, settings):
     """Shared research pass (via the pipeline) used by plan and report commands."""
     regime = MarketRegime(args.regime)
-    async with (
-        build_dexscreener(settings) as dex,
-        build_geckoterminal(settings) as gecko,
-        build_goplus(settings) as goplus,
-    ):
-        service = build_market_service(settings, dex, gecko)
-        pair = await service.get_best_pair(args.address, chain=args.chain)
-        if pair is None:
-            return None, f"No trading pairs found for {args.address}."
-        result = await ResearchPipeline(settings, goplus).analyze_pair(pair, regime=regime)
+    wallet_service = build_wallet_service(settings)
+    try:
+        async with (
+            build_dexscreener(settings) as dex,
+            build_geckoterminal(settings) as gecko,
+            build_goplus(settings) as goplus,
+        ):
+            service = build_market_service(settings, dex, gecko)
+            pair = await service.get_best_pair(args.address, chain=args.chain)
+            if pair is None:
+                return None, f"No trading pairs found for {args.address}."
+            pipeline = ResearchPipeline(settings, goplus, wallet_service=wallet_service)
+            result = await pipeline.analyze_pair(pair, regime=regime)
+    finally:
+        if wallet_service is not None:
+            await wallet_service.close()
 
     if result is None:
         return None, (f"Security data unavailable for {args.address} on {pair.chain} "
@@ -281,9 +320,16 @@ async def _cmd_report(args, settings) -> int:
         risk=result.risk, plan=plan,
     )
     print(report.text)
+    if result.wallet is not None:
+        print("\n" + result.wallet.summary())
 
     with Storage(settings.database.path) as storage:
         storage.record_snapshot(result.master, source="report_cli")
+        if result.wallet is not None:
+            # Sightings feed wallet track records for Part 24's learning loop.
+            storage.record_wallet_sightings(
+                result.pair.base_token, sightings_from_assessment(result.wallet),
+            )
     return 0 if not result.security.is_destructive else 2
 
 
@@ -433,6 +479,47 @@ async def _cmd_watchlist(args, settings) -> int:
     return 0
 
 
+async def _cmd_wallets(args, settings) -> int:
+    """Smart money & whale intelligence for one token (Part 17)."""
+    wallet_service = build_wallet_service(settings)
+    if wallet_service is None:
+        print("No wallet-data API keys configured. Set MEMEINTEL_HELIUS_API_KEY and/or "
+              "MEMEINTEL_BIRDEYE_API_KEY (see .env.example).")
+        return 1
+
+    from meme_intelligence.analyzers.wallet_intelligence import WalletIntelligenceAnalyzer
+    from meme_intelligence.core.models import TokenIdentity
+
+    async with (
+        wallet_service,
+        build_dexscreener(settings) as dex,
+        build_geckoterminal(settings) as gecko,
+    ):
+        service = build_market_service(settings, dex, gecko)
+        pair = await service.get_best_pair(args.address, chain=args.chain or "solana")
+        token = pair.base_token if pair else TokenIdentity(
+            chain=args.chain or "solana", address=args.address)
+        data = await wallet_service.gather(token)
+
+    if not data.sources:
+        print(f"No wallet data available for {args.address} (providers returned nothing).")
+        return 1
+
+    analyzer = WalletIntelligenceAnalyzer(settings.wallet, settings.smart_money_weights)
+    try:
+        assessment = analyzer.assess(data, pair)
+    except InsufficientDataError as exc:
+        print(f"Cannot assess: {exc}")
+        return 1
+
+    print(assessment.summary())
+    with Storage(settings.database.path) as storage:
+        recorded = storage.record_wallet_sightings(
+            token, sightings_from_assessment(assessment))
+    print(f"\n({recorded} wallet sighting(s) recorded for future track-record building)")
+    return 0
+
+
 async def _cmd_monitor(args, settings) -> int:
     """Run the continuous scanning loop (Part 13). Ctrl-C stops gracefully."""
     import dataclasses as _dc
@@ -483,6 +570,7 @@ async def _run(args: argparse.Namespace) -> int:
         "quick": _cmd_quick,
         "compare": _cmd_compare,
         "watchlist": _cmd_watchlist,
+        "wallets": _cmd_wallets,
         "daily": _cmd_daily,
         "monitor": _cmd_monitor,
     }[args.command]
@@ -546,6 +634,11 @@ def main(argv: list[str] | None = None) -> int:
     watchlist = sub.add_parser("watchlist", help="show tracked tokens; --refresh re-scores")
     watchlist.add_argument("--refresh", action="store_true")
     watchlist.add_argument("--include-archived", action="store_true")
+
+    wallets = sub.add_parser("wallets", help="smart money & whale intelligence (Part 17)")
+    wallets.add_argument("address")
+    wallets.add_argument("--chain", default="solana",
+                         help="chain id (wallet intelligence is Solana-first)")
 
     daily = sub.add_parser("daily", help="run the full daily research routine (Part 11)")
     daily.add_argument("--network", action="append", default=None,

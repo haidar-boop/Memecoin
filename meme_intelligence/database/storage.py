@@ -69,6 +69,20 @@ CREATE TABLE IF NOT EXISTS journal (
     kind TEXT NOT NULL,     -- discovery / thesis / decision / outcome / lesson
     content TEXT NOT NULL
 );
+
+-- Wallet sightings (Part 17 Sections 2-3): every observed wallet action,
+-- the raw material for reputation once outcomes accumulate (Part 24).
+CREATE TABLE IF NOT EXISTS wallet_sightings (
+    id INTEGER PRIMARY KEY,
+    wallet TEXT NOT NULL,
+    chain TEXT NOT NULL,
+    token_id INTEGER NOT NULL REFERENCES tokens(id),
+    side TEXT NOT NULL,          -- buy / sell / hold_whale
+    usd_value REAL,
+    seen_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sightings_wallet ON wallet_sightings(wallet, seen_at);
+CREATE INDEX IF NOT EXISTS idx_sightings_token ON wallet_sightings(token_id);
 """
 
 
@@ -255,6 +269,47 @@ class Storage:
         change = self.update_watchlist(token, WatchlistTier.ARCHIVED)
         self.add_journal(token, "outcome", f"archived: {reason}")
         return WatchlistChange(token, "archived", WatchlistTier.ARCHIVED, reason)
+
+    # ---- Wallet sightings (Part 17, Sections 2-3) ----
+
+    def record_wallet_sightings(
+        self, token: TokenIdentity, sightings: list[tuple[str, str, float | None]],
+    ) -> int:
+        """Record observed wallet actions: (wallet, side, usd_value) tuples.
+
+        This is the raw feed for wallet reputation: once Part 24's outcome
+        tracking labels tokens as winners/losers, each wallet's recorded
+        entries become a measurable track record.
+        """
+        token_id = self.upsert_token(token)
+        now = self._now().isoformat()
+        self._conn.executemany(
+            """INSERT INTO wallet_sightings (wallet, chain, token_id, side, usd_value, seen_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            [(wallet, token.chain, token_id, side, usd, now)
+             for wallet, side, usd in sightings],
+        )
+        self._conn.commit()
+        return len(sightings)
+
+    def wallet_history(self, wallet: str, limit: int = 100) -> list[dict]:
+        """A wallet's recorded sightings across tokens, newest first."""
+        rows = self._conn.execute(
+            """SELECT t.chain, t.address, t.symbol, s.side, s.usd_value, s.seen_at
+               FROM wallet_sightings s JOIN tokens t ON t.id = s.token_id
+               WHERE s.wallet = ? ORDER BY s.seen_at DESC LIMIT ?""",
+            (wallet, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def wallets_seen_on(self, token: TokenIdentity) -> list[str]:
+        rows = self._conn.execute(
+            """SELECT DISTINCT s.wallet
+               FROM wallet_sightings s JOIN tokens t ON t.id = s.token_id
+               WHERE t.chain = ? AND t.address = ?""",
+            (token.chain, token.address),
+        ).fetchall()
+        return [row["wallet"] for row in rows]
 
     # ---- Research journal (Part 11, Section 8) ----
 
