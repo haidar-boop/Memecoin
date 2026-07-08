@@ -27,7 +27,7 @@ to the genuinely new material within it.
 | PART_20_MASTER_PROMPT_ASSEMBLY.md | 20 | Complete Master Prompt Assembly & Final Deployment Instructions | Low — consolidates Parts 1–19; scoring/report format already built |
 | PART_21_TECHNICAL_INFRASTRUCTURE.md | 21 | Technical Infrastructure Blueprint & Anti-Throttling Architecture | Low — architecture already built; deployment/hosting guidance is new |
 | PART_22_BOT_DEVELOPMENT_BLUEPRINT.md | 22 | Bot Development Blueprint & Software Architecture | Low — folder structure/module split already matches this |
-| PART_23_AI_AGENT_INTEGRATION.md | 23 | AI Agent Integration Blueprint & Intelligence Pipeline | High — no LLM calling code exists yet |
+| PART_23_AI_AGENT_INTEGRATION.md | 23 | AI Agent Integration Blueprint & Intelligence Pipeline | ✅ **Built** — `ai/reasoning.py`, live-verified (see `../STATUS.md`); §7-8 memory/feedback land with Part 24 |
 | PART_24_BACKTESTING.md | 24 | Backtesting, Performance Tracking & AI Self-Improvement System | High — no outcome-tracking/backtesting loop exists yet |
 | PART_25_RISK_MANAGEMENT_UPSIDE.md | 25 | Professional Risk Management & High-Upside Opportunity Framework | Medium — risk doctrine already incorporated; explicit opportunity-ranking formula not separately implemented |
 | PART_26_MOMENTUM_DETECTION.md | 26 | Advanced Entry Signal & Momentum Detection Engine | Low — momentum analyzer already built in Part 14 against this doctrine |
@@ -47,10 +47,10 @@ Given what's already built, the genuinely high-value next targets are:
 1. ~~**Part 19** (Narrative Intelligence)~~ — ✅ built: the structural
    scoring layer fills the master score's `narrative` slot; the LLM
    judgment input wires in with Part 23
-2. **Part 23 + Part 22 §4** (AI Agent Integration) — once an Anthropic key
-   exists, this turns the qualitative slots already wired throughout the
-   codebase (`FoundationInputs`, narrative score, bull/bear prose) from
-   heuristic/absent into real AI judgments
+2. ~~**Part 23 + Part 22 §4** (AI Agent Integration)~~ — ✅ built and
+   verified against the live API: the qualitative slots
+   (`FoundationInputs`, `NarrativeInputs`, bull/bear reasoning) are now
+   real AI judgments via `report --ai` / `plan --ai`
 3. **Part 29** (Alert Intelligence) — Telegram/Discord sinks; small,
    contained, immediately useful once a bot token exists
 4. **Part 24** (Backtesting) — highest long-term value, but needs weeks

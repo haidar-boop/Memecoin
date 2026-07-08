@@ -365,6 +365,36 @@ class TradingSettings:
 
 
 @dataclass(frozen=True)
+class AISettings:
+    """AI reasoning layer configuration (Part 23; Part 22 Section 11).
+
+    The layer activates only when ``anthropic_api_key`` is set on
+    :class:`Settings` (Rule 16 — key from the environment). Rate limiting
+    is deliberately conservative (Rule 11), and the layer never runs in
+    the continuous scanner unless explicitly enabled (Rule 10 — expensive
+    analysis only after filtering).
+    """
+
+    model: str = "claude-opus-4-8"
+    max_tokens: int = 4096
+    effort: str = "high"                 # low | medium | high | xhigh | max
+    requests_per_minute: float = 10.0
+    timeout_seconds: float = 120.0       # judgments can take a while at high effort
+    min_confidence: float = 20.0         # below this the judgment is discarded (Part 23 S6)
+    enable_in_monitor: bool = False      # AI calls in the continuous scanner
+
+    def __post_init__(self) -> None:
+        if self.model.strip() == "":
+            raise ConfigurationError("ai model must be non-empty")
+        if self.effort not in ("low", "medium", "high", "xhigh", "max"):
+            raise ConfigurationError(f"ai effort must be a valid level, got {self.effort!r}")
+        for name in ("max_tokens", "requests_per_minute", "timeout_seconds"):
+            if getattr(self, name) <= 0:
+                raise ConfigurationError(f"ai setting '{name}' must be positive")
+        _check_range("ai min_confidence", self.min_confidence, 0.0, 100.0)
+
+
+@dataclass(frozen=True)
 class DatabaseSettings:
     """Local persistence (Part 13 Section 5, Part 21 Section 6).
 
@@ -670,12 +700,14 @@ class Settings:
     alert_engine: AlertEngineSettings = field(default_factory=AlertEngineSettings)
     wallet: WalletIntelSettings = field(default_factory=WalletIntelSettings)
     smart_money_weights: SmartMoneySubWeights = field(default_factory=SmartMoneySubWeights)
+    ai: AISettings = field(default_factory=AISettings)
     log_level: str = "INFO"
     log_dir: str = "logs"
-    # API keys (Rule 16): read from MEMEINTEL_HELIUS_API_KEY / MEMEINTEL_BIRDEYE_API_KEY
-    # (or a local .env). Empty string = the wallet-intelligence layer stays off.
+    # API keys (Rule 16): read from MEMEINTEL_HELIUS_API_KEY / MEMEINTEL_BIRDEYE_API_KEY /
+    # MEMEINTEL_ANTHROPIC_API_KEY (or a local .env). Empty string = that layer stays off.
     helius_api_key: str = ""
     birdeye_api_key: str = ""
+    anthropic_api_key: str = ""
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Settings":
@@ -712,10 +744,12 @@ class Settings:
             alert_engine=_load_group(AlertEngineSettings, "ALERT_ENGINE", env),
             wallet=_load_group(WalletIntelSettings, "WALLET", env),
             smart_money_weights=_load_group(SmartMoneySubWeights, "SMART_MONEY_WEIGHTS", env),
+            ai=_load_group(AISettings, "AI", env),
             log_level=env.get(f"{_ENV_PREFIX}_LOG_LEVEL", "INFO"),
             log_dir=env.get(f"{_ENV_PREFIX}_LOG_DIR", "logs"),
             helius_api_key=env.get(f"{_ENV_PREFIX}_HELIUS_API_KEY", ""),
             birdeye_api_key=env.get(f"{_ENV_PREFIX}_BIRDEYE_API_KEY", ""),
+            anthropic_api_key=env.get(f"{_ENV_PREFIX}_ANTHROPIC_API_KEY", ""),
         )
 
 

@@ -257,3 +257,11 @@ class CatalystLevel(str, Enum):
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
+
+
+class ResearchMode(str, Enum):
+    """AI research operating modes (Spec Part 23, Section 10)."""
+
+    FAST_SCAN = "fast_scan"        # quick filtering: basic score, major risks
+    STANDARD = "standard"          # normal evaluation: full analysis
+    DEEP_INVESTIGATION = "deep_investigation"  # high-conviction research

@@ -1,8 +1,8 @@
-# Build Status — Parts 1 through 19
+# Build Status — Parts 1 through 19, plus 23
 
-**304 tests passing.** ~10,000 lines of source, ~4,450 lines of tests.
-Parts 1–18 were built on `claude/large-prompt-review-l49wp1`; Part 19 on
-`claude/handoff-folder-review-fuu9dq`.
+**321 tests passing.** ~10,500 lines of source, ~4,700 lines of tests.
+Parts 1–18 were built on `claude/large-prompt-review-l49wp1`; Parts 19
+and 23 on `claude/handoff-folder-review-fuu9dq`.
 
 Legend: ✅ built and tested · 🟡 built partially (documented gap) ·
 ⏳ blocked on something outside the code (API key, data source that
@@ -289,9 +289,43 @@ The classification/scoring framework, config system, and logging.
 
 ---
 
+## Part 23 — AI Agent Integration Blueprint & Intelligence Pipeline → 🟡
+
+- `ai/reasoning.py` — the LLM reasoning layer, live against the Anthropic
+  API (key verified). `AIJudgmentService.judge()` makes one structured-
+  output request per token (§4 prompt structure: role = the tested
+  `ANALYST_SYSTEM_PROMPT`, objective, §3 structured snapshot, rules
+  including the §9 bias warnings, JSON-schema output format) and returns
+  a validated `AIJudgment`: `FoundationInputs` + `NarrativeInputs`
+  (nullable slots — null over guessing, Rule 8), bull/bear evidence
+  bullets, and the §6 confidence score with its reason.
+- `build_intelligence_snapshot()` — condenses a `PipelineResult` into the
+  §3 token/market/security/community/wallets format; the model never sees
+  raw API payloads and is told exactly which sources are missing.
+- Validation is layered: API-level JSON schema → range/enum checks →
+  Part 16 banned-language guard → configurable confidence floor. Any
+  failure discards the judgment; the pipeline continues on deterministic
+  evidence (Rules 6/9).
+- `ResearchPipeline` runs the AI pass only after the deterministic chain,
+  skips destructive-security tokens entirely (Rule 10), fills whichever
+  foundation/narrative slots are empty (explicit analyst inputs win), and
+  re-scores through the Part 31 locked weighting. Off in the continuous
+  scanner unless `MEMEINTEL_AI_ENABLE_IN_MONITOR=true`.
+- §10 research modes (`fast_scan` / `standard` / `deep_investigation`)
+  select prompt depth; CLI: `report --ai [--ai-mode ...]`, `plan --ai`.
+- `config/settings.py::AISettings` — model (default `claude-opus-4-8`),
+  max tokens, effort, rate limit (Rule 11), timeout, confidence floor;
+  key via `MEMEINTEL_ANTHROPIC_API_KEY` only (Rule 16).
+- **Gaps (why 🟡):** §7 memory / §8 feedback loop ride on the snapshot
+  tables and activate as learning in Part 24; community judgment slots
+  stay thin until the social collectors exist (the model sees the gap and
+  lowers confidence — observed live).
+
+---
+
 ## What's NOT built yet
 
-Everything in `next_steps/` — **Parts 20 through 33** (see
+Everything in `next_steps/` — **Parts 20-22 and 24 through 33** (see
 `next_steps/INDEX.md`). Some of these (20, 21, 22, 23, 30, 31, 32, 32.5)
 substantially overlap with what's already built, since they're
 architecture/consolidation parts written before the earlier build parts
@@ -317,9 +351,8 @@ earlier parts.
 4. **No Telegram/Discord alert sinks yet** — `NotificationEngine`
    supports pluggable sinks; only `ConsoleSink` exists. Needs a Telegram
    bot token (see SETUP.md — not created yet).
-5. **No Anthropic/LLM integration yet.** All qualitative judgment slots
-   (meme strength, narrative scoring, bull/bear prose enrichment) are
-   wired to accept AI-layer input but currently run on deterministic
-   heuristics or report "no data." Needs an Anthropic API key (not
-   created yet) plus the actual prompt-calling code (Parts 22 §4, 23).
+5. ~~No Anthropic/LLM integration yet.~~ **Resolved — Part 23 built and
+   live.** The AI reasoning layer fills the qualitative judgment slots
+   via `report --ai` / `plan --ai`; only the social-data half of those
+   judgments (gap #1) remains thin.
 6. **No dashboard/web UI** — CLI only, per the phased roadmap.

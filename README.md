@@ -32,7 +32,8 @@ human operator.
 | Part 17 — Smart money & whale intelligence | Helius + Birdeye collectors (top holders resolved to owners, trades, transfers), wallet analyzer (whale classification, accumulation verdict, exchange flow lower-bounds, smart-money score), wallet sightings DB + reputation formula, 3 new alert types, wallets command; enriches the on-chain score | ✅ Built (Solana; track records accumulate via Part 24) |
 | Part 18 — Advanced rug detection & scam prevention | Continuous contract-change monitoring: security facts persisted per token and diffed on every re-analysis (honeypot appearing / ownership un-renounced / mint authority / LP unlock → CRITICAL; blacklist/pause/tax hikes → HIGH; concentration creep / holder drain → MEDIUM); promotion-and-exit pattern detector | ✅ Built (deep dev-history indexing deferred — needs a data source we don't have) |
 | Part 19 — Narrative intelligence & viral potential | Viral score (memorability/shareability/emotional impact/cultural timing/participation, 5×20%); narrative intelligence score (meme strength/timing/viral potential/creativity/long-term, 5×20%) feeding the master framework's 15% narrative category; category + life-cycle stage classification; sentiment; three narrative risk factors → Low/Medium/High; viral catalysts; evidence-derived strengths/weaknesses; community-engine cross-fill for participation/creativity | ✅ Built (judgment slots await the AI layer / social collectors — engine reports partial coverage honestly) |
-| Parts 20+ — Full alert intelligence, dashboard, backtesting, AI layer | — | ⏳ Upcoming |
+| Part 23 — AI agent integration & intelligence pipeline | LLM reasoning layer (Claude, structured outputs): one validated judgment call fills the foundation/narrative qualitative slots + bull/bear reasoning + confidence; structured Section-3 snapshots (never raw data); layered validation (schema → ranges → banned-language guard → confidence floor); research modes (fast/standard/deep); runs post-pipeline only, never on destructive tokens, degrades to deterministic evidence on any failure; `report --ai` / `plan --ai` | ✅ Built (live-verified; memory/feedback loop lands with Part 24) |
+| Parts 20+ — Full alert intelligence, dashboard, backtesting | — | ⏳ Upcoming |
 
 ## Project structure
 
@@ -84,7 +85,8 @@ meme_intelligence/
 ├── ai/
 │   ├── report_generator.py # Part 12 canonical intelligence report
 │   ├── comparison.py       # Part 16 multi-token comparison + ranking
-│   └── prompts.py          # analyst system prompt + banned-language guard
+│   ├── prompts.py          # analyst system prompt + banned-language guard
+│   └── reasoning.py        # Part 23: LLM judgment service (structured outputs)
 tests/                      # pytest suite (unit tests, no network required)
 ```
 
@@ -99,6 +101,7 @@ python -m meme_intelligence security <address> --chain solana  # rug/security ch
 python -m meme_intelligence scan --network solana --top 5    # discovery -> security -> on-chain
 python -m meme_intelligence plan <address> --chain ethereum --regime neutral  # full pass + trade plan
 python -m meme_intelligence report <address> --chain ethereum  # canonical intelligence report
+python -m meme_intelligence report <address> --chain solana --ai  # + AI reasoning layer (Part 23)
 python -m meme_intelligence quick <address> --chain solana    # Level 1 fast scan
 python -m meme_intelligence compare ethereum:0xPEPE solana:WIFADDR  # table + ranking
 python -m meme_intelligence watchlist --refresh               # show / re-score tracked tokens
@@ -156,4 +159,4 @@ environment.
 7. ~~Daily workflow + database + report template~~ ✅
 8. ~~Momentum analyzer + continuous scanner + automation rules~~ ✅
 9. ~~Narrative engine~~ ✅ (Telegram/Discord sinks, dashboard still pending)
-10. AI/LLM integration for qualitative judgments, backtesting loop
+10. ~~AI/LLM integration for qualitative judgments~~ ✅ (backtesting loop still pending)

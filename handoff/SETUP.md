@@ -31,10 +31,10 @@ committed). The app loads it automatically on startup
 | CoinGecko | ✅ no key needed | — | market-environment check |
 | **Helius** | ✅ **live, verified** | `MEMEINTEL_HELIUS_API_KEY` | Solana wallet/holder data |
 | **Birdeye** | ✅ **live, verified** | `MEMEINTEL_BIRDEYE_API_KEY` | Solana trades/overview |
-| Anthropic (LLM layer) | ⏳ **not set up** | (not yet defined in settings) | AI-judgment slots (Parts 22/23) |
+| **Anthropic (LLM layer)** | ✅ **live, verified** | `MEMEINTEL_ANTHROPIC_API_KEY` | AI reasoning layer (Part 23): `report --ai` / `plan --ai` |
 | Telegram bot | ⏳ **not set up** | (not yet defined in settings) | alert delivery (Part 29) |
 | Discord webhook | ⏳ **not set up, optional** | (not yet defined in settings) | alert delivery (Part 29) |
-| X/Twitter or social aggregator | ⏳ **not set up, budget decision pending** | (not yet defined) | community/narrative scoring (Part 5, 19) |
+| X/Twitter or social aggregator | ⏳ **decision made: cheap aggregator** (signup pending) | (not yet defined) | community/narrative scoring (Part 5, 19) |
 | Alchemy (EVM wallets) | ⏳ **not set up, optional** | (not yet defined) | EVM wallet intelligence (Part 17 extension) |
 
 Your current working `.env` should contain at minimum:

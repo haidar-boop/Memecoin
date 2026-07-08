@@ -112,6 +112,47 @@ except that a late stage alone justifies Medium. Confirmed factors also
 deduct from the long-term-strength component (30/20/20 points), since
 that is where narrative fragility materializes.
 
+### 9. Part 23's "multi-agent AI design" maps onto the existing engines
+
+Part 23 Section 2 describes seven specialized AI agents (coordinator,
+security, blockchain, community, narrative, market, final decision). Four
+of those responsibilities — security, blockchain, market, final decision —
+are already deterministic analyzers whose scoring Part 31 locks, and the
+coordinator is the shared `ResearchPipeline`. **Decision:** the LLM covers
+the judgment work the deterministic engines cannot do (the Community and
+Narrative analyst agents' qualitative slots, bull/bear reasoning, and the
+Section 6 confidence score) and only ever feeds *inputs* into the locked
+framework — it never overrides a computed score. Re-implementing the
+deterministic engines as LLM calls would trade reproducible, tested logic
+for token cost and nondeterminism (Rule 21; Part 23's own final rule:
+"the AI is the reasoning layer, the data pipeline is the intelligence
+foundation").
+
+### 10. One structured judgment call, not seven
+
+Rather than one API call per Section 2 agent, `AIJudgmentService.judge()`
+makes a single structured-output request whose JSON schema carries every
+judgment slot (`FoundationInputs` + `NarrativeInputs` + bull/bear prose +
+confidence). One call sees the whole Section 3 snapshot (judgments stay
+mutually consistent), costs a seventh as much, and validates in one place:
+API-level schema enforcement, then range checks, then the Part 16
+banned-language guard. A judgment that fails any check — or scores below
+the configurable confidence floor — is discarded and the pipeline
+continues on deterministic evidence alone (Rules 6/8/9).
+
+### 11. AI enrichment runs after the deterministic chain, then re-scores
+
+`ResearchPipeline` runs the AI pass only after the full deterministic
+chain completes, skips it entirely for tokens with destructive security
+findings (Rule 10 — never spend tokens on an invalidated coin), and then
+recomputes the master score through the same locked weighting with the
+new foundation/narrative inputs. Explicit analyst `narrative_inputs`
+always win over the AI's. Any AI failure (network, refusal, invalid JSON,
+banned language, low confidence) leaves the deterministic result
+untouched. The structured-outputs schema cannot carry numeric
+minimum/maximum constraints (discovered in live testing) — ranges are
+stated in field descriptions and enforced when parsing.
+
 ## Deferred, with reasons
 
 ### Social data collectors (Parts 5, 19, and the "community" gate everywhere)
@@ -141,15 +182,15 @@ wallet, success/failure record) needs either a paid indexer or custom
 on-chain crawling that neither Helius nor Birdeye's free tiers expose
 directly. Flagged as a gap rather than approximated.
 
-### AI/LLM reasoning layer (Parts 13 §4, 22 §4, 23)
+### ~~AI/LLM reasoning layer (Parts 13 §4, 22 §4, 23)~~ — RESOLVED (Part 23 built)
 
-The qualitative judgment slots — meme strength, narrative scoring,
-bull/bear case prose — are structurally wired to receive AI-layer output
-(`FoundationInputs`, the narrative score slot in `ScoringEngine.evaluate()`)
-but nothing currently calls an LLM. `ai/prompts.py::ANALYST_SYSTEM_PROMPT`
-is written and tested (contains all Part 16 rules) and is ready to be
-used as the system prompt once API-calling code is added. Needs an
-Anthropic API key (not yet provided).
+Built in `ai/reasoning.py` once the user supplied an Anthropic API key.
+`ANALYST_SYSTEM_PROMPT` is the system prompt exactly as planned. See
+resolved ambiguities #9-11 for the architectural decisions. Remaining
+Part 23 gaps: Sections 7-8 (memory/feedback loop) activate with Part 24;
+the community judgment slots stay thin until the social collectors exist
+(the model is told the data is missing and lowers confidence — verified
+live: it reported 38/100 confidence on a snapshot with no social data).
 
 ### Telegram / Discord alert delivery (Part 29)
 

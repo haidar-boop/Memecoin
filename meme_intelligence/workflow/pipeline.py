@@ -9,10 +9,16 @@ per module; Rule 18: extend, don't duplicate).
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable
 
+from meme_intelligence.ai.reasoning import AIJudgment, AIJudgmentService
+from meme_intelligence.analyzers.foundation_analyzer import (
+    FoundationAnalyzer,
+    FoundationAssessment,
+)
 from meme_intelligence.analyzers.momentum_analyzer import MomentumAnalyzer, MomentumAssessment
 from meme_intelligence.analyzers.narrative_analyzer import (
     NarrativeAnalyzer,
@@ -38,7 +44,7 @@ from meme_intelligence.analyzers.wallet_intelligence import (
     enrich_onchain_profile,
 )
 from meme_intelligence.config.settings import Settings
-from meme_intelligence.core.enums import MarketRegime
+from meme_intelligence.core.enums import MarketRegime, ResearchMode
 from meme_intelligence.core.errors import CollectorError, InsufficientDataError
 from meme_intelligence.core.logging_setup import get_logger
 from meme_intelligence.core.models import DexPair, SecurityProfile
@@ -58,6 +64,8 @@ class PipelineResult:
     master: MasterAssessment
     wallet: WalletAssessment | None = None
     narrative: NarrativeAssessment | None = None
+    foundation: FoundationAssessment | None = None
+    ai_judgment: AIJudgment | None = None  # Part 23 reasoning-layer output
 
 
 class ResearchPipeline:
@@ -69,10 +77,12 @@ class ResearchPipeline:
         goplus_client,  # GoPlusClient-compatible (get_token_security)
         *,
         wallet_service=None,  # WalletDataService (Solana); costs metered credits
+        ai_service: AIJudgmentService | None = None,  # Part 23 reasoning layer
         now_func: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ) -> None:
         self._goplus = goplus_client
         self._wallet_service = wallet_service
+        self._ai = ai_service
         self._now = now_func
         self._logger = get_logger("workflow.pipeline")
 
@@ -83,6 +93,7 @@ class ResearchPipeline:
                                           now_func=now_func)
         self._narrative = NarrativeAnalyzer(settings.narrative, settings.narrative_weights,
                                             settings.viral_weights)
+        self._foundation = FoundationAnalyzer(settings.foundation_weights)
         self._wallet = WalletIntelligenceAnalyzer(settings.wallet, settings.smart_money_weights)
         self._risk = RiskAnalyzer(settings.risk_weights)
         self._scoring = ScoringEngine(settings.weights, settings.bands, now_func=now_func)
@@ -93,13 +104,17 @@ class ResearchPipeline:
         regime: MarketRegime = MarketRegime.UNKNOWN,
         *,
         narrative_inputs: NarrativeInputs | None = None,
+        research_mode: ResearchMode = ResearchMode.STANDARD,
     ) -> PipelineResult | None:
         """Full chain for one pair; ``None`` when security data is unavailable
         (a token that cannot be security-screened is not analyzable — Part 4).
 
-        ``narrative_inputs`` carries the Part 19 qualitative judgments (from
-        the AI layer or an analyst); without them the narrative category
-        honestly reports "no data" exactly as before (Rule 8).
+        ``narrative_inputs`` carries explicit Part 19 analyst judgments;
+        explicit inputs always win over the AI layer's. When an
+        ``ai_service`` was provided, the reasoning layer runs AFTER the
+        deterministic chain (Rule 10 — expensive analysis only after
+        filtering) and fills whichever judgment slots remain empty; without
+        it those categories honestly report "no data" (Rule 8).
         """
         try:
             profile = await self._goplus.get_token_security(pair.chain, pair.base_token.address)
@@ -158,8 +173,63 @@ class ResearchPipeline:
             narrative_score=narrative.overall_score if narrative else None,
             timing_score=derive_timing_score(pair, token, onchain, now_func=self._now),
         )
-        return PipelineResult(
+        result = PipelineResult(
             pair=pair, security_profile=profile, security=security,
             onchain=onchain, token=token, momentum=momentum, risk=risk, master=master,
             wallet=wallet, narrative=narrative,
+        )
+
+        # AI reasoning layer (Part 23): only after the deterministic chain,
+        # and never for tokens security has already invalidated (Rule 10).
+        if self._ai is not None and not security.is_destructive:
+            result = await self._enrich_with_ai(result, research_mode)
+        return result
+
+    # ---- AI enrichment (Part 23) ----
+
+    async def _enrich_with_ai(
+        self,
+        result: PipelineResult,
+        mode: ResearchMode,
+    ) -> PipelineResult:
+        """Fill empty judgment slots from the reasoning layer, then re-score.
+
+        The deterministic assessments are never altered — the judgment only
+        feeds the foundation/narrative categories that had no data, and the
+        master score is recomputed through the same locked weighting.
+        Any AI failure leaves the deterministic result untouched (Rule 9).
+        """
+        judgment = await self._ai.judge(result, mode=mode)
+        if judgment is None:
+            return result
+
+        narrative = result.narrative
+        if narrative is None:  # explicit analyst inputs always win (already assessed)
+            try:
+                narrative = self._narrative.assess(
+                    result.pair.base_token, judgment.narrative_inputs)
+            except InsufficientDataError:
+                narrative = None
+
+        foundation = None
+        try:
+            foundation = self._foundation.assess(
+                result.pair.base_token, judgment.foundation_inputs)
+        except InsufficientDataError:
+            pass
+
+        master = self._scoring.evaluate(
+            result.security,
+            onchain=result.onchain,
+            foundation=foundation,
+            token_structure=result.token,
+            risk=result.risk,
+            momentum_score=result.momentum.overall_score if result.momentum else None,
+            narrative_score=narrative.overall_score if narrative else None,
+            timing_score=derive_timing_score(result.pair, result.token, result.onchain,
+                                             now_func=self._now),
+        )
+        return dataclasses.replace(
+            result, master=master, narrative=narrative,
+            foundation=foundation, ai_judgment=judgment,
         )

@@ -21,6 +21,7 @@ import asyncio
 import sys
 
 from meme_intelligence.ai.comparison import render_comparison
+from meme_intelligence.ai.reasoning import build_judgment_service
 from meme_intelligence.ai.report_generator import build_report
 from meme_intelligence.alerts.notification_engine import ConsoleSink, NotificationEngine
 from meme_intelligence.analyzers.onchain_analyzer import OnChainAnalyzer, derive_onchain_profile
@@ -33,7 +34,7 @@ from meme_intelligence.collectors.wallet_data import (
     HeliusClient,
     WalletDataService,
 )
-from meme_intelligence.core.enums import MarketRegime
+from meme_intelligence.core.enums import MarketRegime, ResearchMode
 from meme_intelligence.database.storage import Storage
 from meme_intelligence.trading.trade_planner import TradePlanner
 from meme_intelligence.workflow.controller import ContinuousScanner
@@ -268,8 +269,9 @@ async def _cmd_plan(args, settings) -> int:
         return 1
     result, plan = gathered
 
-    for section in (result.security, result.onchain, result.token, result.narrative,
-                    result.momentum, result.risk, result.master):
+    for section in (result.security, result.onchain, result.token, result.foundation,
+                    result.narrative, result.momentum, result.risk,
+                    result.ai_judgment, result.master):
         if section is not None:
             print(section.summary() + "\n")
     print(plan.render())
@@ -280,6 +282,12 @@ async def _gather_assessments(args, settings):
     """Shared research pass (via the pipeline) used by plan and report commands."""
     regime = MarketRegime(args.regime)
     wallet_service = build_wallet_service(settings)
+    ai_service = None
+    if getattr(args, "ai", False):
+        ai_service = build_judgment_service(settings)
+        if ai_service is None:
+            return None, ("--ai requires MEMEINTEL_ANTHROPIC_API_KEY "
+                          "(set it in the environment or .env).")
     try:
         async with (
             build_dexscreener(settings) as dex,
@@ -290,8 +298,12 @@ async def _gather_assessments(args, settings):
             pair = await service.get_best_pair(args.address, chain=args.chain)
             if pair is None:
                 return None, f"No trading pairs found for {args.address}."
-            pipeline = ResearchPipeline(settings, goplus, wallet_service=wallet_service)
-            result = await pipeline.analyze_pair(pair, regime=regime)
+            pipeline = ResearchPipeline(settings, goplus, wallet_service=wallet_service,
+                                        ai_service=ai_service)
+            result = await pipeline.analyze_pair(
+                pair, regime=regime,
+                research_mode=ResearchMode(getattr(args, "ai_mode", "standard")),
+            )
     finally:
         if wallet_service is not None:
             await wallet_service.close()
@@ -320,8 +332,12 @@ async def _cmd_report(args, settings) -> int:
         momentum=result.momentum, risk=result.risk, plan=plan,
     )
     print(report.text)
+    if result.foundation is not None:
+        print("\n" + result.foundation.summary())
     if result.wallet is not None:
         print("\n" + result.wallet.summary())
+    if result.ai_judgment is not None:
+        print("\n" + result.ai_judgment.summary())
 
     with Storage(settings.database.path) as storage:
         storage.record_snapshot(result.master, source="report_cli")
@@ -607,6 +623,11 @@ def main(argv: list[str] | None = None) -> int:
 
     plan = sub.add_parser("plan", help="full research pass + trade plan for one token")
     plan.add_argument("address")
+    plan.add_argument("--ai", action="store_true",
+                      help="run the AI reasoning layer (needs MEMEINTEL_ANTHROPIC_API_KEY)")
+    plan.add_argument("--ai-mode", default="standard", dest="ai_mode",
+                      choices=[m.value for m in ResearchMode],
+                      help="AI research mode (Part 23 Section 10)")
     plan.add_argument("--chain", default=None, help="filter to one chain id (e.g. solana)")
     plan.add_argument("--regime", default="unknown",
                       choices=["bull", "neutral", "bear", "unknown"],
@@ -614,6 +635,11 @@ def main(argv: list[str] | None = None) -> int:
 
     report = sub.add_parser("report", help="canonical intelligence report for one token")
     report.add_argument("address")
+    report.add_argument("--ai", action="store_true",
+                        help="run the AI reasoning layer (needs MEMEINTEL_ANTHROPIC_API_KEY)")
+    report.add_argument("--ai-mode", default="standard", dest="ai_mode",
+                        choices=[m.value for m in ResearchMode],
+                        help="AI research mode (Part 23 Section 10)")
     report.add_argument("--chain", default=None, help="filter to one chain id (e.g. solana)")
     report.add_argument("--regime", default="unknown",
                         choices=["bull", "neutral", "bear", "unknown"])
