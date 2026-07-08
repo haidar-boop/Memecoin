@@ -370,7 +370,8 @@ async def _cmd_report(args, settings) -> int:
         print("\n" + result.ai_judgment.summary())
 
     with Storage(settings.database.path) as storage:
-        storage.record_snapshot(result.master, source="report_cli")
+        storage.record_snapshot(result.master, source="report_cli",
+                                pair=result.pair, regime=args.regime)
         if result.wallet is not None:
             # Sightings feed wallet track records for Part 24's learning loop.
             storage.record_wallet_sightings(
@@ -485,6 +486,52 @@ async def _cmd_compare(args, settings) -> int:
         print("Need at least two analyzable tokens to compare.")
         return 1
     print(render_comparison(results))
+    return 0
+
+
+async def _cmd_backtest(args, settings) -> int:
+    """Backtesting & self-improvement report (Part 24); --refresh measures
+    due outcome windows (live price fetch for tokens without snapshots)."""
+    from meme_intelligence.analytics.backtesting import (
+        evaluate_predictions,
+        failure_success_patterns,
+        label_alert_outcomes,
+        performance_metrics,
+        refresh_outcomes,
+        render_backtest_report,
+        signal_performance,
+        weight_experiments,
+    )
+
+    with Storage(settings.database.path) as storage:
+        recorded = 0
+        if args.refresh:
+            async with (
+                build_dexscreener(settings) as dex,
+                build_geckoterminal(settings) as gecko,
+            ):
+                service = build_market_service(settings, dex, gecko)
+                recorded = await refresh_outcomes(storage, service,
+                                                  settings=settings.backtest)
+        else:
+            recorded = await refresh_outcomes(storage, None, settings=settings.backtest)
+
+        labeled = label_alert_outcomes(storage, settings.backtest)
+        verdicts = evaluate_predictions(storage, settings.backtest)
+        if not verdicts:
+            print("No predictions have measurable outcomes yet.\n"
+                  "Keep `monitor` running (or re-run analyses later), then use\n"
+                  "`backtest --refresh` to measure due windows against live prices.")
+            return 0
+        metrics = performance_metrics(verdicts, settings.backtest)
+        print(render_backtest_report(
+            metrics,
+            signal_performance(verdicts, settings.backtest),
+            weight_experiments(verdicts, settings.backtest),
+            failure_success_patterns(verdicts, settings.backtest),
+            alerts_labeled=labeled,
+            outcomes_recorded=recorded,
+        ))
     return 0
 
 
@@ -676,6 +723,7 @@ async def _run(args: argparse.Namespace) -> int:
         "compare": _cmd_compare,
         "watchlist": _cmd_watchlist,
         "alerts": _cmd_alerts,
+        "backtest": _cmd_backtest,
         "wallets": _cmd_wallets,
         "daily": _cmd_daily,
         "monitor": _cmd_monitor,
@@ -746,6 +794,11 @@ def main(argv: list[str] | None = None) -> int:
     compare.add_argument("--chain", default=None, help="default chain for unprefixed addresses")
     compare.add_argument("--regime", default="unknown",
                          choices=["bull", "neutral", "bear", "unknown"])
+
+    backtest = sub.add_parser("backtest",
+                              help="prediction accuracy + self-improvement report (Part 24)")
+    backtest.add_argument("--refresh", action="store_true",
+                          help="measure due outcome windows via live market data")
 
     alerts = sub.add_parser("alerts", help="alert history + performance; --test checks delivery")
     alerts.add_argument("--limit", type=int, default=20)

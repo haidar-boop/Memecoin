@@ -34,7 +34,8 @@ human operator.
 | Part 19 — Narrative intelligence & viral potential | Viral score (memorability/shareability/emotional impact/cultural timing/participation, 5×20%); narrative intelligence score (meme strength/timing/viral potential/creativity/long-term, 5×20%) feeding the master framework's 15% narrative category; category + life-cycle stage classification; sentiment; three narrative risk factors → Low/Medium/High; viral catalysts; evidence-derived strengths/weaknesses; community-engine cross-fill for participation/creativity | ✅ Built (judgment slots await the AI layer / social collectors — engine reports partial coverage honestly) |
 | Part 23 — AI agent integration & intelligence pipeline | LLM reasoning layer (Claude, structured outputs): one validated judgment call fills the foundation/narrative qualitative slots + bull/bear reasoning + confidence; structured Section-3 snapshots (never raw data); layered validation (schema → ranges → banned-language guard → confidence floor); research modes (fast/standard/deep); runs post-pipeline only, never on destructive tokens, degrades to deterministic evidence on any failure; `report --ai` / `plan --ai` | ✅ Built (live-verified; memory/feedback loop lands with Part 24) |
 | Part 29 — Real-time alert intelligence & notification | Telegram bot + Discord webhook sinks (channel-category routing, min-priority noise control, Section 7 message format with why-it-matters/evidence/risk); Section 10 dispatch ranking (impact/confidence/urgency/novelty); alert history DB + per-type performance measurement (score drift after alert); community-fed opportunity gate + fake-community alert; `alerts` CLI with `--test` delivery check | ✅ Built (add a bot token / webhook to activate delivery) |
-| Parts 20+ — Dashboard, backtesting, remaining consolidation parts | — | ⏳ Upcoming |
+| Part 24 — Backtesting & self-improvement | Outcome tracking (1h/24h/7d/30d windows from stored snapshots or live fetch; token death recorded); prediction grading with honest undetermined; Section 4 metrics split by classification/regime/confidence; per-signal performance; weight experiments (report-only under the Part 31 lock); failure/success signal patterns; alert-outcome labeling; strategy-change journal; `backtest [--refresh]` CLI | ✅ Built (judgments mature as the scanner accumulates outcomes) |
+| Parts 20+ — Dashboard, remaining consolidation parts | — | ⏳ Upcoming |
 
 ## Project structure
 
@@ -84,6 +85,8 @@ meme_intelligence/
 │   ├── pipeline.py         # shared per-token analysis chain (one implementation)
 │   ├── daily_routine.py    # Part 11 daily research-desk orchestration
 │   └── controller.py       # Part 13 continuous 24/7 scanning loop
+├── analytics/
+│   └── backtesting.py      # Part 24: outcomes, grading, metrics, experiments
 ├── ai/
 │   ├── report_generator.py # Part 12 canonical intelligence report
 │   ├── comparison.py       # Part 16 multi-token comparison + ranking
@@ -110,6 +113,7 @@ python -m meme_intelligence watchlist --refresh               # show / re-score 
 python -m meme_intelligence daily                             # full daily routine + watchlist
 python -m meme_intelligence monitor --cycles 5 --interval 30  # continuous scanner + alerts
 python -m meme_intelligence alerts --test                      # check alert delivery setup
+python -m meme_intelligence backtest --refresh                 # measure outcomes, grade predictions
 ```
 
 Configuration is entirely environment-driven — see `.env.example` for every
@@ -162,4 +166,4 @@ environment.
 7. ~~Daily workflow + database + report template~~ ✅
 8. ~~Momentum analyzer + continuous scanner + automation rules~~ ✅
 9. ~~Narrative engine, Telegram/Discord sinks~~ ✅ (dashboard still pending)
-10. ~~AI/LLM integration for qualitative judgments~~ ✅ (backtesting loop still pending)
+10. ~~AI/LLM integration for qualitative judgments, backtesting loop~~ ✅

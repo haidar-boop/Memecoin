@@ -263,7 +263,9 @@ class DailyRoutine:
             return None
         token = pair.base_token
         symbol = token.symbol or token.address[:8]
-        self._storage.record_snapshot(result.master, source="daily_routine")
+        self._storage.record_snapshot(result.master, source="daily_routine",
+                                      pair=result.pair,
+                                      regime=report.environment.regime.value)
 
         # Contract-change monitoring (Part 18 Section 10): worsened facts are
         # front-page risks in the daily report and journaled for the record.

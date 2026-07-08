@@ -198,7 +198,8 @@ class ContinuousScanner:
         token = result.pair.base_token
         previous = self._storage.score_history(token, limit=1)
         previous_score = previous[0]["final_score"] if previous else None
-        self._storage.record_snapshot(result.master, source=source)
+        self._storage.record_snapshot(result.master, source=source,
+                                      pair=result.pair, regime=self._regime.value)
 
         # Contract-change monitoring (Part 18, Section 10): diff the security
         # facts against the last known baseline, then update the baseline.

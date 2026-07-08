@@ -110,7 +110,38 @@ CREATE TABLE IF NOT EXISTS alerts (
 );
 CREATE INDEX IF NOT EXISTS idx_alerts_token ON alerts(token_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_alerts_type ON alerts(alert_type, created_at);
+
+-- Measured outcomes per prediction (Part 24, Sections 2-3): one row per
+-- (prediction snapshot, time window), joining what the framework said
+-- with what the market then did.
+CREATE TABLE IF NOT EXISTS outcomes (
+    id INTEGER PRIMARY KEY,
+    snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
+    token_id INTEGER NOT NULL REFERENCES tokens(id),
+    window_hours REAL NOT NULL,
+    target_at TEXT NOT NULL,     -- prediction time + window
+    measured_at TEXT NOT NULL,   -- when the measurement actually happened
+    price_usd REAL,
+    price_change_percent REAL,   -- vs price at prediction time
+    liquidity_usd REAL,
+    survived INTEGER,            -- liquidity above the survival floor (1/0), NULL unknown
+    source TEXT NOT NULL,        -- snapshot / live_fetch
+    UNIQUE (snapshot_id, window_hours)
+);
+CREATE INDEX IF NOT EXISTS idx_outcomes_token ON outcomes(token_id, window_hours);
 """
+
+# Columns added to existing tables after their first release; applied by
+# Storage._migrate() so databases created by earlier builds keep working
+# (Rule 18 — extend, never break).
+_MIGRATIONS = {
+    "snapshots": (
+        ("price_usd", "REAL"),       # market facts at prediction time (Part 24 S2)
+        ("liquidity_usd", "REAL"),
+        ("market_cap", "REAL"),
+        ("regime", "TEXT"),          # market condition bucketing (Part 24 S9)
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -152,7 +183,18 @@ class Storage:
         self._conn = sqlite3.connect(path)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Add post-release columns to tables from older databases (Rule 18)."""
+        for table, columns in _MIGRATIONS.items():
+            existing = {row["name"] for row in
+                        self._conn.execute(f"PRAGMA table_info({table})")}
+            for name, sql_type in columns:
+                if name not in existing:
+                    self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}")
+                    self._logger.info("migrated %s: added column %s", table, name)
 
     def close(self) -> None:
         self._conn.close()
@@ -185,13 +227,21 @@ class Storage:
 
     # ---- Assessment snapshots (feeds Part 24 backtesting) ----
 
-    def record_snapshot(self, assessment: MasterAssessment, source: str) -> int:
+    def record_snapshot(
+        self,
+        assessment: MasterAssessment,
+        source: str,
+        *,
+        pair=None,          # DexPair: market facts at prediction time (Part 24 S2)
+        regime: str | None = None,  # market condition bucket (Part 24 S9)
+    ) -> int:
         token_id = self.upsert_token(assessment.token)
         cursor = self._conn.execute(
             """INSERT INTO snapshots
                (token_id, created_at, final_score, classification, confidence,
-                coverage, category_scores, overrides, source)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                coverage, category_scores, overrides, source,
+                price_usd, liquidity_usd, market_cap, regime)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 token_id,
                 assessment.generated_at.isoformat(),
@@ -202,6 +252,10 @@ class Storage:
                 json.dumps(dataclasses.asdict(assessment.category_scores)),
                 json.dumps(list(assessment.overrides)),
                 source,
+                pair.price_usd if pair is not None else None,
+                pair.liquidity_usd if pair is not None else None,
+                pair.market_cap if pair is not None else None,
+                regime,
             ),
         )
         self._conn.commit()
@@ -431,6 +485,81 @@ class Storage:
                 (token.chain, token.address, limit),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    # ---- Prediction outcomes (Part 24, Sections 2-3) ----
+
+    def predictions(self, *, with_price_only: bool = True) -> list[dict]:
+        """The FIRST snapshot per token — the moment the framework made its
+        call (Part 24 S3). Later snapshots are re-assessments, not new
+        predictions. ``with_price_only`` keeps rows measurable (a prediction
+        without a stored price cannot have a price outcome — honest gap)."""
+        price_filter = "AND s.price_usd IS NOT NULL" if with_price_only else ""
+        rows = self._conn.execute(
+            f"""SELECT s.id AS snapshot_id, s.token_id, s.created_at, s.final_score,
+                       s.classification, s.confidence, s.coverage, s.category_scores,
+                       s.price_usd, s.liquidity_usd, s.regime,
+                       t.chain, t.address, t.symbol
+                FROM snapshots s
+                JOIN tokens t ON t.id = s.token_id
+                WHERE s.id = (SELECT MIN(s2.id) FROM snapshots s2
+                              WHERE s2.token_id = s.token_id)
+                {price_filter}
+                ORDER BY s.created_at""",
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def snapshots_for_token(self, token_id: int) -> list[dict]:
+        rows = self._conn.execute(
+            """SELECT id, created_at, final_score, price_usd, liquidity_usd
+               FROM snapshots WHERE token_id = ? ORDER BY created_at""",
+            (token_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def record_outcome(
+        self, *, snapshot_id: int, token_id: int, window_hours: float,
+        target_at: str, measured_at: str, price_usd: float | None,
+        price_change_percent: float | None, liquidity_usd: float | None,
+        survived: bool | None, source: str,
+    ) -> None:
+        """Insert one measured outcome; re-measuring a window is a no-op."""
+        self._conn.execute(
+            """INSERT OR IGNORE INTO outcomes
+               (snapshot_id, token_id, window_hours, target_at, measured_at,
+                price_usd, price_change_percent, liquidity_usd, survived, source)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (snapshot_id, token_id, window_hours, target_at, measured_at,
+             price_usd, price_change_percent, liquidity_usd,
+             None if survived is None else int(survived), source),
+        )
+        self._conn.commit()
+
+    def outcomes_for_snapshot(self, snapshot_id: int) -> dict[float, dict]:
+        rows = self._conn.execute(
+            "SELECT * FROM outcomes WHERE snapshot_id = ? ORDER BY window_hours",
+            (snapshot_id,),
+        ).fetchall()
+        return {row["window_hours"]: dict(row) for row in rows}
+
+    def alerts_with_drift(self) -> list[dict]:
+        """Every alert with the master-score drift to the latest later
+        snapshot (NULL drift when no re-assessment happened yet)."""
+        rows = self._conn.execute(
+            """SELECT a.id, a.alert_type, a.priority, a.outcome,
+                      (SELECT s.final_score FROM snapshots s
+                       WHERE s.token_id = a.token_id AND s.created_at > a.created_at
+                       ORDER BY s.created_at DESC LIMIT 1) - a.score_at_alert AS drift
+               FROM alerts a
+               WHERE a.score_at_alert IS NOT NULL
+               ORDER BY a.id""",
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def set_alert_outcome(self, alert_id: int, outcome: str) -> None:
+        """Label an alert after measurement (Part 29 S11 / Part 24 S10)."""
+        self._conn.execute("UPDATE alerts SET outcome = ? WHERE id = ?",
+                           (outcome, alert_id))
+        self._conn.commit()
 
     def alert_performance(self, *, min_followups: int = 1) -> list[dict]:
         """Per-alert-type outcome measurement (Part 29, Section 12).

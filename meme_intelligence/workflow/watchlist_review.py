@@ -75,7 +75,7 @@ async def review_entries(
         if result is None:
             continue
         reviewed += 1
-        storage.record_snapshot(result.master, source=snapshot_source)
+        storage.record_snapshot(result.master, source=snapshot_source, pair=result.pair)
         if on_result is not None:
             await on_result(result)
 

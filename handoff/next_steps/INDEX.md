@@ -28,7 +28,7 @@ to the genuinely new material within it.
 | PART_21_TECHNICAL_INFRASTRUCTURE.md | 21 | Technical Infrastructure Blueprint & Anti-Throttling Architecture | Low — architecture already built; deployment/hosting guidance is new |
 | PART_22_BOT_DEVELOPMENT_BLUEPRINT.md | 22 | Bot Development Blueprint & Software Architecture | Low — folder structure/module split already matches this |
 | PART_23_AI_AGENT_INTEGRATION.md | 23 | AI Agent Integration Blueprint & Intelligence Pipeline | ✅ **Built** — `ai/reasoning.py`, live-verified (see `../STATUS.md`); §7-8 memory/feedback land with Part 24 |
-| PART_24_BACKTESTING.md | 24 | Backtesting, Performance Tracking & AI Self-Improvement System | High — no outcome-tracking/backtesting loop exists yet |
+| PART_24_BACKTESTING.md | 24 | Backtesting, Performance Tracking & AI Self-Improvement System | ✅ **Built** — `analytics/backtesting.py` (see `../STATUS.md`); metrics mature as the scanner accumulates outcomes |
 | PART_25_RISK_MANAGEMENT_UPSIDE.md | 25 | Professional Risk Management & High-Upside Opportunity Framework | Medium — risk doctrine already incorporated; explicit opportunity-ranking formula not separately implemented |
 | PART_26_MOMENTUM_DETECTION.md | 26 | Advanced Entry Signal & Momentum Detection Engine | Low — momentum analyzer already built in Part 14 against this doctrine |
 | PART_27_LAUNCH_SCANNER.md | 27 | Automated Token Discovery & Early Launch Scanner | Low — discovery engine already built; first-5-minute/first-hour framing is new |
@@ -54,9 +54,9 @@ Given what's already built, the genuinely high-value next targets are:
 3. ~~**Part 29** (Alert Intelligence)~~ — ✅ built: Telegram/Discord
    sinks, §7 format, §10 ranking, alert history + performance; delivery
    activates when a bot token/webhook lands in `.env`
-4. **Part 24** (Backtesting) — highest long-term value, but needs weeks
-   of accumulated snapshot data to be meaningful; the data collection
-   side is already running
+4. ~~**Part 24** (Backtesting)~~ — ✅ built: outcome windows, prediction
+   grading, §4 metrics, signal analysis, weight experiments (report-only
+   under the Part 31 lock); judgments mature as data accumulates
 5. **Part 32.5's Pump.fun integration** — a genuinely new discovery
    source, additive to the existing `DiscoveryEngine`
 

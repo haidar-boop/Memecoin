@@ -395,6 +395,57 @@ class AISettings:
 
 
 @dataclass(frozen=True)
+class BacktestSettings:
+    """Backtesting & self-improvement thresholds (Part 24).
+
+    A positive prediction (Elite/Strong Candidate) counts as successful when
+    the best measured window gains ``success_price_change_percent``; it
+    counts as failed at ``failure_price_change_percent`` or token death
+    (liquidity under ``survival_min_liquidity_usd``). An Avoid call is
+    graded with the same thresholds inverted. Everything in between stays
+    honestly "undetermined" (Rule 8 — one week of sideways price proves
+    nothing either way).
+    """
+
+    windows_hours: str = "1,24,168,720"      # 1h / 24h / 7d / 30d (Part 24 S2)
+    window_tolerance_fraction: float = 0.35  # snapshot within +/-35% of the window counts
+    success_price_change_percent: float = 50.0
+    failure_price_change_percent: float = -50.0
+    survival_min_liquidity_usd: float = 1000.0
+    signal_high_score: float = 70.0          # "high" bucket for signal analysis (S6)
+    signal_low_score: float = 50.0           # below this = "low" bucket
+    alert_useful_drift_points: float = 10.0  # score drift that labels an alert useful (S12/29)
+    min_predictions_for_weights: int = 10    # weight experiments need a real sample (S1)
+
+    def __post_init__(self) -> None:
+        windows = [w.strip() for w in self.windows_hours.split(",") if w.strip()]
+        if not windows:
+            raise ConfigurationError("backtest windows_hours must be non-empty")
+        try:
+            parsed = [float(w) for w in windows]
+        except ValueError as exc:
+            raise ConfigurationError(f"invalid backtest window: {exc}") from exc
+        if any(w <= 0 for w in parsed) or parsed != sorted(parsed):
+            raise ConfigurationError("backtest windows must be positive and ascending")
+        if not (0 < self.window_tolerance_fraction < 1):
+            raise ConfigurationError("window_tolerance_fraction must be within (0, 1)")
+        if self.success_price_change_percent <= 0:
+            raise ConfigurationError("success_price_change_percent must be positive")
+        if self.failure_price_change_percent >= 0:
+            raise ConfigurationError("failure_price_change_percent must be negative")
+        if self.signal_low_score >= self.signal_high_score:
+            raise ConfigurationError("signal_low_score must be below signal_high_score")
+        for name in ("survival_min_liquidity_usd", "alert_useful_drift_points",
+                     "min_predictions_for_weights"):
+            if getattr(self, name) <= 0:
+                raise ConfigurationError(f"backtest setting '{name}' must be positive")
+
+    @property
+    def window_list(self) -> list[float]:
+        return [float(w.strip()) for w in self.windows_hours.split(",") if w.strip()]
+
+
+@dataclass(frozen=True)
 class DatabaseSettings:
     """Local persistence (Part 13 Section 5, Part 21 Section 6).
 
@@ -728,6 +779,7 @@ class Settings:
     wallet: WalletIntelSettings = field(default_factory=WalletIntelSettings)
     smart_money_weights: SmartMoneySubWeights = field(default_factory=SmartMoneySubWeights)
     ai: AISettings = field(default_factory=AISettings)
+    backtest: BacktestSettings = field(default_factory=BacktestSettings)
     log_level: str = "INFO"
     log_dir: str = "logs"
     # API keys (Rule 16): read from MEMEINTEL_HELIUS_API_KEY / MEMEINTEL_BIRDEYE_API_KEY /
@@ -779,6 +831,7 @@ class Settings:
             wallet=_load_group(WalletIntelSettings, "WALLET", env),
             smart_money_weights=_load_group(SmartMoneySubWeights, "SMART_MONEY_WEIGHTS", env),
             ai=_load_group(AISettings, "AI", env),
+            backtest=_load_group(BacktestSettings, "BACKTEST", env),
             log_level=env.get(f"{_ENV_PREFIX}_LOG_LEVEL", "INFO"),
             log_dir=env.get(f"{_ENV_PREFIX}_LOG_DIR", "logs"),
             helius_api_key=env.get(f"{_ENV_PREFIX}_HELIUS_API_KEY", ""),

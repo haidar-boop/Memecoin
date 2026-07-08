@@ -180,6 +180,34 @@ ranking, §§11-12 history/performance). Interpretive choices:
 - Route strings validate loudly — a typo in a category name raises at
   startup instead of silently sending security alerts nowhere (Rule 6).
 
+### 13. Part 24 grading rules and the self-improvement boundary
+
+- **A prediction is the FIRST snapshot per token** — later snapshots are
+  re-assessments and become the outcome measurements instead. Outcome
+  windows (1h/24h/7d/30d) prefer a stored snapshot within a tolerance of
+  the window target (data the scanner already collected, Rule 10) and
+  fall back to a live pair fetch; a token with no tradable pair left is
+  recorded as dead at price zero — disappearance IS the outcome.
+- **Grading is deliberately three-valued** (correct / incorrect /
+  undetermined): +50% best-window makes a positive call correct, −50% or
+  death makes it wrong; Avoid grades inverted; Watchlist/Speculative are
+  middle calls asserting neither outcome and stay ungraded for accuracy.
+  Sideways price action proves nothing and is never force-classified
+  (Rule 8). All thresholds env-tunable (`MEMEINTEL_BACKTEST_*`).
+- **Section 10's "Rule Adjustment" stays human-in-the-loop.** Weight
+  experiments recompute stored category scores under variant weightings
+  and report which discriminates winners best — but the Part 31
+  Consistency Lock keeps shipped weights canonical, so the system never
+  self-modifies. Adopting a change = env override + a
+  `record_strategy_change()` journal entry (Section 11's what/why/
+  results). This was chosen over auto-tuning deliberately: silent
+  self-modification would violate Rule 20 and make Section 14's "never
+  change rules without recording it" unenforceable.
+- Snapshots gained price/liquidity/mcap/regime columns via an in-place
+  migration (`Storage._migrate()`, Rule 18) — old databases keep working
+  and simply lack price outcomes for their pre-migration rows (honest
+  gap, reported as unmeasurable rather than guessed).
+
 ## Deferred, with reasons
 
 ### Social data collectors (Parts 5, 19, and the "community" gate everywhere)

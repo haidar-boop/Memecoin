@@ -1,6 +1,6 @@
-# Build Status — Parts 1 through 19, plus 23 and 29
+# Build Status — Parts 1 through 19, plus 23, 24 and 29
 
-**349 tests passing.** ~11,100 lines of source, ~5,200 lines of tests.
+**362 tests passing.** ~11,700 lines of source, ~5,600 lines of tests.
 Parts 1–18 were built on `claude/large-prompt-review-l49wp1`; Parts 19
 and 23 on `claude/handoff-folder-review-fuu9dq`.
 
@@ -366,9 +366,45 @@ The classification/scoring framework, config system, and logging.
 
 ---
 
+## Part 24 — Backtesting, Performance Tracking & Self-Improvement → 🟡
+
+- `analytics/backtesting.py` — the measurement loop. Every first snapshot
+  per token is the §3 *prediction record*; `refresh_outcomes()` measures
+  the §2 windows (1h/24h/7d/30d, configurable) preferring stored
+  snapshots near each window target and falling back to a live pair
+  fetch (a vanished pair records token death). Windows are never
+  measured early and never twice (§14).
+- Grading: positive calls (Elite/Strong) correct on +50% best-window,
+  incorrect on -50%/death; Avoid grades inverted; Watchlist/Speculative
+  stay ungraded (middle calls); sideways stays honestly undetermined
+  (Rule 8). Thresholds in `BacktestSettings` (env `MEMEINTEL_BACKTEST_*`).
+- §4 metrics (accuracy, opportunity detection, false-positive rate, risk
+  detection) with sample sizes everywhere (§1), split by classification,
+  market regime (§9 — snapshots now store the regime), and confidence
+  level (§12 calibration).
+- §6 signal performance (high-vs-low bucket outcome per category), §5
+  weight experiments (locked baseline vs security/community/narrative-
+  heavy variants; top-vs-bottom-half discrimination; refuses tiny
+  samples; **report-only under the Part 31 lock** — humans apply env
+  overrides and record them), §§7-8 failure/success signal patterns,
+  §11 `record_strategy_change()` journal.
+- Part 29 bridge: `label_alert_outcomes()` fills `alerts.outcome`
+  (useful / noise / correct_warning) from measured score drift.
+- Storage: `outcomes` table; snapshots gained price/liquidity/mcap/regime
+  columns via `_migrate()` (old databases upgrade in place, Rule 18);
+  every snapshot call site now records market facts.
+- CLI: `backtest` (grade + report), `backtest --refresh` (measure due
+  windows via live market data).
+- **Gap (why 🟡):** measurements need elapsed time — judgments become
+  meaningful only after `monitor`/`daily` have run for days-to-weeks
+  (§1: hundreds of examples). §10's rule-adjustment step stays human-in-
+  the-loop by design.
+
+---
+
 ## What's NOT built yet
 
-Everything in `next_steps/` — **Parts 20-22, 24-28, and 30-33** (see
+Everything in `next_steps/` — **Parts 20-22, 25-28, and 30-33** (see
 `next_steps/INDEX.md`). Some of these (20, 21, 22, 23, 30, 31, 32, 32.5)
 substantially overlap with what's already built, since they're
 architecture/consolidation parts written before the earlier build parts
@@ -387,11 +423,9 @@ earlier parts.
    paid aggregator (LunarCrush) is added — planned once the system
    proves itself. Very new tokens aren't listed on CoinGecko yet and
    report "no data" honestly.
-2. **No outcome-tracking / backtesting loop yet (Part 24).** Every
-   snapshot is being recorded (`snapshots`, `wallet_sightings`,
-   `security_facts` tables) specifically so that once Part 24 is built,
-   historical predictions can be joined against actual outcomes. The data
-   pipeline is ready; the join/scoring logic isn't written.
+2. ~~No outcome-tracking / backtesting loop yet~~ **Resolved — Part 24
+   built.** Predictions are graded against measured outcomes; meaningful
+   metrics accumulate as the scanner runs.
 3. **EVM wallet intelligence** (Alchemy or similar) is not built — Part
    17 is Solana-only.
 4. ~~No Telegram/Discord alert sinks yet~~ **Resolved — Part 29 built.**
