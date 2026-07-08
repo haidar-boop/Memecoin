@@ -152,3 +152,111 @@ async def test_unindexed_tokens_skipped():
         history = await scanner.run(max_cycles=1)
         assert history[0].analyzed == 0
         assert storage.get_watchlist() == []
+
+
+# ---- Part 15: watchlist recheck cadence + multi-source verification ----
+
+import dataclasses as _dc
+
+from meme_intelligence.core.enums import AlertPriority, WatchlistTier
+from meme_intelligence.core.models import TokenIdentity
+
+
+class FakeMarketService:
+    """Market service double: serves best pairs and a fixed verification verdict."""
+
+    def __init__(self, pairs_by_address=None, verdict=(None, "no second source")):
+        self.pairs_by_address = pairs_by_address or {}
+        self.verdict = verdict
+        self.recheck_calls = 0
+        self.verify_calls = 0
+
+    async def get_best_pair(self, address, chain=None):
+        self.recheck_calls += 1
+        return self.pairs_by_address.get(address)
+
+    async def cross_check_liquidity(self, pair):
+        self.verify_calls += 1
+        return self.verdict
+
+
+def fast_recheck_settings() -> Settings:
+    return Settings.from_env(env={"MEMEINTEL_WORKFLOW_WATCHLIST_RECHECK_CYCLES": "1"})
+
+
+def make_scanner_with_market(storage, pools, profiles, market, settings=None, sink=None):
+    async def fake_sleep(seconds):
+        pass
+
+    notifier = NotificationEngine([sink or RecordingSink()], AlertEngineSettings(),
+                                  time_func=lambda: 0.0)
+    return ContinuousScanner(
+        settings or SETTINGS, storage, notifier,
+        gecko_client=FakeGecko(pools),
+        goplus_client=FakeGoPlus(profiles),
+        market_service=market,
+        now_func=lambda: NOW,
+        sleep_func=fake_sleep,
+    )
+
+
+async def test_watchlist_recheck_reanalyzes_tracked_tokens():
+    tracked = TokenIdentity(chain="solana", address="TokenTracked", symbol="TRK")
+    tracked_pair = make_pair(address="TokenTracked", symbol="TRK")
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        storage.update_watchlist(tracked, WatchlistTier.TIER_1_HIGH_PRIORITY, score=80.0)
+        market = FakeMarketService({"TokenTracked": tracked_pair})
+        scanner = make_scanner_with_market(
+            storage, [], {"TokenTracked": clean_profile(tracked)},
+            market, settings=fast_recheck_settings(),
+        )
+        history = await scanner.run(max_cycles=1)
+        assert market.recheck_calls == 1
+        assert history[0].analyzed == 1  # the tracked token was re-analyzed
+        assert len(storage.score_history(tracked)) == 1
+
+
+async def test_recheck_archives_token_with_no_pairs():
+    dead = TokenIdentity(chain="solana", address="TokenDead", symbol="DEAD")
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        storage.update_watchlist(dead, WatchlistTier.TIER_2_DEVELOPING, score=70.0)
+        scanner = make_scanner_with_market(
+            storage, [], {}, FakeMarketService({}), settings=fast_recheck_settings(),
+        )
+        await scanner.run(max_cycles=1)
+        assert storage.get_watchlist() == []
+        archived = storage.get_watchlist(include_archived=True)
+        assert archived and archived[0].tier is WatchlistTier.ARCHIVED
+
+
+async def test_source_disagreement_downgrades_opportunity_alert():
+    """Part 15 Section 10: important events need multi-source confirmation."""
+    pair = make_pair()
+    sink = RecordingSink()
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        market = FakeMarketService(verdict=(False, "sources disagree on liquidity"))
+        scanner = make_scanner_with_market(
+            storage, [pair], {pair.base_token.address: clean_profile(pair.base_token)},
+            market, sink=sink,
+        )
+        await scanner.run(max_cycles=1)
+        assert market.verify_calls >= 1
+        opportunity = [e for e in sink.sent if "opportunity" in e.alert_type]
+        assert opportunity
+        assert opportunity[0].priority is AlertPriority.LOW  # MEDIUM downgraded
+        assert any("DOWNGRADED" in r for r in opportunity[0].reasons)
+
+
+async def test_source_agreement_annotates_alert():
+    pair = make_pair()
+    sink = RecordingSink()
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        market = FakeMarketService(verdict=(True, "liquidity confirmed by verifier"))
+        scanner = make_scanner_with_market(
+            storage, [pair], {pair.base_token.address: clean_profile(pair.base_token)},
+            market, sink=sink,
+        )
+        await scanner.run(max_cycles=1)
+        opportunity = [e for e in sink.sent if "opportunity" in e.alert_type]
+        assert opportunity
+        assert any("confirmed" in r for r in opportunity[0].reasons)

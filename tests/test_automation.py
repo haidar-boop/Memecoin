@@ -96,6 +96,29 @@ async def test_failed_gate_produces_no_opportunity_alert():
     assert not any("opportunity" in e.alert_type for e in events)
 
 
+async def test_momentum_alert_fires_through_gate():
+    """Part 15 Section 5: momentum alert when growth signals align."""
+    hot_pair = make_pair(volume_1h=20_000.0, buys_1h=60, sells_1h=10,
+                         price_change_24h=25.0, price_change_6h=12.0, price_change_1h=5.0)
+    result = await pipeline_result(pair=hot_pair)
+    assert result.momentum.overall_score >= 70  # sanity: gate actually reachable
+    events = make_rules().evaluate(result)
+    momentum_events = [e for e in events if e.alert_type == "momentum"]
+    assert momentum_events
+    assert momentum_events[0].priority is AlertPriority.MEDIUM
+    assert any("coverage" in r for r in momentum_events[0].reasons)
+
+
+async def test_no_momentum_alert_in_late_zone():
+    """Accelerating into a blow-off is not an opportunity signal."""
+    extended = make_pair(price_change_24h=250.0, volume_1h=20_000.0,
+                         buys_1h=60, sells_1h=10,
+                         pair_created_at=NOW - timedelta(days=3))
+    result = await pipeline_result(pair=extended)
+    events = make_rules().evaluate(result)
+    assert not any(e.alert_type == "momentum" for e in events)
+
+
 async def test_score_drop_rule():
     result = await pipeline_result()
     events = make_rules().evaluate(result, previous_score=result.master.final_score + 20)

@@ -90,6 +90,20 @@ async def test_endpoint_paths(client):
     assert client.requested_path == "api/v2/networks/base/trending_pools"
 
 
+async def test_token_pairs_endpoint_and_chain_alias(client):
+    """DexScreener-style chain ids map to GeckoTerminal network ids (Part 15)."""
+    await client.get_token_pairs("TokenX", chain="ethereum")
+    assert client.requested_path == "api/v2/networks/eth/tokens/TokenX/pools"
+    await client.get_token_pairs("TokenY", chain="solana")
+    assert client.requested_path == "api/v2/networks/solana/tokens/TokenY/pools"
+
+
+async def test_token_pairs_without_chain_is_collector_error():
+    """Missing chain must be a CollectorError so a provider pool fails over."""
+    with pytest.raises(CollectorError, match="chain is required"):
+        await make_client().get_token_pairs("TokenX")
+
+
 async def test_bad_payload_raises(monkeypatch):
     client = make_client()
 

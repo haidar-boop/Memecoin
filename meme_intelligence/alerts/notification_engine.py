@@ -25,7 +25,7 @@ from typing import Callable, Protocol
 
 from meme_intelligence.analyzers.risk_analyzer import emergency_flags
 from meme_intelligence.config.settings import AlertEngineSettings, AlertThresholds
-from meme_intelligence.core.enums import AlertPriority
+from meme_intelligence.core.enums import AlertPriority, EntryZone
 from meme_intelligence.core.logging_setup import get_logger
 from meme_intelligence.core.models import TokenIdentity
 from meme_intelligence.workflow.pipeline import PipelineResult
@@ -74,6 +74,9 @@ class AutomationRules:
         opportunity = self._opportunity_rule(result)
         if opportunity is not None:
             events.append(opportunity)
+        momentum = self._momentum_rule(result)
+        if momentum is not None:
+            events.append(momentum)
         drop = self._score_drop_rule(result, previous_score)
         if drop is not None:
             events.append(drop)
@@ -141,6 +144,33 @@ class AutomationRules:
             reasons=(f"classification: {result.master.classification.value}",
                      "unverified categories are NOT confirmation (Part 31 Section 6)"),
             scores=scores,
+        )
+
+    # IF momentum accelerates through the gate in a sane entry zone THEN
+    # surface it (Part 15 Section 5 — momentum alert).
+    def _momentum_rule(self, result: PipelineResult) -> AlertEvent | None:
+        momentum = result.momentum
+        if momentum is None or result.security.is_destructive:
+            return None
+        if momentum.overall_score < self._t.momentum:
+            return None
+        if momentum.entry_zone is EntryZone.LATE:
+            return None  # accelerating into a blow-off is not an opportunity signal
+        components = ", ".join(
+            f"{k}={v:.0f}" if v is not None else f"{k}=?"
+            for k, v in momentum.sub_scores.items()
+        )
+        return AlertEvent(
+            priority=AlertPriority.MEDIUM,
+            alert_type="momentum",
+            token=result.pair.base_token,
+            title=f"Momentum {momentum.overall_score:.0f}/100 in "
+                  f"{momentum.entry_zone.value} zone ({momentum.preferred_action.value})",
+            reasons=(components,
+                     f"momentum coverage {momentum.coverage:.0%} — "
+                     "confirm before treating as validated"),
+            scores={"momentum": momentum.overall_score,
+                    "master": result.master.final_score},
         )
 
     # IF the score drops sharply vs the last snapshot THEN review (Part 13 Section 7).

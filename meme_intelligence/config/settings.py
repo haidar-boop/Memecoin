@@ -151,6 +151,7 @@ class AlertThresholds:
     liquidity: float = 70.0
     onchain: float = 75.0
     overall: float = 85.0
+    momentum: float = 70.0  # momentum score gate for momentum alerts (Part 15, Section 5)
 
     def __post_init__(self) -> None:
         for name, value in dataclasses.asdict(self).items():
@@ -383,13 +384,15 @@ class WorkflowSettings:
     risk_on_btc_change_percent: float = 2.0   # BTC 24h gain above this = risk-on
     risk_off_btc_drop_percent: float = 3.0    # BTC 24h drop beyond this = risk-off
     monitor_interval_seconds: float = 45.0    # continuous-scanner cycle cadence (fast layer)
+    watchlist_recheck_cycles: int = 10        # re-check tracked tokens every N cycles
+                                              # (secondary cadence, Part 15 Section 2)
 
     def __post_init__(self) -> None:
         if not self.networks.strip():
             raise ConfigurationError("workflow networks must be non-empty")
         for name in ("top_candidates", "watchlist_review_limit",
                      "risk_on_btc_change_percent", "risk_off_btc_drop_percent",
-                     "monitor_interval_seconds"):
+                     "monitor_interval_seconds", "watchlist_recheck_cycles"):
             if getattr(self, name) <= 0:
                 raise ConfigurationError(f"workflow setting '{name}' must be positive")
 

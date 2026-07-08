@@ -201,6 +201,26 @@ class GeckoTerminalClient(BaseCollector):
         )
         return self._parse_pools(payload)
 
+    async def get_token_pairs(self, token_address: str, chain: str | None = None) -> list[DexPair]:
+        """Pools for one token — same interface as DexScreener's method, so the
+        two providers are interchangeable in a failover pool (Part 15, Section 4).
+
+        GeckoTerminal's endpoint is per-network, so ``chain`` is required here;
+        a missing chain raises :class:`CollectorError` so a provider pool skips
+        to the next provider instead of crashing.
+        """
+        if not token_address:
+            raise ValueError("token_address must be non-empty")
+        if not chain:
+            raise CollectorError(f"{self.name}: chain is required for token pair lookup")
+        network = to_geckoterminal_network(chain)
+        payload = await self._get_json(
+            f"api/v2/networks/{network}/tokens/{token_address}/pools",
+            cache_key=f"geckoterminal:token_pools:{network}:{token_address.lower()}",
+            cache_ttl=30.0,
+        )
+        return self._parse_pools(payload)
+
     def _parse_pools(self, payload: Any) -> list[DexPair]:
         """Normalize a GeckoTerminal JSON:API response into ``DexPair`` models."""
         if not isinstance(payload, dict):
@@ -312,3 +332,18 @@ class CoinGeckoClient(BaseCollector):
             eth_change_24h_percent=entry("ethereum", "usd_24h_change"),
             sol_change_24h_percent=entry("solana", "usd_24h_change"),
         )
+
+
+# DexScreener-style chain ids -> GeckoTerminal network ids, so both market
+# providers accept the same chain vocabulary (Part 15 Section 4 — rotation
+# requires interchangeable providers).
+_GECKOTERMINAL_NETWORK_ALIASES = {
+    "ethereum": "eth",
+    "polygon": "polygon_pos",
+    "avalanche": "avax",
+    "bnb": "bsc",
+}
+
+
+def to_geckoterminal_network(chain: str) -> str:
+    return _GECKOTERMINAL_NETWORK_ALIASES.get(chain, chain)

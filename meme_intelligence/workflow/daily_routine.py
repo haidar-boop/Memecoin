@@ -34,7 +34,7 @@ from meme_intelligence.analyzers.scoring_engine import MasterAssessment
 from meme_intelligence.collectors.market_data import MajorsSnapshot
 from meme_intelligence.config.settings import Settings
 from meme_intelligence.core.enums import Classification, MarketRegime, RiskTier, WatchlistTier
-from meme_intelligence.core.errors import CollectorError
+from meme_intelligence.core.errors import AllProvidersFailedError, CollectorError
 from meme_intelligence.core.logging_setup import get_logger
 from meme_intelligence.core.models import DexPair
 from meme_intelligence.database.storage import Storage, WatchlistChange
@@ -300,7 +300,7 @@ class DailyRoutine:
                 pairs = await self._dexscreener.get_token_pairs(
                     entry.token.address, chain=entry.token.chain,
                 )
-            except CollectorError:
+            except (CollectorError, AllProvidersFailedError):
                 continue
             if not pairs:
                 change = self._storage.archive(entry.token, "no active trading pairs remain")

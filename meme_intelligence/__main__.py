@@ -25,6 +25,7 @@ from meme_intelligence.alerts.notification_engine import ConsoleSink, Notificati
 from meme_intelligence.analyzers.onchain_analyzer import OnChainAnalyzer, derive_onchain_profile
 from meme_intelligence.analyzers.security_analyzer import SecurityAnalyzer
 from meme_intelligence.collectors.market_data import CoinGeckoClient
+from meme_intelligence.collectors.market_service import MarketDataService
 from meme_intelligence.core.enums import MarketRegime
 from meme_intelligence.database.storage import Storage
 from meme_intelligence.trading.trade_planner import TradePlanner
@@ -81,6 +82,15 @@ def build_coingecko(settings: Settings) -> CoinGeckoClient:
         base_url=settings.providers.coingecko_base_url,
         rate_limiter=RateLimiter.per_minute(settings.providers.coingecko_requests_per_minute),
         **_shared_collector_kwargs(settings),
+    )
+
+
+def build_market_service(settings: Settings, *clients) -> MarketDataService:
+    """Failover-pooled market data across the given provider clients (Part 15)."""
+    return MarketDataService(
+        list(clients),
+        failure_threshold=settings.providers.failure_threshold,
+        cooldown_seconds=settings.providers.cooldown_seconds,
     )
 
 
@@ -234,11 +244,15 @@ async def _cmd_plan(args, settings) -> int:
 async def _gather_assessments(args, settings):
     """Shared research pass (via the pipeline) used by plan and report commands."""
     regime = MarketRegime(args.regime)
-    async with build_dexscreener(settings) as dex, build_goplus(settings) as goplus:
-        pairs = await dex.get_token_pairs(args.address, chain=args.chain)
-        if not pairs:
+    async with (
+        build_dexscreener(settings) as dex,
+        build_geckoterminal(settings) as gecko,
+        build_goplus(settings) as goplus,
+    ):
+        service = build_market_service(settings, dex, gecko)
+        pair = await service.get_best_pair(args.address, chain=args.chain)
+        if pair is None:
             return None, f"No trading pairs found for {args.address}."
-        pair = max(pairs, key=lambda p: p.liquidity_usd or 0.0)
         result = await ResearchPipeline(settings, goplus).analyze_pair(pair, regime=regime)
 
     if result is None:
@@ -290,7 +304,9 @@ async def _cmd_daily(args, settings) -> int:
             routine = DailyRoutine(
                 settings, storage,
                 gecko_client=gecko, goplus_client=goplus,
-                coingecko_client=coingecko, dexscreener_client=dex,
+                coingecko_client=coingecko,
+                # Failover-pooled service; exposes the same get_token_pairs API.
+                dexscreener_client=build_market_service(settings, dex, gecko),
             )
             report = await routine.run()
     print(report.render())
@@ -307,12 +323,17 @@ async def _cmd_monitor(args, settings) -> int:
         workflow = _dc.replace(workflow, monitor_interval_seconds=args.interval)
     settings = _dc.replace(settings, workflow=workflow)
 
-    async with build_geckoterminal(settings) as gecko, build_goplus(settings) as goplus:
+    async with (
+        build_geckoterminal(settings) as gecko,
+        build_goplus(settings) as goplus,
+        build_dexscreener(settings) as dex,
+    ):
         with Storage(settings.database.path) as storage:
             notifier = NotificationEngine([ConsoleSink()], settings.alert_engine)
             scanner = ContinuousScanner(
                 settings, storage, notifier,
                 gecko_client=gecko, goplus_client=goplus,
+                market_service=build_market_service(settings, dex, gecko),
                 regime=MarketRegime(args.regime),
             )
             try:

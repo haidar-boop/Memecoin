@@ -27,7 +27,8 @@ human operator.
 | Database foundation | SQLite storage: tokens, assessment snapshots (feeds Part 24 backtesting), watchlist, journal | ✅ Built |
 | Part 13 — Automation & agent architecture | Continuous scanner (crash-tolerant loop, graceful shutdown, seen-set dedupe), automation rules (opportunity gates, emergency review, score-drop review), notification engine with cooldown | ✅ Built (console sink; Telegram/Discord in Part 29 phase) |
 | Part 14 — Trading intelligence & momentum | Momentum analyzer (price/volume/social/on-chain lenses, acceleration over level, fake-momentum detection), entry zones, preferred action; multi-window (1h/6h/24h) market data | ✅ Built |
-| Parts 15+ — Narrative engine, full alert intelligence, dashboard, AI/LLM integration, backtesting | — | ⏳ Upcoming |
+| Part 15 — Scanner configuration & anti-throttling | MarketDataService: provider failover pool (DexScreener ⇄ GeckoTerminal, shared interface + chain aliases), multi-source liquidity verification with alert downgrade on disagreement, momentum alert, multi-speed monitoring (watchlist recheck cadence) | ✅ Built |
+| Parts 16+ — AI execution rules, narrative engine, full alert intelligence, dashboard, backtesting | — | ⏳ Upcoming |
 
 ## Project structure
 
@@ -48,6 +49,7 @@ meme_intelligence/
 ├── collectors/
 │   ├── base.py             # shared HTTP collector (rate limit + cache + retry)
 │   ├── market_data.py      # DexScreener + GeckoTerminal → normalized DexPair
+│   ├── market_service.py   # failover pool + cross-source verification
 │   └── security_data.py    # GoPlus (EVM + Solana) → normalized SecurityProfile
 ├── scanners/
 │   └── discovery.py        # Layer 1: filter/dedupe/score new pools
