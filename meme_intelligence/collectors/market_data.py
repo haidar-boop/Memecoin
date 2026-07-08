@@ -21,7 +21,7 @@ from typing import Any
 
 from meme_intelligence.collectors.base import BaseCollector
 from meme_intelligence.core.errors import CollectorError
-from meme_intelligence.core.models import DexPair, TokenIdentity
+from meme_intelligence.core.models import CommunityProfile, DexPair, TokenIdentity
 
 
 def _to_float(value: Any) -> float | None:
@@ -296,17 +296,37 @@ class MajorsSnapshot:
     sol_change_24h_percent: float | None = None
 
 
-class CoinGeckoClient(BaseCollector):
-    """Client for the public CoinGecko simple-price API.
+# DexScreener-style chain ids -> CoinGecko asset-platform ids for the
+# contract-address coin lookup (community data collection).
+_COINGECKO_PLATFORMS = {
+    "solana": "solana",
+    "ethereum": "ethereum",
+    "base": "base",
+    "bnb": "binance-smart-chain",
+    "bsc": "binance-smart-chain",
+    "arbitrum": "arbitrum-one",
+    "polygon": "polygon-pos",
+    "avalanche": "avalanche",
+    "optimism": "optimistic-ethereum",
+}
 
-    Used only for the morning market-environment check (BTC/ETH/SOL trend);
-    kept to a very small request budget within the free tier (Rule 11).
+
+class CoinGeckoClient(BaseCollector):
+    """Client for the public CoinGecko API.
+
+    Two duties: the morning market-environment check (BTC/ETH/SOL trend)
+    and free per-token community data (Part 5 — the "cheap aggregator"
+    decision: CoinGecko community data at $0 now, a paid social aggregator
+    later if the system earns it; see handoff/DECISIONS_LOG.md). Kept to a
+    small request budget within the free tier (Rule 11); an optional demo
+    API key raises the rate limit.
     """
 
-    def __init__(self, **kwargs: Any) -> None:
+    def __init__(self, api_key: str = "", **kwargs: Any) -> None:
         kwargs.setdefault("name", "coingecko")
         kwargs.setdefault("base_url", "https://api.coingecko.com")
         super().__init__(**kwargs)
+        self._headers = {"x-cg-demo-api-key": api_key} if api_key else None
 
     async def get_majors(self) -> MajorsSnapshot:
         payload = await self._get_json(
@@ -331,6 +351,64 @@ class CoinGeckoClient(BaseCollector):
             btc_change_24h_percent=entry("bitcoin", "usd_24h_change"),
             eth_change_24h_percent=entry("ethereum", "usd_24h_change"),
             sol_change_24h_percent=entry("solana", "usd_24h_change"),
+        )
+
+    async def get_community_profile(self, token: TokenIdentity) -> "CommunityProfile | None":
+        """Community facts for one token by contract address (Part 5 data feed).
+
+        Returns ``None`` when the chain has no CoinGecko platform mapping or
+        the token is not listed there (very new launches take days to be
+        indexed) — an honest gap, not an error (Rule 8). Fields CoinGecko
+        does not track (Twitter engagement, Discord, bot detection) stay
+        ``None`` and the community engine reports the reduced coverage.
+        """
+        platform = _COINGECKO_PLATFORMS.get(token.chain)
+        if platform is None:
+            self._logger.info("%s: no CoinGecko platform for chain %s", self.name, token.chain)
+            return None
+        try:
+            payload = await self._get_json(
+                f"api/v3/coins/{platform}/contract/{token.address}",
+                headers=self._headers,
+                cache_key=f"coingecko:community:{platform}:{token.address}",
+                cache_ttl=600.0,  # research cadence (Part 21 Section 4)
+            )
+        except CollectorError as exc:
+            # Unlisted tokens return 404: "not listed" is a data gap, not a failure.
+            if "status 404" in str(exc):
+                self._logger.info("%s: %s/%s not listed on CoinGecko",
+                                  self.name, token.chain, token.address)
+                return None
+            raise
+        if not isinstance(payload, dict):
+            raise CollectorError(f"{self.name}: expected JSON object, got {type(payload).__name__}")
+
+        community = payload.get("community_data")
+        community = community if isinstance(community, dict) else {}
+
+        # Reddit zeros usually mean "no subreddit tracked", not "zero
+        # activity" — only trust them when a real subscriber base exists.
+        reddit_subscribers = _to_int(community.get("reddit_subscribers"))
+        reddit_posts_per_day = None
+        user_content_per_day = None
+        if reddit_subscribers:
+            posts_48h = _to_float(community.get("reddit_average_posts_48h"))
+            comments_48h = _to_float(community.get("reddit_average_comments_48h"))
+            if posts_48h is not None:
+                reddit_posts_per_day = posts_48h / 2.0
+            if posts_48h is not None or comments_48h is not None:
+                user_content_per_day = ((posts_48h or 0.0) + (comments_48h or 0.0)) / 2.0
+        else:
+            reddit_subscribers = None
+
+        return CommunityProfile(
+            token=token,
+            source=self.name,
+            telegram_members=_to_int(community.get("telegram_channel_user_count")),
+            reddit_subscribers=reddit_subscribers,
+            reddit_posts_per_day=reddit_posts_per_day,
+            user_content_per_day=user_content_per_day,
+            positive_sentiment_percent=_to_float(payload.get("sentiment_votes_up_percentage")),
         )
 
 

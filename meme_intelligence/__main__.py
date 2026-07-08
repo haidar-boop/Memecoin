@@ -88,6 +88,7 @@ def build_goplus(settings: Settings) -> GoPlusClient:
 
 def build_coingecko(settings: Settings) -> CoinGeckoClient:
     return CoinGeckoClient(
+        api_key=settings.coingecko_api_key,
         base_url=settings.providers.coingecko_base_url,
         rate_limiter=RateLimiter.per_minute(settings.providers.coingecko_requests_per_minute),
         **_shared_collector_kwargs(settings),
@@ -293,13 +294,14 @@ async def _gather_assessments(args, settings):
             build_dexscreener(settings) as dex,
             build_geckoterminal(settings) as gecko,
             build_goplus(settings) as goplus,
+            build_coingecko(settings) as coingecko,
         ):
             service = build_market_service(settings, dex, gecko)
             pair = await service.get_best_pair(args.address, chain=args.chain)
             if pair is None:
                 return None, f"No trading pairs found for {args.address}."
             pipeline = ResearchPipeline(settings, goplus, wallet_service=wallet_service,
-                                        ai_service=ai_service)
+                                        community_client=coingecko, ai_service=ai_service)
             result = await pipeline.analyze_pair(
                 pair, regime=regime,
                 research_mode=ResearchMode(getattr(args, "ai_mode", "standard")),
@@ -550,6 +552,7 @@ async def _cmd_monitor(args, settings) -> int:
         build_geckoterminal(settings) as gecko,
         build_goplus(settings) as goplus,
         build_dexscreener(settings) as dex,
+        build_coingecko(settings) as coingecko,
     ):
         with Storage(settings.database.path) as storage:
             notifier = NotificationEngine([ConsoleSink()], settings.alert_engine)
@@ -557,6 +560,7 @@ async def _cmd_monitor(args, settings) -> int:
                 settings, storage, notifier,
                 gecko_client=gecko, goplus_client=goplus,
                 market_service=build_market_service(settings, dex, gecko),
+                community_client=coingecko,
                 regime=MarketRegime(args.regime),
             )
             try:

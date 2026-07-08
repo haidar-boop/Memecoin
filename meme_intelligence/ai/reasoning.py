@@ -184,10 +184,7 @@ def build_intelligence_snapshot(result) -> dict:
             "top10_holder_percent": profile.top10_holder_percent,
             "findings": findings(security),
         },
-        "community": {
-            "assessed": False,
-            "note": "no live social collectors yet: community facts unavailable",
-        },
+        "community": _community_section(result),
         "wallets": {
             "holder_count": profile.holder_count,
             "onchain_score": round(result.onchain.overall_score) if result.onchain else None,
@@ -208,6 +205,34 @@ def build_intelligence_snapshot(result) -> dict:
         },
     }
     return snapshot
+
+
+def _community_section(result) -> dict:
+    """Community facts for the snapshot; explicit about what is untracked."""
+    profile = getattr(result, "community_profile", None)
+    community = getattr(result, "community", None)
+    if profile is None:
+        return {
+            "assessed": False,
+            "note": "no community data source reported this token "
+                    "(unlisted or collectors unavailable)",
+        }
+    section = {
+        "assessed": community is not None,
+        "source": profile.source,
+        "telegram_members": profile.telegram_members,
+        "reddit_subscribers": profile.reddit_subscribers,
+        "user_content_per_day": profile.user_content_per_day,
+        "positive_sentiment_percent": profile.positive_sentiment_percent,
+        "note": "twitter engagement, discord, and bot detection are not "
+                "tracked by the current source",
+    }
+    if community is not None:
+        section["score"] = round(community.overall_score)
+        section["rating"] = community.rating.value
+        section["findings"] = [f"[{f.severity.value}] {f.message}"
+                               for f in community.findings]
+    return section
 
 
 @dataclass(frozen=True)

@@ -34,7 +34,8 @@ committed). The app loads it automatically on startup
 | **Anthropic (LLM layer)** | ✅ **live, verified** | `MEMEINTEL_ANTHROPIC_API_KEY` | AI reasoning layer (Part 23): `report --ai` / `plan --ai` |
 | Telegram bot | ⏳ **not set up** | (not yet defined in settings) | alert delivery (Part 29) |
 | Discord webhook | ⏳ **not set up, optional** | (not yet defined in settings) | alert delivery (Part 29) |
-| X/Twitter or social aggregator | ⏳ **decision made: cheap aggregator** (signup pending) | (not yet defined) | community/narrative scoring (Part 5, 19) |
+| CoinGecko community data | ✅ **live** (free; optional demo key raises limits) | `MEMEINTEL_COINGECKO_API_KEY` (optional) | community/narrative scoring (Parts 5, 19) |
+| LunarCrush (upgrade path) | ⏳ deferred — revisit if the bot proves itself (~$5/day) | (not yet defined) | Twitter engagement depth |
 | Alchemy (EVM wallets) | ⏳ **not set up, optional** | (not yet defined) | EVM wallet intelligence (Part 17 extension) |
 
 Your current working `.env` should contain at minimum:

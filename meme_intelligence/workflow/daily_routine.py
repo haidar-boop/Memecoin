@@ -191,7 +191,14 @@ class DailyRoutine:
         self._logger = get_logger("workflow.daily")
 
         self._discovery = DiscoveryEngine(settings.discovery, now_func=now_func)
-        self._pipeline = ResearchPipeline(settings, goplus_client, now_func=now_func)
+        # The CoinGecko client doubles as the free community-data source
+        # (Part 5) — but only when it actually implements the lookup, so
+        # older get_majors-only clients keep working (Rule 3).
+        community_client = (coingecko_client
+                            if hasattr(coingecko_client, "get_community_profile") else None)
+        self._pipeline = ResearchPipeline(settings, goplus_client,
+                                          community_client=community_client,
+                                          now_func=now_func)
 
     async def run(self) -> DailyReport:
         report = DailyReport(date=self._now(), environment=await self._market_check())

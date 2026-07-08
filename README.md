@@ -16,7 +16,7 @@ human operator.
 | Part 2 — Scanning infrastructure & data architecture | Rate limiting, TTL cache, retry/backoff, provider failover pool, base collector, DexScreener client | ✅ Built |
 | Part 3 — Discovery engine | GeckoTerminal new-pool client, discovery engine with hard filters, dedupe, Discovery Score, rejection tracking | ✅ Built |
 | Part 4 — Rug detection & security analysis | GoPlus client (EVM + Solana), security analyzer with graded risk taxonomy, destructive-risk overrides, confidence/coverage reporting | ✅ Built |
-| Part 5 — Foundation & community intelligence | Community analyzer (engagement/growth/loyalty/creativity/dev-relationship) with fake-community detection; foundation score combiner | ✅ Built (engines; social collectors need API keys) |
+| Part 5 — Foundation & community intelligence | Community analyzer (engagement/growth/loyalty/creativity/dev-relationship) with fake-community detection; foundation score combiner | ✅ Built (free CoinGecko community data live: telegram/sentiment/reddit; Twitter-depth aggregator deferred) |
 | Part 6 — On-chain intelligence & wallet behavior | On-chain analyzer (holder health, volume quality, buy/sell pressure, phase classification) running today on market+security data; smart-money/whale/flow slots ready for wallet collectors | ✅ Built (partial data sources) |
 | Part 7 — Token evaluation & market structure | Token analyzer: market-cap staging, FDV dilution, liquidity/volume-to-mcap ratios, supply concentration, valuation classification, competition percentile helper | ✅ Built |
 | Part 8 — Trading strategy & execution framework | Trade planner: trade score, setup classification, conviction + sizing guidance, entry checklist, required confirmations, invalidation conditions, FOMO questions — plans only, never orders | ✅ Built |
@@ -152,8 +152,8 @@ environment.
 1. ~~Foundation: config, models, collectors~~ ✅
 2. ~~Discovery engine~~ ✅
 3. ~~Security analysis engine (rug detection, honeypot, holder concentration)~~ ✅
-4. ~~Community / on-chain / foundation analyzers~~ ✅ (social + wallet
-   collectors pending API keys — engines run on partial data honestly)
+4. ~~Community / on-chain / foundation analyzers~~ ✅ (free CoinGecko
+   community data live; Twitter-depth aggregator deferred until earned)
 5. ~~Token structure analyzer + trade planner~~ ✅
 6. ~~Risk management framework + master scoring engine~~ ✅
 7. ~~Daily workflow + database + report template~~ ✅

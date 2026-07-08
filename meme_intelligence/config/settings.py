@@ -708,6 +708,8 @@ class Settings:
     helius_api_key: str = ""
     birdeye_api_key: str = ""
     anthropic_api_key: str = ""
+    # Optional free demo key: raises CoinGecko's rate limit for community data.
+    coingecko_api_key: str = ""
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Settings":
@@ -750,6 +752,7 @@ class Settings:
             helius_api_key=env.get(f"{_ENV_PREFIX}_HELIUS_API_KEY", ""),
             birdeye_api_key=env.get(f"{_ENV_PREFIX}_BIRDEYE_API_KEY", ""),
             anthropic_api_key=env.get(f"{_ENV_PREFIX}_ANTHROPIC_API_KEY", ""),
+            coingecko_api_key=env.get(f"{_ENV_PREFIX}_COINGECKO_API_KEY", ""),
         )
 
 

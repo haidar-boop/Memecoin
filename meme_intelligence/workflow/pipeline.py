@@ -15,6 +15,10 @@ from datetime import datetime, timezone
 from typing import Callable
 
 from meme_intelligence.ai.reasoning import AIJudgment, AIJudgmentService
+from meme_intelligence.analyzers.community_analyzer import (
+    CommunityAnalyzer,
+    CommunityAssessment,
+)
 from meme_intelligence.analyzers.foundation_analyzer import (
     FoundationAnalyzer,
     FoundationAssessment,
@@ -47,7 +51,7 @@ from meme_intelligence.config.settings import Settings
 from meme_intelligence.core.enums import MarketRegime, ResearchMode
 from meme_intelligence.core.errors import CollectorError, InsufficientDataError
 from meme_intelligence.core.logging_setup import get_logger
-from meme_intelligence.core.models import DexPair, SecurityProfile
+from meme_intelligence.core.models import CommunityProfile, DexPair, SecurityProfile
 
 
 @dataclass(frozen=True)
@@ -65,6 +69,8 @@ class PipelineResult:
     wallet: WalletAssessment | None = None
     narrative: NarrativeAssessment | None = None
     foundation: FoundationAssessment | None = None
+    community: CommunityAssessment | None = None
+    community_profile: CommunityProfile | None = None
     ai_judgment: AIJudgment | None = None  # Part 23 reasoning-layer output
 
 
@@ -77,11 +83,13 @@ class ResearchPipeline:
         goplus_client,  # GoPlusClient-compatible (get_token_security)
         *,
         wallet_service=None,  # WalletDataService (Solana); costs metered credits
+        community_client=None,  # CoinGeckoClient-compatible (get_community_profile)
         ai_service: AIJudgmentService | None = None,  # Part 23 reasoning layer
         now_func: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ) -> None:
         self._goplus = goplus_client
         self._wallet_service = wallet_service
+        self._community_client = community_client
         self._ai = ai_service
         self._now = now_func
         self._logger = get_logger("workflow.pipeline")
@@ -94,6 +102,7 @@ class ResearchPipeline:
         self._narrative = NarrativeAnalyzer(settings.narrative, settings.narrative_weights,
                                             settings.viral_weights)
         self._foundation = FoundationAnalyzer(settings.foundation_weights)
+        self._community = CommunityAnalyzer(settings.community, settings.community_weights)
         self._wallet = WalletIntelligenceAnalyzer(settings.wallet, settings.smart_money_weights)
         self._risk = RiskAnalyzer(settings.risk_weights)
         self._scoring = ScoringEngine(settings.weights, settings.bands, now_func=now_func)
@@ -143,6 +152,22 @@ class ResearchPipeline:
                 self._logger.info("wallet intelligence unavailable for %s: %s",
                                   pair.base_token.address, exc)
 
+        # Community data (Part 5): free CoinGecko community facts; a token
+        # not listed there is an honest gap, not a failure (Rule 8).
+        community = community_profile = None
+        if self._community_client is not None:
+            try:
+                community_profile = await self._community_client.get_community_profile(
+                    pair.base_token)
+            except CollectorError as exc:
+                self._logger.info("community data unavailable for %s: %s",
+                                  pair.base_token.address, exc)
+            if community_profile is not None:
+                try:
+                    community = self._community.assess(community_profile)
+                except InsufficientDataError:
+                    pass
+
         onchain = token = momentum = narrative = None
         try:
             onchain = self._onchain.assess(onchain_profile)
@@ -158,7 +183,12 @@ class ResearchPipeline:
             pass
         if narrative_inputs is not None:
             try:
-                narrative = self._narrative.assess(pair.base_token, narrative_inputs)
+                narrative = self._narrative.assess(
+                    pair.base_token, narrative_inputs, community=community,
+                    positive_sentiment_percent=(
+                        community_profile.positive_sentiment_percent
+                        if community_profile else None),
+                )
             except InsufficientDataError:
                 pass
 
@@ -166,6 +196,7 @@ class ResearchPipeline:
                                  onchain=onchain, regime=regime)
         master = self._scoring.evaluate(
             security,
+            community=community,
             onchain=onchain,
             token_structure=token,
             risk=risk,
@@ -177,6 +208,7 @@ class ResearchPipeline:
             pair=pair, security_profile=profile, security=security,
             onchain=onchain, token=token, momentum=momentum, risk=risk, master=master,
             wallet=wallet, narrative=narrative,
+            community=community, community_profile=community_profile,
         )
 
         # AI reasoning layer (Part 23): only after the deterministic chain,
@@ -207,19 +239,28 @@ class ResearchPipeline:
         if narrative is None:  # explicit analyst inputs always win (already assessed)
             try:
                 narrative = self._narrative.assess(
-                    result.pair.base_token, judgment.narrative_inputs)
+                    result.pair.base_token, judgment.narrative_inputs,
+                    community=result.community,
+                    positive_sentiment_percent=(
+                        result.community_profile.positive_sentiment_percent
+                        if result.community_profile else None),
+                )
             except InsufficientDataError:
                 narrative = None
 
         foundation = None
         try:
             foundation = self._foundation.assess(
-                result.pair.base_token, judgment.foundation_inputs)
+                result.pair.base_token, judgment.foundation_inputs,
+                community_quality=(
+                    result.community.overall_score if result.community else None),
+            )
         except InsufficientDataError:
             pass
 
         master = self._scoring.evaluate(
             result.security,
+            community=result.community,
             onchain=result.onchain,
             foundation=foundation,
             token_structure=result.token,

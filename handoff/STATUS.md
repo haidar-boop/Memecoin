@@ -1,6 +1,6 @@
 # Build Status — Parts 1 through 19, plus 23
 
-**321 tests passing.** ~10,500 lines of source, ~4,700 lines of tests.
+**332 tests passing.** ~10,700 lines of source, ~4,900 lines of tests.
 Parts 1–18 were built on `claude/large-prompt-review-l49wp1`; Parts 19
 and 23 on `claude/handoff-folder-review-fuu9dq`.
 
@@ -66,10 +66,14 @@ The classification/scoring framework, config system, and logging.
 - `analyzers/foundation_analyzer.py` — `FoundationAnalyzer`: combines
   qualitative judgment slots (meme strength, narrative, brand, dev comms,
   long-term) with community quality
-- **Gap:** no live social-data collector (X/Twitter/Telegram/Discord/
-  Reddit APIs). `CommunityProfile` and the qualitative foundation slots
-  are ready to receive data — nothing is currently feeding them. This is
-  the single largest open gap in the system. See DECISIONS_LOG.md.
+- `collectors/market_data.py::CoinGeckoClient.get_community_profile()`
+  — free community data by contract address (telegram members, sentiment
+  votes, reddit activity), wired through the pipeline so the community
+  category, the fake-community red flag, and decision-tree Q3 run live.
+- **Gap (why still 🟡):** Twitter engagement, Discord, bot detection, and
+  growth rates aren't tracked by the free source; very new tokens aren't
+  listed on CoinGecko yet. Upgrade path: LunarCrush once the system
+  proves itself (user decision — see DECISIONS_LOG.md).
 
 ## Part 6 — On-Chain Intelligence & Wallet Behavior Analysis → ✅
 
@@ -336,11 +340,14 @@ earlier parts.
 
 ## Known cross-cutting gaps (affect multiple parts)
 
-1. **No social-data collector.** Community/narrative scoring runs on
-   partial/no data everywhere. This blocks full realization of Parts 5,
-   19, and the "community" gate in every alert rule. Needs a decision on
-   budget (see DECISIONS_LOG.md) — X API is $200/mo; cheaper aggregators
-   exist.
+1. **Partial social-data collector.** The free CoinGecko community
+   collector (see DECISIONS_LOG.md — "cheap aggregator" decision) now
+   feeds telegram size, sentiment votes, and reddit activity into the
+   community/narrative engines and the AI snapshot. Twitter engagement,
+   Discord, bot detection, and growth rates remain untracked until a
+   paid aggregator (LunarCrush) is added — planned once the system
+   proves itself. Very new tokens aren't listed on CoinGecko yet and
+   report "no data" honestly.
 2. **No outcome-tracking / backtesting loop yet (Part 24).** Every
    snapshot is being recorded (`snapshots`, `wallet_sightings`,
    `security_facts` tables) specifically so that once Part 24 is built,

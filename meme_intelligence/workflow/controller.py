@@ -79,6 +79,7 @@ class ContinuousScanner:
         gecko_client,   # get_new_pools(network)
         goplus_client,  # get_token_security(chain, address)
         market_service=None,  # MarketDataService: watchlist recheck + verification
+        community_client=None,  # CoinGeckoClient-compatible (get_community_profile)
         regime: MarketRegime = MarketRegime.UNKNOWN,
         now_func: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         sleep_func: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -94,7 +95,9 @@ class ContinuousScanner:
         self._logger = get_logger("workflow.controller")
 
         self._discovery = DiscoveryEngine(settings.discovery, now_func=now_func)
-        self._pipeline = ResearchPipeline(settings, goplus_client, now_func=now_func)
+        self._pipeline = ResearchPipeline(settings, goplus_client,
+                                          community_client=community_client,
+                                          now_func=now_func)
         self._rules = AutomationRules(settings.alerts, settings.alert_engine)
         self._seen: set[tuple[str, str]] = set()
         self._stop = asyncio.Event()

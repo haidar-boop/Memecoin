@@ -160,10 +160,26 @@ stated in field descriptions and enforced when parsing.
 X/Twitter's official API starts at $200/mo for read access. This is a
 real budget decision, not a technical blocker, and was explicitly left to
 the user rather than silently built around. Cheaper aggregator APIs
-(e.g. LunarCrush-style) exist as a middle option. **Status: unresolved,
-needs a user decision.** Until then, every community/narrative-dependent
-score honestly reports partial coverage or "no data" rather than being
-faked — this was a deliberate design choice (Rule 8), not a bug.
+(e.g. LunarCrush-style) exist as a middle option.
+
+**Status: user decision made (2026-07).** LunarCrush's API tier priced at
+~$5/day was judged too expensive for an unproven system. The chosen path:
+**free CoinGecko community data now, upgrade to LunarCrush if the bot
+proves itself.** Implemented in
+`CoinGeckoClient.get_community_profile()` (contract-address lookup):
+telegram members, community sentiment votes, and reddit activity — at $0,
+sharing the client and rate budget the system already had. What this
+covers vs. not:
+
+- Covered: telegram size, positive-sentiment percent, reddit
+  subscribers/posts/comments (only trusted when a real subscriber base
+  exists — zeros from an untracked subreddit stay unknown, Rule 8).
+- Not covered (stays honestly "no data"): Twitter followers/engagement,
+  Discord, bot detection, growth rates. Coverage/confidence report the
+  gap; a paid aggregator plugs into the same `CommunityProfile` later
+  without engine changes.
+- Coverage caveat: CoinGecko only reports tokens it has listed — very new
+  launches return "not listed" (treated as a data gap, not an error).
 
 ### EVM wallet intelligence
 
