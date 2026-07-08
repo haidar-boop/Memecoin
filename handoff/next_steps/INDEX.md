@@ -1,0 +1,65 @@
+# Next Steps — Unbuilt Specification Parts
+
+> **Note on part numbering:** the project owner originally described the
+> full specification as "35 parts." In practice, 32.5 numbered parts were
+> actually delivered (1 through 33, plus an addendum labeled "Part 32.5"
+> that the owner explicitly marked as the final delivery — "last part").
+> There is no Part 34 or 35 content; the "35" was an estimate stated
+> before delivery began. Treat Part 32.5 as the end of the specification.
+
+Every file in this folder is the **original specification text, copied
+verbatim**, unmodified and unsummarized, exactly as it was delivered by
+the project owner. Do not paraphrase these when using them — build
+directly against the literal text, the same way Parts 1–18 were built.
+
+Note on overlap: several of these parts (20, 21, 22, 23, 30, 31, 32, 32.5)
+were written as consolidation/architecture parts and substantially
+overlap with functionality already built in Parts 1–18. Read them anyway
+— they sometimes carry specific requirements not present elsewhere (e.g.
+Part 31's "Framework Consistency Lock" is why the scoring weights are
+what they are — see `../DECISIONS_LOG.md`). Where a part is pure
+restatement of already-built work, note that in your build plan and move
+to the genuinely new material within it.
+
+| File | Part | Title | New-functionality estimate |
+|---|---|---|---|
+| PART_19_NARRATIVE_INTELLIGENCE.md | 19 | Narrative Intelligence & Viral Potential Prediction Engine | High — no narrative engine exists yet |
+| PART_20_MASTER_PROMPT_ASSEMBLY.md | 20 | Complete Master Prompt Assembly & Final Deployment Instructions | Low — consolidates Parts 1–19; scoring/report format already built |
+| PART_21_TECHNICAL_INFRASTRUCTURE.md | 21 | Technical Infrastructure Blueprint & Anti-Throttling Architecture | Low — architecture already built; deployment/hosting guidance is new |
+| PART_22_BOT_DEVELOPMENT_BLUEPRINT.md | 22 | Bot Development Blueprint & Software Architecture | Low — folder structure/module split already matches this |
+| PART_23_AI_AGENT_INTEGRATION.md | 23 | AI Agent Integration Blueprint & Intelligence Pipeline | High — no LLM calling code exists yet |
+| PART_24_BACKTESTING.md | 24 | Backtesting, Performance Tracking & AI Self-Improvement System | High — no outcome-tracking/backtesting loop exists yet |
+| PART_25_RISK_MANAGEMENT_UPSIDE.md | 25 | Professional Risk Management & High-Upside Opportunity Framework | Medium — risk doctrine already incorporated; explicit opportunity-ranking formula not separately implemented |
+| PART_26_MOMENTUM_DETECTION.md | 26 | Advanced Entry Signal & Momentum Detection Engine | Low — momentum analyzer already built in Part 14 against this doctrine |
+| PART_27_LAUNCH_SCANNER.md | 27 | Automated Token Discovery & Early Launch Scanner | Low — discovery engine already built; first-5-minute/first-hour framing is new |
+| PART_28_PORTFOLIO_MANAGEMENT.md | 28 | Portfolio Management, Tracking & Opportunity Rotation System | Medium — watchlist tiers/thesis tracking exist; explicit rotation ranking formula does not |
+| PART_29_ALERT_INTELLIGENCE.md | 29 | Real-Time Alert Intelligence & Notification System | Medium — alert engine exists; Telegram/Discord sinks and alert-history-performance tracking do not |
+| PART_30_SYSTEM_OPTIMIZATION.md | 30 | Complete System Optimization & Final Professional Deployment Framework | Low — consolidation part |
+| PART_31_IMPLEMENTATION_BLUEPRINT_AND_CONSISTENCY_LOCK.md | 31 | Implementation Blueprint for AI Coding Agents + Framework Consistency Lock | Already applied — this is the part that determined current scoring weights |
+| PART_32_DATA_SOURCE_BLUEPRINT.md | 32 | Data Source & API Integration Blueprint | Low — architecture already built |
+| PART_32_5_MULTI_SOURCE_DISCOVERY.md | 32.5 | Multi-Source Discovery & Anti-Throttling Architecture | Medium — Pump.fun integration specifically is not built |
+| PART_33_SECURITY_RUG_DETECTION_ENGINE.md | 33 | Security & Rug Detection Intelligence Engine | Already applied — this determined current security sub-weights |
+
+## Suggested build order
+
+Given what's already built, the genuinely high-value next targets are:
+
+1. **Part 19** (Narrative Intelligence) — fills the last empty slot in the
+   master score (`narrative`); no live blocker, can build the structural
+   scoring layer now and wire an LLM judgment input later
+2. **Part 23 + Part 22 §4** (AI Agent Integration) — once an Anthropic key
+   exists, this turns the qualitative slots already wired throughout the
+   codebase (`FoundationInputs`, narrative score, bull/bear prose) from
+   heuristic/absent into real AI judgments
+3. **Part 29** (Alert Intelligence) — Telegram/Discord sinks; small,
+   contained, immediately useful once a bot token exists
+4. **Part 24** (Backtesting) — highest long-term value, but needs weeks
+   of accumulated snapshot data to be meaningful; the data collection
+   side is already running
+5. **Part 32.5's Pump.fun integration** — a genuinely new discovery
+   source, additive to the existing `DiscoveryEngine`
+
+Parts 20, 21, 22 (minus §4), 25, 26, 27, 28, 30, 31, 32, 33 are lower
+priority since they're substantially already reflected in the codebase —
+treat them as a verification pass (does the current implementation
+actually satisfy this text?) rather than a from-scratch build.
