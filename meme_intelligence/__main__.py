@@ -268,7 +268,7 @@ async def _cmd_plan(args, settings) -> int:
         return 1
     result, plan = gathered
 
-    for section in (result.security, result.onchain, result.token,
+    for section in (result.security, result.onchain, result.token, result.narrative,
                     result.momentum, result.risk, result.master):
         if section is not None:
             print(section.summary() + "\n")
@@ -316,8 +316,8 @@ async def _cmd_report(args, settings) -> int:
 
     report = build_report(
         result.pair, result.master, result.security,
-        onchain=result.onchain, token=result.token, momentum=result.momentum,
-        risk=result.risk, plan=plan,
+        onchain=result.onchain, token=result.token, narrative=result.narrative,
+        momentum=result.momentum, risk=result.risk, plan=plan,
     )
     print(report.text)
     if result.wallet is not None:

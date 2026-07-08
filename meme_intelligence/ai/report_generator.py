@@ -18,6 +18,7 @@ from dataclasses import dataclass
 
 from meme_intelligence.analyzers.community_analyzer import CommunityAssessment
 from meme_intelligence.analyzers.momentum_analyzer import MomentumAssessment
+from meme_intelligence.analyzers.narrative_analyzer import NarrativeAssessment
 from meme_intelligence.analyzers.onchain_analyzer import OnChainAssessment
 from meme_intelligence.analyzers.risk_analyzer import RiskAssessment
 from meme_intelligence.analyzers.scoring_engine import MasterAssessment
@@ -27,6 +28,7 @@ from meme_intelligence.core.enums import (
     Classification,
     MarketCapStage,
     MarketPhase,
+    NarrativeRisk,
     RiskTier,
 )
 from meme_intelligence.core.models import DexPair
@@ -55,6 +57,7 @@ def build_report(
     onchain: OnChainAssessment | None = None,
     token: TokenAssessment | None = None,
     community: CommunityAssessment | None = None,
+    narrative: NarrativeAssessment | None = None,
     momentum: MomentumAssessment | None = None,
     risk: RiskAssessment | None = None,
     plan: TradePlan | None = None,
@@ -83,8 +86,8 @@ def build_report(
         f"Evidence coverage: {master.coverage:.0%}")
 
     # 2. Investment thesis (Part 12, Section 2) — evidence-derived
-    bull = _bull_case(security, onchain, token, community, pair)
-    bear = _bear_case(security, onchain, token, community, risk, master)
+    bull = _bull_case(security, onchain, token, community, narrative, pair)
+    bear = _bear_case(security, onchain, token, community, narrative, risk, master)
     add("")
     add("WHY THIS TOKEN COULD SUCCEED")
     for bullet in bull or ["No positive evidence collected yet."]:
@@ -95,7 +98,7 @@ def build_report(
         add(f"  - {bullet}")
 
     # 3-10. Category sections (each engine renders its own report format)
-    for section in (security, community, onchain, token, momentum, risk):
+    for section in (security, community, narrative, onchain, token, momentum, risk):
         if section is not None:
             add("")
             add(section.summary())
@@ -142,7 +145,7 @@ def build_report(
 
 # ---- Evidence extraction ----
 
-def _bull_case(security, onchain, token, community, pair) -> list[str]:
+def _bull_case(security, onchain, token, community, narrative, pair) -> list[str]:
     bullets: list[str] = []
     if security.overall_score >= 75 and not security.is_destructive:
         bullets.append(f"Security profile is {security.band} ({security.overall_score:.0f}/100)")
@@ -159,18 +162,23 @@ def _bull_case(security, onchain, token, community, pair) -> list[str]:
             bullets.append("Trading volume looks organic (many independent wallets)")
     if community is not None and community.overall_score >= 70 and not community.is_artificial:
         bullets.append(f"Community rated {community.rating.value} with organic engagement")
+    if narrative is not None and narrative.overall_score >= 70:
+        bullets.append(f"Narrative rated {narrative.rating.value} "
+                       f"({narrative.overall_score:.0f}/100, stage: {narrative.stage.value})")
     if pair.liquidity_usd is not None and pair.liquidity_usd >= 50000:
         bullets.append(f"Liquidity depth ${pair.liquidity_usd:,.0f} supports entries and exits")
     return bullets
 
 
-def _bear_case(security, onchain, token, community, risk, master) -> list[str]:
+def _bear_case(security, onchain, token, community, narrative, risk, master) -> list[str]:
     bullets: list[str] = []
     for finding in security.findings:
         if finding.severity in (RiskTier.DESTRUCTIVE, RiskTier.SERIOUS_WARNING):
             bullets.append(finding.message)
     if community is not None and community.is_artificial:
         bullets.append("community engagement is artificial")
+    if narrative is not None and narrative.narrative_risk is NarrativeRisk.HIGH:
+        bullets.append("narrative risk is high: the story may not outlast current attention")
     if token is not None and token.valuation.value in ("expensive", "overvalued"):
         bullets.append(f"valuation reads {token.valuation.value} at the current stage")
     if onchain is not None and onchain.phase is MarketPhase.DISTRIBUTION:
@@ -221,6 +229,8 @@ def _opinion_changers(master, security, community) -> str:
         changers.append("verified security facts for the unknown fields")
     if community is None:
         changers.append("real community data")
+    if master.category_scores.narrative is None:
+        changers.append("a scored narrative assessment")
     if master.category_scores.momentum is None:
         changers.append("momentum confirmation")
     if master.overrides:

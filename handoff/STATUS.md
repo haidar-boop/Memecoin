@@ -1,7 +1,8 @@
-# Build Status — Parts 1 through 18
+# Build Status — Parts 1 through 19
 
-**274 tests passing.** ~9,450 lines of source, ~4,150 lines of tests.
-13 commits on `claude/large-prompt-review-l49wp1`.
+**304 tests passing.** ~10,000 lines of source, ~4,450 lines of tests.
+Parts 1–18 were built on `claude/large-prompt-review-l49wp1`; Part 19 on
+`claude/handoff-folder-review-fuu9dq`.
 
 Legend: ✅ built and tested · 🟡 built partially (documented gap) ·
 ⏳ blocked on something outside the code (API key, data source that
@@ -247,9 +248,50 @@ The classification/scoring framework, config system, and logging.
 
 ---
 
+## Part 19 — Narrative Intelligence & Viral Potential Prediction Engine → 🟡
+
+- `analyzers/narrative_analyzer.py` — two Part 19 rubrics: the **viral
+  score** (§3: memorability / shareability / emotional impact / cultural
+  timing / community participation, 5×20%) and the **narrative
+  intelligence score** (§11: meme strength / cultural timing / viral
+  potential / community creativity / long-term strength, 5×20%). The
+  viral score feeds the intelligence score's `viral_potential` component;
+  the intelligence score fills the master framework's 15% `narrative`
+  category — the last empty slot in the Part 31 locked weighting.
+- `NarrativeInputs` — validated 0-100 qualitative judgment slots
+  (`FoundationInputs` pattern; the AI layer fills them later), plus
+  category (§2), life-cycle stage (§7), the three §10 risk flags, and
+  §9 viral catalysts (description + probability/impact grading).
+- Evidence-driven pieces: participation/creativity cross-fill from the
+  community engine's creativity sub-score; artificial-community verdict
+  zeroes participation (§5 organic-vs-artificial); stage timing signals
+  and distribution-risk findings (§7); sentiment classification (§6);
+  narrative risk Low/Medium/High/Unknown derived from the risk flags with
+  late-stage escalation (§10/§12); evidence-derived strengths/weaknesses
+  and the full §12 report format in `summary()`.
+- `core/enums.py` — `NarrativeCategory`, `NarrativeStage`,
+  `NarrativeRating` (Excellent/Strong/Average/Weak on the house
+  85/70/50 ladder), `NarrativeRisk`, `SentimentLabel`, `CatalystLevel`
+- `config/settings.py` — `NarrativeThresholds` (sentiment bands),
+  `NarrativeSubWeights`, `ViralSubWeights` (env groups
+  `MEMEINTEL_NARRATIVE*`, `MEMEINTEL_VIRAL_WEIGHTS_*`)
+- Wired through `ResearchPipeline.analyze_pair(narrative_inputs=...)`
+  (optional; without inputs the narrative category reports "no data"
+  exactly as before), `PipelineResult.narrative`, the report generator
+  (section + bull/bear bullets + opinion-changers), and the `report`/
+  `plan` CLI output. Snapshots already persist the narrative category
+  score via the `category_scores` JSON — no schema change.
+- **Gap (why 🟡):** nothing feeds the judgment slots automatically yet —
+  they await the AI layer (Part 23) and social collectors (same gap as
+  Part 5). §5 social-trend monitoring (mentions, search interest) and
+  §8/§9 automated competition/catalyst detection need those sources;
+  until then coverage/confidence report the missing evidence honestly.
+
+---
+
 ## What's NOT built yet
 
-Everything in `next_steps/` — **Parts 19 through 33** (see
+Everything in `next_steps/` — **Parts 20 through 33** (see
 `next_steps/INDEX.md`). Some of these (20, 21, 22, 23, 30, 31, 32, 32.5)
 substantially overlap with what's already built, since they're
 architecture/consolidation parts written before the earlier build parts

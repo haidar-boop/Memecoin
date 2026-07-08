@@ -1,8 +1,8 @@
 """Shared research pipeline (Spec Part 13 Section 2, Part 22 Section 2).
 
 One implementation of the per-token analysis chain — security -> on-chain
--> token structure -> momentum -> risk -> master assessment — used by the
-daily routine, the continuous scanner, and the CLI. A single pipeline
+-> token structure -> momentum -> narrative -> risk -> master assessment —
+used by the daily routine, the continuous scanner, and the CLI. A single pipeline
 keeps every entry point scoring tokens identically (Rule 4: one purpose
 per module; Rule 18: extend, don't duplicate).
 """
@@ -14,6 +14,11 @@ from datetime import datetime, timezone
 from typing import Callable
 
 from meme_intelligence.analyzers.momentum_analyzer import MomentumAnalyzer, MomentumAssessment
+from meme_intelligence.analyzers.narrative_analyzer import (
+    NarrativeAnalyzer,
+    NarrativeAssessment,
+    NarrativeInputs,
+)
 from meme_intelligence.analyzers.onchain_analyzer import (
     OnChainAnalyzer,
     OnChainAssessment,
@@ -52,6 +57,7 @@ class PipelineResult:
     risk: RiskAssessment
     master: MasterAssessment
     wallet: WalletAssessment | None = None
+    narrative: NarrativeAssessment | None = None
 
 
 class ResearchPipeline:
@@ -75,6 +81,8 @@ class ResearchPipeline:
         self._token = TokenAnalyzer(settings.token, settings.token_weights)
         self._momentum = MomentumAnalyzer(settings.momentum, settings.momentum_weights,
                                           now_func=now_func)
+        self._narrative = NarrativeAnalyzer(settings.narrative, settings.narrative_weights,
+                                            settings.viral_weights)
         self._wallet = WalletIntelligenceAnalyzer(settings.wallet, settings.smart_money_weights)
         self._risk = RiskAnalyzer(settings.risk_weights)
         self._scoring = ScoringEngine(settings.weights, settings.bands, now_func=now_func)
@@ -83,9 +91,16 @@ class ResearchPipeline:
         self,
         pair: DexPair,
         regime: MarketRegime = MarketRegime.UNKNOWN,
+        *,
+        narrative_inputs: NarrativeInputs | None = None,
     ) -> PipelineResult | None:
         """Full chain for one pair; ``None`` when security data is unavailable
-        (a token that cannot be security-screened is not analyzable — Part 4)."""
+        (a token that cannot be security-screened is not analyzable — Part 4).
+
+        ``narrative_inputs`` carries the Part 19 qualitative judgments (from
+        the AI layer or an analyst); without them the narrative category
+        honestly reports "no data" exactly as before (Rule 8).
+        """
         try:
             profile = await self._goplus.get_token_security(pair.chain, pair.base_token.address)
         except CollectorError as exc:
@@ -113,7 +128,7 @@ class ResearchPipeline:
                 self._logger.info("wallet intelligence unavailable for %s: %s",
                                   pair.base_token.address, exc)
 
-        onchain = token = momentum = None
+        onchain = token = momentum = narrative = None
         try:
             onchain = self._onchain.assess(onchain_profile)
         except InsufficientDataError:
@@ -126,6 +141,11 @@ class ResearchPipeline:
             momentum = self._momentum.assess(pair, onchain=onchain)
         except InsufficientDataError:
             pass
+        if narrative_inputs is not None:
+            try:
+                narrative = self._narrative.assess(pair.base_token, narrative_inputs)
+            except InsufficientDataError:
+                pass
 
         risk = self._risk.assess(security, pair=pair, token=token,
                                  onchain=onchain, regime=regime)
@@ -135,10 +155,11 @@ class ResearchPipeline:
             token_structure=token,
             risk=risk,
             momentum_score=momentum.overall_score if momentum else None,
+            narrative_score=narrative.overall_score if narrative else None,
             timing_score=derive_timing_score(pair, token, onchain, now_func=self._now),
         )
         return PipelineResult(
             pair=pair, security_profile=profile, security=security,
             onchain=onchain, token=token, momentum=momentum, risk=risk, master=master,
-            wallet=wallet,
+            wallet=wallet, narrative=narrative,
         )

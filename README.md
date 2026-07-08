@@ -31,7 +31,8 @@ human operator.
 | Part 16 — AI execution rules & operating instructions | Canonical analyst system prompt (for the LLM layer) + banned-language guard enforced on all generated reports; quick/compare/watchlist commands; alert "watch next" guidance; shared watchlist reviewer | ✅ Built |
 | Part 17 — Smart money & whale intelligence | Helius + Birdeye collectors (top holders resolved to owners, trades, transfers), wallet analyzer (whale classification, accumulation verdict, exchange flow lower-bounds, smart-money score), wallet sightings DB + reputation formula, 3 new alert types, wallets command; enriches the on-chain score | ✅ Built (Solana; track records accumulate via Part 24) |
 | Part 18 — Advanced rug detection & scam prevention | Continuous contract-change monitoring: security facts persisted per token and diffed on every re-analysis (honeypot appearing / ownership un-renounced / mint authority / LP unlock → CRITICAL; blacklist/pause/tax hikes → HIGH; concentration creep / holder drain → MEDIUM); promotion-and-exit pattern detector | ✅ Built (deep dev-history indexing deferred — needs a data source we don't have) |
-| Parts 19+ — Narrative engine, full alert intelligence, dashboard, backtesting | — | ⏳ Upcoming |
+| Part 19 — Narrative intelligence & viral potential | Viral score (memorability/shareability/emotional impact/cultural timing/participation, 5×20%); narrative intelligence score (meme strength/timing/viral potential/creativity/long-term, 5×20%) feeding the master framework's 15% narrative category; category + life-cycle stage classification; sentiment; three narrative risk factors → Low/Medium/High; viral catalysts; evidence-derived strengths/weaknesses; community-engine cross-fill for participation/creativity | ✅ Built (judgment slots await the AI layer / social collectors — engine reports partial coverage honestly) |
+| Parts 20+ — Full alert intelligence, dashboard, backtesting, AI layer | — | ⏳ Upcoming |
 
 ## Project structure
 
@@ -66,6 +67,7 @@ meme_intelligence/
 │   ├── token_analyzer.py      # token structure: staging, dilution, ratios
 │   ├── risk_analyzer.py       # risk score + portfolio limits + emergencies
 │   ├── momentum_analyzer.py   # momentum lenses, entry zones, preferred action
+│   ├── narrative_analyzer.py  # Part 19: viral score, narrative score, stage, catalysts
 │   ├── wallet_intelligence.py # whales, accumulation, smart-money score, reputation
 │   ├── security_monitor.py    # Part 18: security-fact diffs, change severities
 │   └── scoring_engine.py      # master score: overrides, decision tree, weights
@@ -153,5 +155,5 @@ environment.
 6. ~~Risk management framework + master scoring engine~~ ✅
 7. ~~Daily workflow + database + report template~~ ✅
 8. ~~Momentum analyzer + continuous scanner + automation rules~~ ✅
-9. Narrative engine, Telegram/Discord sinks, dashboard
+9. ~~Narrative engine~~ ✅ (Telegram/Discord sinks, dashboard still pending)
 10. AI/LLM integration for qualitative judgments, backtesting loop

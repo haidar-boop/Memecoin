@@ -194,3 +194,66 @@ class ScanLayer(str, Enum):
     SECURITY = "security"          # immediately after discovery: reject dangerous projects
     INTELLIGENCE = "intelligence"  # deeper analysis: community, narrative, wallets
     ALERT = "alert"                # human review alerts for qualifying tokens only
+
+
+class NarrativeCategory(str, Enum):
+    """Narrative classification (Spec Part 19, Sections 2 and 12)."""
+
+    INTERNET_CULTURE = "internet_culture"  # viral characters, online jokes, movements
+    ANIMAL = "animal"
+    AI = "ai"                              # AI / technology narratives
+    GAMING = "gaming"
+    CELEBRITY = "celebrity"                # celebrity / attention narratives
+    CULTURAL_MOVEMENT = "cultural_movement"  # political / cultural narratives
+    OTHER = "other"
+    UNKNOWN = "unknown"                    # not yet classified
+
+
+class NarrativeStage(str, Enum):
+    """Narrative life-cycle stage (Spec Part 19, Section 7).
+
+    Stage 5 is "Decline or Evolution" in the spec; a narrative that evolves
+    successfully re-enters an earlier stage, so the enum only needs DECLINE.
+    """
+
+    CREATION = "creation"        # few people know about it; early community forming
+    EXPANSION = "expansion"      # more users discovering it; growing attention
+    MAINSTREAM = "mainstream"    # large discussions, speculation, volatility
+    SATURATION = "saturation"    # excessive hype, community fatigue
+    DECLINE = "decline"
+    UNKNOWN = "unknown"
+
+
+class NarrativeRating(str, Enum):
+    """Final narrative rating (Spec Part 19, Section 12)."""
+
+    EXCELLENT = "excellent"
+    STRONG = "strong"
+    AVERAGE = "average"
+    WEAK = "weak"
+
+
+class NarrativeRisk(str, Enum):
+    """Narrative-specific risk level (Spec Part 19, Sections 10 and 12)."""
+
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    UNKNOWN = "unknown"  # no risk factor has been assessed either way
+
+
+class SentimentLabel(str, Enum):
+    """Public sentiment classification (Spec Part 19, Section 6)."""
+
+    POSITIVE = "positive"
+    NEUTRAL = "neutral"
+    NEGATIVE = "negative"
+    UNKNOWN = "unknown"
+
+
+class CatalystLevel(str, Enum):
+    """Viral-catalyst probability/impact grading (Spec Part 19, Section 9)."""
+
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"

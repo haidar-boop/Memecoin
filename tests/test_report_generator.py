@@ -110,3 +110,20 @@ def test_minimal_report_without_optional_sections():
     text = build_report(pair, master, security).text
     assert "MEME COIN INTELLIGENCE REPORT" in text
     assert "FINAL VERDICT" in text
+
+
+def test_report_includes_narrative_section_when_assessed():
+    from meme_intelligence.analyzers.narrative_analyzer import (
+        NarrativeAnalyzer,
+        NarrativeInputs,
+    )
+
+    pair, security, onchain, token, risk, master, plan = build_all()
+    narrative = NarrativeAnalyzer(
+        SETTINGS.narrative, SETTINGS.narrative_weights, SETTINGS.viral_weights,
+    ).assess(TOKEN, NarrativeInputs(meme_strength=85, cultural_timing=80,
+                                    long_term_strength=75))
+    text = build_report(pair, master, security, onchain=onchain, token=token,
+                        narrative=narrative, risk=risk, plan=plan).text
+    assert "Narrative assessment: MEME" in text
+    assert "Narrative rated" in text  # evidence-derived bull-case bullet

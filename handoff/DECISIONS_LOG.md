@@ -64,6 +64,54 @@ This is why `RiskAnalyzer` produces a risk score where *higher = riskier*
 (a deliberately different direction/axis from the quality scores) rather
 than trying to fold risk into one number with everything else.
 
+### 6. Part 19's two overlapping /100 rubrics (viral score vs. narrative intelligence score)
+
+Part 19 defines a **viral score** (§3: memorability / shareability /
+emotional impact / cultural timing / community participation, each /20)
+*and* a **narrative intelligence score** (§11: meme strength / cultural
+timing / **viral potential** / community creativity / long-term strength,
+each /20), and §12 requires the report to show the viral score while the
+master framework has exactly one 15% `narrative` category. **Decision:**
+the §3 viral score is computed first and feeds the §11 score's
+`viral_potential` component (scaled /100 like every sub-score); the two
+rubrics share one cultural-timing lens (computed once, never
+double-counted in findings/confidence); the §11 narrative intelligence
+score is what fills `ScoringEngine.evaluate(narrative_score=...)`. This
+is the only reading under which both sections and the single master slot
+are all satisfied by one engine (same combine-don't-pick style as
+decision #4).
+
+### 7. Part 19 narrative judgment inputs follow the `FoundationInputs` pattern
+
+The §3/§4/§11 components (memorability, meme strength, long-term
+strength, ...) are qualitative judgments not computable from market
+numbers — per the agent architecture (Parts 13/23) they are produced by
+the AI reasoning layer or an analyst. **Decision:** `NarrativeInputs`
+mirrors `FoundationInputs` — validated 0-100 slots, `None` = not yet
+assessed. Evidence-driven pieces are wired now: participation/creativity
+cross-fill from the community engine's creativity sub-score (reuse per
+Rule 18; a *confirmed-artificial* community instead zeroes participation
+— fake participation is zero participation, and an organic verdict alone
+never contributes a score since it says nothing about how *much*
+participation exists); sentiment classification from measured sentiment
+data; stage-driven timing signals. Sentiment is classified and reported
+but never deducted from the narrative score — measured sentiment already
+feeds the community engine's loyalty category, and counting one fact in
+two master-score categories would skew the Part 31 locked weighting.
+
+### 8. Part 19 narrative risk ladder (§10/§12)
+
+§12 wants a Low/Medium/High narrative-risk label; §10 defines three risk
+factors (short-term hype, trend dependency, copycat) with no combining
+formula. **Decision:** the three factors are explicit tri-state inputs
+(True/False/None — unknown is never safe, Rule 8): zero confirmed among
+the assessed = Low, one = Medium, two+ = High; a Saturation/Decline
+life-cycle stage escalates one level (§7 names those stages as where
+distribution risk lives); with *nothing* assessed the label is Unknown —
+except that a late stage alone justifies Medium. Confirmed factors also
+deduct from the long-term-strength component (30/20/20 points), since
+that is where narrative fragility materializes.
+
 ## Deferred, with reasons
 
 ### Social data collectors (Parts 5, 19, and the "community" gate everywhere)

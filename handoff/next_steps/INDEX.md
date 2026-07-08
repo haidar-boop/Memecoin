@@ -23,7 +23,7 @@ to the genuinely new material within it.
 
 | File | Part | Title | New-functionality estimate |
 |---|---|---|---|
-| PART_19_NARRATIVE_INTELLIGENCE.md | 19 | Narrative Intelligence & Viral Potential Prediction Engine | High — no narrative engine exists yet |
+| PART_19_NARRATIVE_INTELLIGENCE.md | 19 | Narrative Intelligence & Viral Potential Prediction Engine | ✅ **Built** — `analyzers/narrative_analyzer.py` (see `../STATUS.md`); judgment slots await the AI layer |
 | PART_20_MASTER_PROMPT_ASSEMBLY.md | 20 | Complete Master Prompt Assembly & Final Deployment Instructions | Low — consolidates Parts 1–19; scoring/report format already built |
 | PART_21_TECHNICAL_INFRASTRUCTURE.md | 21 | Technical Infrastructure Blueprint & Anti-Throttling Architecture | Low — architecture already built; deployment/hosting guidance is new |
 | PART_22_BOT_DEVELOPMENT_BLUEPRINT.md | 22 | Bot Development Blueprint & Software Architecture | Low — folder structure/module split already matches this |
@@ -44,9 +44,9 @@ to the genuinely new material within it.
 
 Given what's already built, the genuinely high-value next targets are:
 
-1. **Part 19** (Narrative Intelligence) — fills the last empty slot in the
-   master score (`narrative`); no live blocker, can build the structural
-   scoring layer now and wire an LLM judgment input later
+1. ~~**Part 19** (Narrative Intelligence)~~ — ✅ built: the structural
+   scoring layer fills the master score's `narrative` slot; the LLM
+   judgment input wires in with Part 23
 2. **Part 23 + Part 22 §4** (AI Agent Integration) — once an Anthropic key
    exists, this turns the qualitative slots already wired throughout the
    codebase (`FoundationInputs`, narrative score, bull/bear prose) from

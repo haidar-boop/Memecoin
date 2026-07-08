@@ -564,6 +564,55 @@ class CommunityThresholds:
 
 
 @dataclass(frozen=True)
+class ViralSubWeights:
+    """Sub-weights inside the viral potential score (Part 19, Section 3 — 5 x 20)."""
+
+    memorability: float = 0.20
+    shareability: float = 0.20
+    emotional_impact: float = 0.20
+    cultural_timing: float = 0.20
+    community_participation: float = 0.20
+
+    def __post_init__(self) -> None:
+        _check_weight_sum("viral", dataclasses.asdict(self))
+
+
+@dataclass(frozen=True)
+class NarrativeSubWeights:
+    """Sub-weights inside the narrative intelligence score (Part 19, Section 11 — 5 x 20)."""
+
+    meme_strength: float = 0.20
+    cultural_timing: float = 0.20
+    viral_potential: float = 0.20
+    community_creativity: float = 0.20
+    long_term_strength: float = 0.20
+
+    def __post_init__(self) -> None:
+        _check_weight_sum("narrative", dataclasses.asdict(self))
+
+
+@dataclass(frozen=True)
+class NarrativeThresholds:
+    """Narrative-analysis anchors (Part 19, Section 6).
+
+    Sentiment above ``positive_sentiment_percent`` classifies POSITIVE,
+    below ``negative_sentiment_percent`` classifies NEGATIVE, in between
+    NEUTRAL.
+    """
+
+    positive_sentiment_percent: float = 60.0
+    negative_sentiment_percent: float = 40.0
+
+    def __post_init__(self) -> None:
+        for name, value in dataclasses.asdict(self).items():
+            _check_range(f"narrative threshold '{name}'", value, 0.0, 100.0)
+        if self.negative_sentiment_percent >= self.positive_sentiment_percent:
+            raise ConfigurationError(
+                "negative_sentiment_percent must be below positive_sentiment_percent"
+            )
+
+
+@dataclass(frozen=True)
 class OnChainThresholds:
     """On-chain analysis anchors (Part 6 Sections 2-12)."""
 
@@ -615,6 +664,9 @@ class Settings:
     workflow: WorkflowSettings = field(default_factory=WorkflowSettings)
     momentum: MomentumThresholds = field(default_factory=MomentumThresholds)
     momentum_weights: MomentumSubWeights = field(default_factory=MomentumSubWeights)
+    narrative: NarrativeThresholds = field(default_factory=NarrativeThresholds)
+    narrative_weights: NarrativeSubWeights = field(default_factory=NarrativeSubWeights)
+    viral_weights: ViralSubWeights = field(default_factory=ViralSubWeights)
     alert_engine: AlertEngineSettings = field(default_factory=AlertEngineSettings)
     wallet: WalletIntelSettings = field(default_factory=WalletIntelSettings)
     smart_money_weights: SmartMoneySubWeights = field(default_factory=SmartMoneySubWeights)
@@ -654,6 +706,9 @@ class Settings:
             workflow=_load_group(WorkflowSettings, "WORKFLOW", env),
             momentum=_load_group(MomentumThresholds, "MOMENTUM", env),
             momentum_weights=_load_group(MomentumSubWeights, "MOMENTUM_WEIGHTS", env),
+            narrative=_load_group(NarrativeThresholds, "NARRATIVE", env),
+            narrative_weights=_load_group(NarrativeSubWeights, "NARRATIVE_WEIGHTS", env),
+            viral_weights=_load_group(ViralSubWeights, "VIRAL_WEIGHTS", env),
             alert_engine=_load_group(AlertEngineSettings, "ALERT_ENGINE", env),
             wallet=_load_group(WalletIntelSettings, "WALLET", env),
             smart_money_weights=_load_group(SmartMoneySubWeights, "SMART_MONEY_WEIGHTS", env),
