@@ -134,11 +134,21 @@ class ContinuousScanner:
                 "wallet service wired but MEMEINTEL_WALLET_ENABLE_IN_MONITOR is off; "
                 "smart-money analysis stays out of the scan loop")
             wallet_service = None
-        if ai_service is not None and not settings.ai.enable_in_monitor:
-            self._logger.info(
-                "AI service wired but MEMEINTEL_AI_ENABLE_IN_MONITOR is off; "
-                "AI judgments stay out of the scan loop")
-            ai_service = None
+        # Two AI modes (Part 23 + Part 32.5 Section 8): enable_in_monitor
+        # judges every analyzed token (expensive — the pipeline gets the
+        # service); verify_opportunities judges ONLY tokens that passed all
+        # review gates, right before their alert dispatches (the scanner
+        # keeps the service for that single call).
+        self._ai_verifier = None
+        if ai_service is not None:
+            if settings.ai.verify_opportunities or settings.ai.enable_in_monitor:
+                self._ai_verifier = ai_service
+            else:
+                self._logger.info(
+                    "AI service wired but both MEMEINTEL_AI_ENABLE_IN_MONITOR and "
+                    "MEMEINTEL_AI_VERIFY_OPPORTUNITIES are off; AI stays out of the loop")
+            if not settings.ai.enable_in_monitor:
+                ai_service = None  # pipeline judges nothing per-token
         self._pipeline = ResearchPipeline(settings, goplus_client,
                                           community_client=community_client,
                                           wallet_service=wallet_service,
@@ -303,6 +313,28 @@ class ContinuousScanner:
         token = result.pair.base_token
         previous = self._storage.score_history(token, limit=1)
         previous_score = previous[0]["final_score"] if previous else None
+
+        # AI verification of gate-passing opportunities (Part 32.5 Section 8:
+        # deep analysis only after initial requirements). One judgment,
+        # re-scored through the locked weighting, then the SAME gates run
+        # again on the enriched result — if the judgment holds the score up,
+        # the alert fires annotated; if it knocks the score below a gate,
+        # the high-priority alert simply never fires (Rule 13 logs why).
+        if self._ai_verifier is not None and not result.security.is_destructive:
+            provisional = self._rules.evaluate(result, previous_score=previous_score)
+            if any(e.alert_type == "high_priority_opportunity" for e in provisional):
+                self._logger.info("all gates passed for %s: running AI verification",
+                                  token.address)
+                enriched = await self._pipeline.enrich_with_ai(
+                    result, service=self._ai_verifier)
+                if (enriched is not result
+                        and enriched.master.final_score < result.master.final_score):
+                    self._logger.info(
+                        "AI verification moved %s score %.0f -> %.0f",
+                        token.address, result.master.final_score,
+                        enriched.master.final_score)
+                result = enriched
+
         self._storage.record_snapshot(result.master, source=source,
                                       pair=result.pair, regime=self._regime.value)
 
@@ -340,6 +372,9 @@ class ContinuousScanner:
                 self._storage.archive(token, reason)
 
         events = self._rules.evaluate(result, previous_score=previous_score)
+        if result.ai_judgment is not None:
+            events = [self._annotate_with_ai(event, result.ai_judgment)
+                      for event in events]
         events = await self._verify_events(events, result)
         # Security-change events rest on contract facts, not market data, so
         # they bypass market cross-verification and are appended directly.
@@ -379,6 +414,23 @@ class ContinuousScanner:
             await self._process_result(result, stats, source="watchlist_recheck", thesis=None)
         if rechecked:
             self._logger.info("watchlist recheck: %d tracked token(s) re-analyzed", rechecked)
+
+    @staticmethod
+    def _annotate_with_ai(event: AlertEvent, judgment) -> AlertEvent:
+        """Carry the AI verification into opportunity alerts (Part 32.5 S8).
+
+        Only opportunity alerts are annotated — they are what the judgment
+        was run to verify. The strongest bear-case point rides along so the
+        alert never reads as unconditional endorsement (Part 23 doctrine:
+        always surface possible losses).
+        """
+        if event.alert_type not in ("high_priority_opportunity", "early_opportunity"):
+            return event
+        extra = [f"AI verification: judgment confidence "
+                 f"{judgment.confidence:.0f}/100 ({judgment.model})"]
+        if judgment.bear_case:
+            extra.append(f"AI caution: {judgment.bear_case[0]}")
+        return dataclasses.replace(event, reasons=event.reasons + tuple(extra))
 
     async def _verify_events(
         self, events: list[AlertEvent], result: PipelineResult,

@@ -721,9 +721,11 @@ async def _cmd_monitor(args, settings) -> int:
                       "smart-money analysis stays off.")
             else:
                 stack.push_async_callback(wallet_service.close)
-        if settings.ai.enable_in_monitor:
+        if settings.ai.enable_in_monitor or settings.ai.verify_opportunities:
             ai_service = build_judgment_service(settings)
-            if ai_service is None:
+            if ai_service is None and settings.ai.enable_in_monitor:
+                # verify_opportunities is on by default, so only complain
+                # when the user explicitly asked for per-token judging.
                 print("Note: MEMEINTEL_AI_ENABLE_IN_MONITOR is on but "
                       "MEMEINTEL_ANTHROPIC_API_KEY is not set — AI judgments stay off.")
 

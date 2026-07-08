@@ -428,7 +428,12 @@ class AISettings:
     requests_per_minute: float = 10.0
     timeout_seconds: float = 120.0       # judgments can take a while at high effort
     min_confidence: float = 20.0         # below this the judgment is discarded (Part 23 S6)
-    enable_in_monitor: bool = False      # AI calls in the continuous scanner
+    enable_in_monitor: bool = False      # AI judges EVERY analyzed token (expensive)
+    # Part 32.5 Section 8 middle mode: one AI judgment only when a token
+    # passes ALL review gates (high-priority opportunity), re-scored before
+    # the alert dispatches — deep analysis strictly after initial
+    # requirements. Gate-passing tokens are rare, so cost stays near zero.
+    verify_opportunities: bool = True
 
     def __post_init__(self) -> None:
         if self.model.strip() == "":

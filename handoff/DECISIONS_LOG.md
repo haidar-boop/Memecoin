@@ -438,6 +438,32 @@ CRITICAL (holders need it); unknown liquidity is NOT death (Rule 8);
 below-minimum-but-alive liquidity (e.g. $3k) keeps its HIGH warning —
 that deterioration is still decision-relevant.
 
+### AI verification of gate-passing opportunities (Part 32.5 S8 middle mode)
+
+User request from live operation: "after it passes the strict gate
+thing, use AI to fully verify." This is Part 32.5 Section 8 verbatim
+("the AI should not perform expensive analysis on every token; a token
+should receive deeper analysis only after meeting initial
+requirements"), so it shipped as a first-class mode:
+
+- `MEMEINTEL_AI_VERIFY_OPPORTUNITIES` (default **true**; activates when
+  the Anthropic key exists). When the deterministic chain fires a
+  `high_priority_opportunity` (ALL review gates passed with data), the
+  scanner runs exactly one AI judgment, re-scores through the locked
+  weighting, and re-runs the same gates on the enriched result:
+  - judgment holds the score up -> the alert dispatches annotated with
+    the AI's confidence and its strongest bear-case point (an alert must
+    never read as unconditional endorsement — Part 23 doctrine)
+  - judgment knocks the score below a gate -> the high-priority alert
+    simply never fires (logged, snapshot records the honest lower score)
+  - judgment unavailable/discarded -> deterministic evidence stands
+    (Rule 9 — the AI can veto by evidence, its absence cannot)
+- Distinct from `MEMEINTEL_AI_ENABLE_IN_MONITOR` (default false), which
+  judges every analyzed token. Verification-only costs ~nothing: gate
+  passers are rare (the community gate alone requires real social data).
+- Mechanically: no new pass/fail logic was invented — verification is
+  "re-run the existing gates on AI-enriched scores" (Rule 18/21).
+
 ## Notable implementation choices (Rule 19)
 
 - **Python 3.11 + asyncio** over Node.js (both allowed by spec): the

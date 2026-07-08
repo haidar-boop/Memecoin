@@ -262,6 +262,143 @@ async def test_source_agreement_annotates_alert():
         assert any("confirmed" in r for r in opportunity[0].reasons)
 
 
+# ---- Part 32.5 S8: AI verification of gate-passing opportunities ----
+
+from meme_intelligence.ai.reasoning import AIJudgment
+from meme_intelligence.analyzers.foundation_analyzer import FoundationInputs
+from meme_intelligence.analyzers.narrative_analyzer import NarrativeInputs
+from meme_intelligence.core.enums import ResearchMode
+from meme_intelligence.core.models import CommunityProfile
+
+
+class FakeCommunity:
+    async def get_community_profile(self, token):
+        # Field values mirror tests/test_community_analyzer.healthy_profile
+        # (scores >= 85, not artificial) so the community gate passes with data.
+        return CommunityProfile(
+            token=token, source="test",
+            twitter_followers=25000, twitter_engagement_rate_percent=6.0,
+            twitter_growth_rate_7d_percent=40.0, bot_follower_percent=5.0,
+            telegram_members=8000, telegram_active_members=1600,
+            telegram_admin_only_talk=False, duplicate_message_percent=2.0,
+            discord_members=3000, discord_active_percent=18.0,
+            member_retention_30d_percent=85.0, positive_sentiment_percent=75.0,
+            user_content_per_day=30.0, dev_updates_per_week=4.0,
+            dev_responds_to_community=True,
+        )
+
+
+class VerifierAI:
+    def __init__(self, judgment=None):
+        self.judgment = judgment
+        self.judge_calls = 0
+
+    async def judge(self, result, *, mode):
+        self.judge_calls += 1
+        return self.judgment
+
+
+def weak_narrative_judgment() -> AIJudgment:
+    return AIJudgment(
+        foundation_inputs=FoundationInputs(),
+        narrative_inputs=NarrativeInputs(
+            memorability=5.0, shareability=5.0, emotional_impact=5.0,
+            cultural_timing=5.0, community_participation=5.0,
+            meme_strength=5.0, community_creativity=5.0, long_term_strength=5.0,
+        ),
+        bull_case=("some structural room remains",),
+        bear_case=("narrative is a re-run with no differentiation",),
+        confidence=80.0, confidence_reason="clear negative narrative evidence",
+        mode=ResearchMode.STANDARD, model="test-model",
+    )
+
+
+def gate_passing_scanner(storage, ai, sink, settings=None):
+    pair = make_pair()
+    profiles = {pair.base_token.address: clean_profile(pair.base_token)}
+
+    async def fake_sleep(seconds):
+        pass
+
+    notifier = NotificationEngine([sink], AlertEngineSettings(), time_func=lambda: 0.0)
+    scanner = ContinuousScanner(
+        settings or SETTINGS, storage, notifier,
+        gecko_client=FakeGecko([pair]),
+        goplus_client=FakeGoPlus(profiles),
+        market_service=FakeMarketService(verdict=(True, "liquidity confirmed")),
+        community_client=FakeCommunity(),
+        ai_service=ai,
+        now_func=lambda: NOW, sleep_func=fake_sleep,
+    )
+    return scanner, pair
+
+
+async def test_gate_passing_token_triggers_one_ai_verification():
+    """verify_opportunities (default on): the AI judges ONLY the gate passer,
+    and a discarded/absent judgment never blocks the deterministic alert."""
+    ai = VerifierAI(judgment=None)
+    sink = RecordingSink()
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner, pair = gate_passing_scanner(storage, ai, sink)
+        await scanner.run(max_cycles=1)
+
+        assert ai.judge_calls == 1  # exactly the gate passer, nothing else
+        high = [e for e in sink.sent if e.alert_type == "high_priority_opportunity"]
+        assert high  # judgment unavailable -> deterministic evidence stands (Rule 9)
+
+
+async def test_ai_confirmation_annotates_the_alert():
+    judgment = weak_narrative_judgment()
+    # strong narrative instead: same judgment but high slots
+    import dataclasses as _dc3
+    strong = _dc3.replace(
+        judgment,
+        narrative_inputs=NarrativeInputs(
+            memorability=90.0, shareability=90.0, emotional_impact=85.0,
+            cultural_timing=85.0, community_participation=90.0,
+            meme_strength=90.0, community_creativity=85.0, long_term_strength=80.0,
+        ),
+    )
+    ai = VerifierAI(judgment=strong)
+    sink = RecordingSink()
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner, pair = gate_passing_scanner(storage, ai, sink)
+        await scanner.run(max_cycles=1)
+
+        assert ai.judge_calls == 1
+        high = [e for e in sink.sent if e.alert_type == "high_priority_opportunity"]
+        assert high
+        assert any("AI verification" in r for r in high[0].reasons)
+        assert any("AI caution" in r for r in high[0].reasons)  # bear case rides along
+
+
+async def test_ai_dissent_withholds_the_high_priority_alert():
+    """If the judgment drops the re-scored master below the gate, the
+    high-priority alert simply never fires — same gates, better evidence."""
+    ai = VerifierAI(judgment=weak_narrative_judgment())
+    sink = RecordingSink()
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner, pair = gate_passing_scanner(storage, ai, sink)
+        await scanner.run(max_cycles=1)
+
+        assert ai.judge_calls == 1
+        assert not any(e.alert_type == "high_priority_opportunity" for e in sink.sent)
+        # the snapshot records the AI-enriched (honest, lower) score
+        history = storage.score_history(pair.base_token)
+        assert history and history[0]["final_score"] < 85.0
+
+
+async def test_verification_off_means_no_ai_call():
+    settings = Settings.from_env(env={"MEMEINTEL_AI_VERIFY_OPPORTUNITIES": "false"})
+    ai = VerifierAI(judgment=None)
+    sink = RecordingSink()
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner, _ = gate_passing_scanner(storage, ai, sink, settings=settings)
+        await scanner.run(max_cycles=1)
+        assert ai.judge_calls == 0
+        assert any(e.alert_type == "high_priority_opportunity" for e in sink.sent)
+
+
 async def test_dead_watchlist_token_archived_with_postmortem():
     """Part 29 S1: a tracked token whose pool collapsed gets ONE MEDIUM
     post-mortem and is archived — not re-tiered on its pump-window score

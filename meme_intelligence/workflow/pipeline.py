@@ -222,10 +222,31 @@ class ResearchPipeline:
 
     # ---- AI enrichment (Part 23) ----
 
+    async def enrich_with_ai(
+        self,
+        result: PipelineResult,
+        *,
+        mode: ResearchMode = ResearchMode.STANDARD,
+        service=None,
+    ) -> PipelineResult:
+        """Run one AI judgment over a finished result and re-score.
+
+        ``service`` overrides the pipeline's own judgment service — used by
+        the continuous scanner's gate-passing verification mode (Part 32.5
+        Section 8), where the AI judges ONLY tokens that already passed
+        every review gate rather than every analyzed token. Idempotent: a
+        result that already carries a judgment is returned unchanged.
+        """
+        ai = service if service is not None else self._ai
+        if ai is None or result.security.is_destructive or result.ai_judgment is not None:
+            return result
+        return await self._enrich_with_ai(result, mode, service=ai)
+
     async def _enrich_with_ai(
         self,
         result: PipelineResult,
         mode: ResearchMode,
+        service=None,
     ) -> PipelineResult:
         """Fill empty judgment slots from the reasoning layer, then re-score.
 
@@ -234,7 +255,7 @@ class ResearchPipeline:
         master score is recomputed through the same locked weighting.
         Any AI failure leaves the deterministic result untouched (Rule 9).
         """
-        judgment = await self._ai.judge(result, mode=mode)
+        judgment = await (service if service is not None else self._ai).judge(result, mode=mode)
         if judgment is None:
             return result
 
