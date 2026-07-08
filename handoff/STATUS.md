@@ -1,6 +1,6 @@
-# Build Status — Parts 1 through 19, plus 23, 24 and 29
+# Build Status — Parts 1 through 19, plus 23, 24, 29 and 32.5
 
-**362 tests passing.** ~11,700 lines of source, ~5,600 lines of tests.
+**400 tests passing.** ~13,200 lines of source, ~6,300 lines of tests.
 Parts 1–18 were built on `claude/large-prompt-review-l49wp1`; Parts 19
 and 23 on `claude/handoff-folder-review-fuu9dq`.
 
@@ -400,12 +400,47 @@ The classification/scoring framework, config system, and logging.
   (§1: hundreds of examples). §10's rule-adjustment step stays human-in-
   the-loop by design.
 
+## Part 32.5 — Multi-Source Discovery & Anti-Throttling (Pump.fun §3) → ✅
+
+- `collectors/pumpfun.py` — `PumpPortalClient`: single-connection
+  listener on the **free, keyless PumpPortal WebSocket** (§6 event-driven
+  monitoring, Rule 10), subscribed to token-creation and bonding-curve
+  migration events; reconnect with exponential backoff (Rule 7); bounded
+  buffers drained by the scanner each cycle. `PumpFunFrontendClient`:
+  per-coin traction snapshots from the unofficial frontend API (payload
+  shape verified live 2026-07-08); 404 = honest gap; the base URL is
+  config because the host has rotated before (Rule 17).
+- `scanners/launch_monitor.py` — `LaunchMonitor`, the §7 funnel front:
+  **basic filtering** on the launch event itself (accepted launchpad,
+  anonymous launches rejected, creator dev-buy above 20% of supply
+  rejected as an insider grab — a real launch was rejected on exactly
+  this in the live smoke test), then bounded traction rechecks
+  (§5 refresh control: per-token cadence, per-cycle API budget, TTL
+  expiry, capacity cap), then **§8 promotion gates** where every gate
+  needs data to pass (Rule 8): min USD market cap, SOL-cap growth vs
+  launch, community replies, recent trading; graduation (`complete` or a
+  migration event) is the fast path.
+- **§2 discovery ≠ confirmation, enforced structurally:** a promoted
+  candidate enters `ResearchPipeline` only after `MarketDataService`
+  (DexScreener/GeckoTerminal — independent providers) returns a real
+  pair; until then it stays tracked and retries. Without a market
+  service the launch stage refuses to run at all.
+- Scanner wiring: optional `pumpportal_client`/`pumpfun_client` on
+  `ContinuousScanner`; a failing launch stage never fails the cycle
+  (Rule 9); `CycleStats.launches_tracked` reports funnel depth.
+- Off by default (Rule 11): `MEMEINTEL_PUMPFUN_ENABLE_IN_MONITOR=true`
+  or `monitor --pumpfun`. All thresholds in `PumpFunSettings`
+  (env `MEMEINTEL_PUMPFUN_*`).
+- The rest of Part 32.5 (§§1-2, 4-11) was already satisfied by Parts
+  13/15/21 (caching, provider pools, prioritization, 24/7 recovery) —
+  verified against the spec text rather than rebuilt (Rule 18).
+
 ---
 
 ## What's NOT built yet
 
 Everything in `next_steps/` — **Parts 20-22, 25-28, and 30-33** (see
-`next_steps/INDEX.md`). Some of these (20, 21, 22, 23, 30, 31, 32, 32.5)
+`next_steps/INDEX.md`). Some of these (20, 21, 22, 23, 30, 31, 32)
 substantially overlap with what's already built, since they're
 architecture/consolidation parts written before the earlier build parts
 existed in code — read them anyway, since they sometimes add specific

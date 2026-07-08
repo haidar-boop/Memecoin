@@ -212,12 +212,15 @@ class ProviderSettings:
     helius_requests_per_minute: float = 120.0         # free tier allows ~10 rps; stay far below
     birdeye_base_url: str = "https://public-api.birdeye.so"
     birdeye_requests_per_minute: float = 20.0         # free tier ~1 rps + monthly CU budget
+    pumpportal_ws_url: str = "wss://pumpportal.fun/api/data"  # free data WS (Part 32.5 S3)
+    pumpfun_base_url: str = "https://frontend-api-v3.pump.fun"  # unofficial; can change
+    pumpfun_requests_per_minute: float = 30.0         # no documented limit; stay conservative
     failure_threshold: int = 3      # consecutive failures before a provider cools down
     cooldown_seconds: float = 60.0  # how long an unhealthy provider is skipped
 
     def __post_init__(self) -> None:
         for name in ("dexscreener", "geckoterminal", "goplus", "coingecko",
-                     "helius", "birdeye"):
+                     "helius", "birdeye", "pumpfun"):
             if getattr(self, f"{name}_requests_per_minute") <= 0:
                 raise ConfigurationError(f"{name}_requests_per_minute must be positive")
         if self.failure_threshold < 1:
@@ -247,6 +250,50 @@ class DiscoverySettings:
             raise ConfigurationError("target_liquidity_usd must be >= min_liquidity_usd")
         if self.target_volume_24h_usd < self.min_volume_24h_usd:
             raise ConfigurationError("target_volume_24h_usd must be >= min_volume_24h_usd")
+
+
+@dataclass(frozen=True)
+class PumpFunSettings:
+    """Pump.fun early-launch discovery (Part 32.5 Section 3).
+
+    Launch events arrive over the free PumpPortal WebSocket; tracked
+    launches are rechecked against the Pump.fun frontend API and promoted
+    into the normal analysis pipeline only after meeting the Section 8
+    deep-analysis threshold AND being confirmed by an independent market
+    data source (Section 2 — discovery is never confirmation).
+
+    "The system must not alert on every new launch. Most launches should
+    be filtered out." (Section 3) — the defaults below are deliberately
+    strict; loosen only with data showing they drop real opportunities.
+    """
+
+    enable_in_monitor: bool = False           # opt-in for the continuous scanner
+    launchpads: str = "pump"                  # comma-separated accepted pool ids from the stream
+    max_creator_buy_percent: float = 20.0     # basic filter: bigger dev-buy = insider grab
+    max_pending: int = 500                    # bounded launch-tracking memory
+    pending_ttl_hours: float = 24.0           # drop unpromoted launches after this window
+    recheck_interval_seconds: float = 120.0   # per-token traction recheck cadence (Section 5)
+    max_rechecks_per_cycle: int = 8           # frontend-API budget per scanner cycle (Rule 11)
+    min_market_cap_growth_ratio: float = 1.5  # SOL mcap vs launch mcap = "increasing attention"
+    min_usd_market_cap: float = 10000.0       # promotion gate: evidence of real buying
+    min_reply_count: int = 5                  # promotion gate: community interest exists
+    max_last_trade_age_minutes: float = 30.0  # promotion gate: still actively trading
+
+    @property
+    def launchpad_list(self) -> list[str]:
+        return [pool.strip() for pool in self.launchpads.split(",") if pool.strip()]
+
+    def __post_init__(self) -> None:
+        for name in ("max_creator_buy_percent", "max_pending", "pending_ttl_hours",
+                     "recheck_interval_seconds", "max_rechecks_per_cycle",
+                     "min_market_cap_growth_ratio", "min_usd_market_cap",
+                     "min_reply_count", "max_last_trade_age_minutes"):
+            if getattr(self, name) <= 0:
+                raise ConfigurationError(f"pumpfun setting '{name}' must be positive")
+        if self.max_creator_buy_percent > 100.0:
+            raise ConfigurationError("max_creator_buy_percent must be within (0, 100]")
+        if not self.launchpad_list:
+            raise ConfigurationError("pumpfun launchpads must name at least one pool")
 
 
 @dataclass(frozen=True)
@@ -755,6 +802,7 @@ class Settings:
     http: HttpSettings = field(default_factory=HttpSettings)
     providers: ProviderSettings = field(default_factory=ProviderSettings)
     discovery: DiscoverySettings = field(default_factory=DiscoverySettings)
+    pumpfun: PumpFunSettings = field(default_factory=PumpFunSettings)
     security: SecurityThresholds = field(default_factory=SecurityThresholds)
     community: CommunityThresholds = field(default_factory=CommunityThresholds)
     onchain: OnChainThresholds = field(default_factory=OnChainThresholds)
@@ -807,6 +855,7 @@ class Settings:
             http=_load_group(HttpSettings, "HTTP", env),
             providers=_load_group(ProviderSettings, "PROVIDERS", env),
             discovery=_load_group(DiscoverySettings, "DISCOVERY", env),
+            pumpfun=_load_group(PumpFunSettings, "PUMPFUN", env),
             security=_load_group(SecurityThresholds, "SECURITY", env),
             community=_load_group(CommunityThresholds, "COMMUNITY", env),
             onchain=_load_group(OnChainThresholds, "ONCHAIN", env),

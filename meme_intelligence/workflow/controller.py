@@ -39,10 +39,14 @@ from meme_intelligence.analyzers.security_monitor import (
 )
 from meme_intelligence.config.settings import Settings
 from meme_intelligence.core.enums import AlertPriority, MarketRegime, WatchlistTier
-from meme_intelligence.core.errors import MemeIntelError
+from meme_intelligence.core.errors import CollectorError, MemeIntelError
 from meme_intelligence.core.logging_setup import get_logger
 from meme_intelligence.database.storage import Storage
 from meme_intelligence.scanners.discovery import DiscoveryEngine, scan_new_pools
+from meme_intelligence.scanners.launch_monitor import (
+    LaunchMonitor,
+    collect_launch_candidates,
+)
 from meme_intelligence.workflow.pipeline import PipelineResult, ResearchPipeline
 from meme_intelligence.workflow.watchlist_review import (
     TIER_FOR_CLASSIFICATION as _TIER_FOR_CLASSIFICATION,
@@ -64,6 +68,7 @@ class CycleStats:
     pools_seen: int = 0
     candidates: int = 0
     analyzed: int = 0
+    launches_tracked: int = 0  # pump.fun launches under observation (Part 32.5)
     alerts: list[AlertEvent] = field(default_factory=list)
 
 
@@ -80,6 +85,8 @@ class ContinuousScanner:
         goplus_client,  # get_token_security(chain, address)
         market_service=None,  # MarketDataService: watchlist recheck + verification
         community_client=None,  # CoinGeckoClient-compatible (get_community_profile)
+        pumpportal_client=None,  # PumpPortalClient-compatible launch stream (Part 32.5)
+        pumpfun_client=None,     # PumpFunFrontendClient-compatible traction rechecks
         regime: MarketRegime = MarketRegime.UNKNOWN,
         now_func: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         sleep_func: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -95,6 +102,21 @@ class ContinuousScanner:
         self._logger = get_logger("workflow.controller")
 
         self._discovery = DiscoveryEngine(settings.discovery, now_func=now_func)
+        # Pump.fun launch funnel (Part 32.5 Section 3): needs the stream,
+        # the traction-recheck client, AND an independent market source —
+        # without market confirmation a launch candidate can never enter
+        # analysis (Section 2), so the stage stays off rather than
+        # tracking tokens it could never promote.
+        self._pumpportal = pumpportal_client
+        self._pumpfun = pumpfun_client
+        self._launch_monitor: LaunchMonitor | None = None
+        if pumpportal_client is not None and pumpfun_client is not None:
+            if market_service is not None:
+                self._launch_monitor = LaunchMonitor(settings.pumpfun, now_func=now_func)
+            else:
+                self._logger.warning(
+                    "pump.fun launch discovery disabled: no market service available "
+                    "for independent confirmation (Part 32.5 Section 2)")
         # A get_majors-only CoinGecko-compatible client (no community data
         # support) must degrade gracefully rather than crash the whole
         # scanner on the first token (Rule 3/18 — DailyRoutine applies this
@@ -125,6 +147,8 @@ class ContinuousScanner:
     async def run(self, max_cycles: int | None = None) -> list[CycleStats]:
         """Run scan cycles until stopped or ``max_cycles`` is reached."""
         self._install_signal_handlers()
+        if self._launch_monitor is not None:
+            await self._pumpportal.start()  # idempotent background listener
         self._logger.info(
             "continuous scanner started: networks=%s interval=%.0fs cycles=%s",
             self._settings.workflow.network_list,
@@ -142,9 +166,10 @@ class ContinuousScanner:
                 history.append(stats)
                 backoff = _ERROR_BACKOFF_START  # healthy cycle resets the backoff
                 self._logger.info(
-                    "cycle %d: %d pools, %d candidates, %d analyzed, %d alerts",
+                    "cycle %d: %d pools, %d candidates, %d analyzed, "
+                    "%d launches tracked, %d alerts",
                     cycle, stats.pools_seen, stats.candidates, stats.analyzed,
-                    len(stats.alerts),
+                    stats.launches_tracked, len(stats.alerts),
                 )
             except MemeIntelError as exc:
                 self._logger.error("cycle %d failed: %s (backing off %.0fs)", cycle, exc, backoff)
@@ -187,6 +212,12 @@ class ContinuousScanner:
                        f"(discovery {candidate.discovery_score:.0f})",
             )
 
+        # Pump.fun launch funnel (Part 32.5 Sections 3/7): stream events ->
+        # basic filtering -> traction rechecks -> market confirmation ->
+        # the same analysis pipeline as every other candidate.
+        if self._launch_monitor is not None:
+            await self._process_launches(cycle, stats, processed_this_cycle)
+
         # Secondary cadence (Part 15 Section 2): tracked tokens are
         # re-checked every N cycles, not every cycle.
         if (
@@ -196,6 +227,56 @@ class ContinuousScanner:
             await self._recheck_watchlist(stats, skip=processed_this_cycle)
 
         return stats
+
+    async def _process_launches(
+        self, cycle: int, stats: CycleStats, processed: set[str],
+    ) -> None:
+        """Run one launch-monitor pass and analyze market-confirmed candidates.
+
+        A failing launch stage never fails the whole cycle: launchpad
+        sources are additive discovery, and regular pool discovery keeps
+        working without them (Rule 9).
+        """
+        try:
+            candidates = await collect_launch_candidates(
+                self._pumpportal, self._pumpfun, self._launch_monitor)
+        except CollectorError as exc:
+            self._logger.warning("launch monitor pass failed: %s", exc)
+            stats.launches_tracked = self._launch_monitor.tracked_count
+            return
+
+        for candidate in candidates:
+            token = candidate.launch.token
+            key = (token.chain, token.address.lower())
+            if key in self._seen:
+                self._launch_monitor.confirm(token)
+                continue
+
+            # Section 2: discovery is never confirmation — an independent
+            # market provider must see the token before deep analysis.
+            pair = await self._market.get_best_pair(token.address, chain=token.chain)
+            if pair is None:
+                self._launch_monitor.defer(token)  # not indexed yet; retry later
+                continue
+
+            stats.candidates += 1
+            result = await self._pipeline.analyze_pair(pair, regime=self._regime)
+            if result is None:
+                # Security data not indexed yet — retry rather than losing
+                # the candidate (fresh launches lag the security providers).
+                self._launch_monitor.defer(token)
+                continue
+
+            self._seen.add(key)
+            self._launch_monitor.confirm(token)
+            stats.analyzed += 1
+            processed.add(token.address.lower())
+            await self._process_result(
+                result, stats, source="pumpfun_launch",
+                thesis=f"pump.fun launch (cycle {cycle}): " + "; ".join(candidate.reasons),
+            )
+
+        stats.launches_tracked = self._launch_monitor.tracked_count
 
     async def _process_result(
         self, result: PipelineResult, stats: CycleStats, *, source: str, thesis: str | None,

@@ -47,6 +47,7 @@ from meme_intelligence.workflow.daily_routine import DailyRoutine
 from meme_intelligence.workflow.pipeline import ResearchPipeline
 from meme_intelligence.workflow.watchlist_review import review_entries
 from meme_intelligence.collectors.market_data import DexScreenerClient, GeckoTerminalClient
+from meme_intelligence.collectors.pumpfun import PumpFunFrontendClient, PumpPortalClient
 from meme_intelligence.collectors.security_data import GoPlusClient
 from meme_intelligence.config.settings import Settings, get_settings
 from meme_intelligence.core.cache import TTLCache
@@ -96,6 +97,19 @@ def build_coingecko(settings: Settings) -> CoinGeckoClient:
         api_key=settings.coingecko_api_key,
         base_url=settings.providers.coingecko_base_url,
         rate_limiter=RateLimiter.per_minute(settings.providers.coingecko_requests_per_minute),
+        **_shared_collector_kwargs(settings),
+    )
+
+
+def build_pumpportal(settings: Settings) -> PumpPortalClient:
+    """Free PumpPortal launch-event stream (Part 32.5 Section 3)."""
+    return PumpPortalClient(settings.providers.pumpportal_ws_url)
+
+
+def build_pumpfun_frontend(settings: Settings) -> PumpFunFrontendClient:
+    return PumpFunFrontendClient(
+        base_url=settings.providers.pumpfun_base_url,
+        rate_limiter=RateLimiter.per_minute(settings.providers.pumpfun_requests_per_minute),
         **_shared_collector_kwargs(settings),
     )
 
@@ -672,6 +686,7 @@ async def _cmd_wallets(args, settings) -> int:
 
 async def _cmd_monitor(args, settings) -> int:
     """Run the continuous scanning loop (Part 13). Ctrl-C stops gracefully."""
+    import contextlib
     import dataclasses as _dc
     workflow = settings.workflow
     if args.network:
@@ -679,13 +694,22 @@ async def _cmd_monitor(args, settings) -> int:
     if args.interval:
         workflow = _dc.replace(workflow, monitor_interval_seconds=args.interval)
     settings = _dc.replace(settings, workflow=workflow)
+    if args.pumpfun:
+        settings = _dc.replace(
+            settings, pumpfun=_dc.replace(settings.pumpfun, enable_in_monitor=True))
 
-    async with (
-        build_geckoterminal(settings) as gecko,
-        build_goplus(settings) as goplus,
-        build_dexscreener(settings) as dex,
-        build_coingecko(settings) as coingecko,
-    ):
+    async with contextlib.AsyncExitStack() as stack:
+        gecko = await stack.enter_async_context(build_geckoterminal(settings))
+        goplus = await stack.enter_async_context(build_goplus(settings))
+        dex = await stack.enter_async_context(build_dexscreener(settings))
+        coingecko = await stack.enter_async_context(build_coingecko(settings))
+        # Pump.fun launch discovery (Part 32.5 Section 3) is opt-in: it adds
+        # a WebSocket stream plus per-launch traction rechecks (Rule 11).
+        pumpportal = pumpfun = None
+        if settings.pumpfun.enable_in_monitor:
+            pumpportal = await stack.enter_async_context(build_pumpportal(settings))
+            pumpfun = await stack.enter_async_context(build_pumpfun_frontend(settings))
+
         with Storage(settings.database.path) as storage:
             notifier = NotificationEngine(build_sinks(settings), settings.alert_engine)
             scanner = ContinuousScanner(
@@ -693,6 +717,8 @@ async def _cmd_monitor(args, settings) -> int:
                 gecko_client=gecko, goplus_client=goplus,
                 market_service=build_market_service(settings, dex, gecko),
                 community_client=coingecko,
+                pumpportal_client=pumpportal,
+                pumpfun_client=pumpfun,
                 regime=MarketRegime(args.regime),
             )
             try:
@@ -827,6 +853,9 @@ def main(argv: list[str] | None = None) -> int:
                          help="seconds between cycles (default from settings)")
     monitor.add_argument("--regime", default="unknown",
                          choices=["bull", "neutral", "bear", "unknown"])
+    monitor.add_argument("--pumpfun", action="store_true",
+                         help="also watch pump.fun launches via the free "
+                              "PumpPortal stream (Part 32.5)")
 
     args = parser.parse_args(argv)
     if getattr(args, "network", None) is None and args.command in ("discover", "scan"):

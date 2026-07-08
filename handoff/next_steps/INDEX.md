@@ -37,7 +37,7 @@ to the genuinely new material within it.
 | PART_30_SYSTEM_OPTIMIZATION.md | 30 | Complete System Optimization & Final Professional Deployment Framework | Low — consolidation part |
 | PART_31_IMPLEMENTATION_BLUEPRINT_AND_CONSISTENCY_LOCK.md | 31 | Implementation Blueprint for AI Coding Agents + Framework Consistency Lock | Already applied — this is the part that determined current scoring weights |
 | PART_32_DATA_SOURCE_BLUEPRINT.md | 32 | Data Source & API Integration Blueprint | Low — architecture already built |
-| PART_32_5_MULTI_SOURCE_DISCOVERY.md | 32.5 | Multi-Source Discovery & Anti-Throttling Architecture | Medium — Pump.fun integration specifically is not built |
+| PART_32_5_MULTI_SOURCE_DISCOVERY.md | 32.5 | Multi-Source Discovery & Anti-Throttling Architecture | ✅ **Built** — §3 Pump.fun launch funnel (`collectors/pumpfun.py`, `scanners/launch_monitor.py`); the rest was already satisfied by Parts 13/15/21 (see `../STATUS.md`) |
 | PART_33_SECURITY_RUG_DETECTION_ENGINE.md | 33 | Security & Rug Detection Intelligence Engine | Already applied — this determined current security sub-weights |
 
 ## Suggested build order
@@ -57,8 +57,10 @@ Given what's already built, the genuinely high-value next targets are:
 4. ~~**Part 24** (Backtesting)~~ — ✅ built: outcome windows, prediction
    grading, §4 metrics, signal analysis, weight experiments (report-only
    under the Part 31 lock); judgments mature as data accumulates
-5. **Part 32.5's Pump.fun integration** — a genuinely new discovery
-   source, additive to the existing `DiscoveryEngine`
+5. ~~**Part 32.5's Pump.fun integration**~~ — ✅ built: free keyless
+   PumpPortal launch stream -> basic filtering -> traction gates ->
+   independent market confirmation -> the normal pipeline; opt-in via
+   `monitor --pumpfun`
 
 Parts 20, 21, 22 (minus §4), 25, 26, 27, 28, 30, 31, 32, 33 are lower
 priority since they're substantially already reflected in the codebase —

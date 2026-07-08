@@ -359,6 +359,49 @@ loss). Fixed directly, all 362 tests green:
   degrades gracefully instead of crashing the scanner on the first
   token.
 
+### Pump.fun data source selection (Part 32.5 Section 3)
+
+Four candidate sources were researched and the two keyless ones probed
+live (2026-07-08) before building — Rule 8, data before assumptions:
+
+- **PumpPortal WebSocket** (`wss://pumpportal.fun/api/data`) — chosen as
+  the discovery feed. Verified live: keyless, free for
+  `subscribeNewToken`/`subscribeMigration`, real launch events within
+  seconds (16 launches captured in a 40s probe). Event-driven beats
+  polling here (spec §6, Rule 10), and it follows the established
+  free-source-first doctrine (see the "cheap aggregator" decision).
+  Constraint honored in code: PumpPortal allows ONE data connection —
+  the client keeps a single background listener with reconnect/backoff.
+- **Pump.fun frontend API** (`frontend-api-v3.pump.fun`) — chosen for
+  per-token traction rechecks only, never bulk polling. Verified live:
+  keyless today, but it is an *unofficial* surface whose v1/v2 hosts
+  were deprecated within about a year each — so the base URL is
+  configuration, every field is optional, and failures degrade to data
+  gaps (Rules 6/8/9/17).
+- **Moralis / Bitquery / Solana Tracker** — official keyed products with
+  free tiers; rejected for now as unnecessary (both chosen sources are
+  free and keyless) but they are the natural upgrade path if the
+  unofficial frontend API breaks.
+- **DexScreener** — verified live that it indexes bonding-curve tokens
+  pre-graduation (dexId `pumpfun`, volume populated, liquidity honestly
+  null). This makes the existing `MarketDataService` the *confirmation*
+  source: a launch enters the pipeline only after an independent
+  provider returns a real pair, which is spec §2 ("the AI must never
+  treat discovery as confirmation") enforced structurally rather than
+  by convention.
+
+Design decisions of note: launch events carry no USD conversion, so all
+launch-side market caps stay SOL-denominated and the growth gate
+compares SOL to SOL (converting with an assumed SOL price would
+fabricate data — Rule 8); every §8 promotion gate requires data to pass
+(a missing metric fails the gate, it is never assumed); the whole stage
+is off by default and opt-in via `MEMEINTEL_PUMPFUN_ENABLE_IN_MONITOR`
+or `monitor --pumpfun` (Rule 11 — it adds a WebSocket plus per-launch
+rechecks). The live smoke test validated the funnel: of 16 real
+launches, basic filtering rejected one whose creator bought 46.2% of
+supply at launch, and zero minutes-old tokens were promoted — exactly
+the "most launches should be filtered out" behavior §3 demands.
+
 ## Notable implementation choices (Rule 19)
 
 - **Python 3.11 + asyncio** over Node.js (both allowed by spec): the
