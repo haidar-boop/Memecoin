@@ -879,6 +879,130 @@ class OnChainThresholds:
 
 
 @dataclass(frozen=True)
+class LearningSettings:
+    """Self-learning "mind" layer configuration (analog + model + rug).
+
+    Every threshold, horizon, neighbor count, half-life, and retrain cadence
+    the mind layer uses lives here so nothing is hardcoded (Rule 17). All
+    time-decay half-lives are expressed in days; horizons in hours.
+
+    ``horizons_hours`` is a comma-separated list rather than a scalar so it
+    can still be overridden by a single ``MEMEINTEL_LEARNING_HORIZONS_HOURS``
+    env var (the config loader only understands scalar fields); it is parsed
+    into a tuple of floats by :meth:`horizon_hours`.
+    """
+
+    enabled: bool = False              # opt-in; off by default (Rule 11 — extra work)
+
+    # Outcome label buckets (return %, relative to detection price) — Section 1
+    pump_return_percent: float = 50.0        # >= this at a horizon -> PUMP
+    dump_return_percent: float = -50.0       # <= this -> DUMP (else FLAT)
+    horizons_hours: str = "0.25,1,6,24"      # +15m / +1h / +6h / +24h
+
+    # Analog / FAISS k-NN forecasting — Section 3
+    knn_neighbors: int = 25                  # k
+    recency_half_life_days: float = 30.0     # neighbor recency decay half-life
+    min_analog_neighbors: int = 5            # below this the analog vote abstains
+
+    # Archetype clustering + novelty — Section 3
+    archetype_min_cluster_size: int = 15     # HDBSCAN min_cluster_size
+    novelty_percentile: float = 90.0         # novelty at/above this flags "new pattern"
+
+    # LightGBM warm-start classifier — Section 4
+    retrain_every_n: int = 200               # warm-start after N newly resolved coins
+    model_half_life_days: float = 30.0       # sample time-decay half-life
+    min_train_samples: int = 50              # below this the classifier abstains
+
+    # Adaptive ensemble — Section 6
+    accuracy_window: int = 200               # M: rolling window for source accuracy
+    min_ensemble_confidence: float = 0.0     # floor; kept configurable
+
+    # Continuous learning / drift — Section 7
+    drift_accuracy_floor: float = 0.40       # ensemble accuracy below -> full retrain
+    scaler_refit_every_n: int = 500          # re-fit StandardScaler cadence
+
+    # Trajectory capture cadence — Section 1 (drives external snapshot callers)
+    fast_snapshot_seconds: int = 60          # snapshot cadence in the first window
+    fast_window_minutes: int = 60            # duration of the fast cadence
+    slow_snapshot_minutes: int = 60          # cadence after the fast window
+    capture_until_hours: float = 24.0        # stop capturing after this age
+
+    # Cold start — Section 11
+    min_snapshots_for_confidence: int = 3    # fewer snapshots -> low confidence
+    cold_start_samples: int = 100            # resolved coins below this = cold start
+
+    # Persistence — Section 9 (db + FAISS index + models live together)
+    state_dir: str = "learning_state"
+
+    def __post_init__(self) -> None:
+        if self.dump_return_percent >= self.pump_return_percent:
+            raise ConfigurationError(
+                "learning: dump_return_percent must be below pump_return_percent")
+        for name in ("knn_neighbors", "min_analog_neighbors", "archetype_min_cluster_size",
+                     "retrain_every_n", "min_train_samples", "accuracy_window",
+                     "scaler_refit_every_n", "fast_snapshot_seconds", "fast_window_minutes",
+                     "slow_snapshot_minutes", "min_snapshots_for_confidence",
+                     "cold_start_samples"):
+            value = getattr(self, name)
+            if value <= 0:
+                raise ConfigurationError(f"learning setting '{name}' must be positive, got {value}")
+        for name in ("recency_half_life_days", "model_half_life_days", "capture_until_hours"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value <= 0:
+                raise ConfigurationError(f"learning setting '{name}' must be positive, got {value}")
+        _check_range("learning drift_accuracy_floor", self.drift_accuracy_floor, 0.0, 1.0)
+        _check_range("learning novelty_percentile", self.novelty_percentile, 0.0, 100.0)
+        _check_range("learning min_ensemble_confidence", self.min_ensemble_confidence, 0.0, 1.0)
+        if not self.horizon_hours():
+            raise ConfigurationError("learning: horizons_hours must list at least one horizon")
+
+    def horizon_hours(self) -> tuple[float, ...]:
+        """Parse ``horizons_hours`` into an ordered tuple of positive floats."""
+        hours: list[float] = []
+        for piece in self.horizons_hours.split(","):
+            piece = piece.strip()
+            if not piece:
+                continue
+            try:
+                value = float(piece)
+            except ValueError as exc:
+                raise ConfigurationError(
+                    f"learning: invalid horizon {piece!r} in horizons_hours") from exc
+            if not math.isfinite(value) or value <= 0:
+                raise ConfigurationError(f"learning: horizon must be positive, got {value}")
+            hours.append(value)
+        return tuple(sorted(set(hours)))
+
+
+@dataclass(frozen=True)
+class RugSignalWeights:
+    """Point contributions for each hard rug signal (Section 5a).
+
+    Unlike the framework's normalized category weights, these are additive
+    *points* summed into a 0-100 rug-risk score (clamped at 100). Higher
+    points = a stronger standalone rug indicator. Kept configurable (Rule 17)
+    and non-normalized on purpose — the spec sums signals to a score rather
+    than averaging them.
+    """
+
+    liquidity_unlocked: float = 20.0         # LP not locked / lock expiring soon
+    mint_authority_active: float = 20.0      # owner can print supply
+    freeze_authority_active: float = 15.0    # owner can freeze holders
+    top_holder_concentration: float = 15.0   # single/cluster holds large supply %
+    liquidity_removed: float = 30.0          # real-time LP burn/withdraw
+    unsellable: float = 30.0                 # honeypot / failed sell simulation
+    high_sell_tax: float = 15.0              # sell tax above threshold
+    dev_wallet_dumping: float = 20.0         # large creator outbound transfers
+    fake_volume: float = 10.0                # volume vs holder count (wash trading)
+    deployer_blacklisted: float = 25.0       # creator linked to prior rugs
+
+    def __post_init__(self) -> None:
+        for name, value in dataclasses.asdict(self).items():
+            if not math.isfinite(value) or value < 0:
+                raise ConfigurationError(f"rug signal weight '{name}' must be >= 0, got {value}")
+
+
+@dataclass(frozen=True)
 class Settings:
     """Root settings object. Build with :func:`Settings.from_env`."""
 
@@ -917,6 +1041,8 @@ class Settings:
     smart_money_weights: SmartMoneySubWeights = field(default_factory=SmartMoneySubWeights)
     ai: AISettings = field(default_factory=AISettings)
     backtest: BacktestSettings = field(default_factory=BacktestSettings)
+    learning: LearningSettings = field(default_factory=LearningSettings)
+    rug_signal_weights: RugSignalWeights = field(default_factory=RugSignalWeights)
     log_level: str = "INFO"
     log_dir: str = "logs"
     # API keys (Rule 16): read from MEMEINTEL_HELIUS_API_KEY / MEMEINTEL_BIRDEYE_API_KEY /
@@ -971,6 +1097,8 @@ class Settings:
             smart_money_weights=_load_group(SmartMoneySubWeights, "SMART_MONEY_WEIGHTS", env),
             ai=_load_group(AISettings, "AI", env),
             backtest=_load_group(BacktestSettings, "BACKTEST", env),
+            learning=_load_group(LearningSettings, "LEARNING", env),
+            rug_signal_weights=_load_group(RugSignalWeights, "RUG_SIGNAL_WEIGHTS", env),
             log_level=env.get(f"{_ENV_PREFIX}_LOG_LEVEL", "INFO"),
             log_dir=env.get(f"{_ENV_PREFIX}_LOG_DIR", "logs"),
             helius_api_key=env.get(f"{_ENV_PREFIX}_HELIUS_API_KEY", ""),
