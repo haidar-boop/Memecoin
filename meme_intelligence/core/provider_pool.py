@@ -78,6 +78,18 @@ class ProviderPool:
         when every provider fails or is cooling down — callers should treat
         that as "data unavailable", not as a zero value (Rule 8).
         """
+        result, _name = await self.call_with_provider(method, *args, **kwargs)
+        return result
+
+    async def call_with_provider(self, method: str, /, *args: Any, **kwargs: Any) -> tuple[Any, str]:
+        """Like :meth:`call`, but also returns which provider answered.
+
+        Needed by callers that must later verify the result against a
+        genuinely *different* source (Part 15 Section 10) — without
+        knowing who actually served ``result``, a caller that guesses
+        "not the first provider" can end up asking the same provider that
+        already answered to confirm its own data.
+        """
         now = self._time()
         causes: dict[str, Exception] = {}
 
@@ -98,7 +110,7 @@ class ProviderPool:
                 self._logger.info("provider '%s' recovered", name)
             state.consecutive_failures = 0
             state.total_successes += 1
-            return result
+            return result, name
 
         raise AllProvidersFailedError(method, causes)
 

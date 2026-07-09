@@ -207,6 +207,41 @@ async def test_dispatch_ranks_and_stamps_detected_at():
     assert all(e.detected_at is not None for e in sink.events)
 
 
+class FailingSink:
+    """Raises on every send — simulates a broken/misconfigured sink."""
+
+    async def send(self, event):
+        raise RuntimeError("sink exploded")
+
+
+async def test_one_failing_sink_does_not_eat_the_rest_of_the_batch():
+    """Bug-hunt: an unhandled exception from one sink propagated out of
+    dispatch() entirely, aborting delivery to every remaining sink for
+    that event AND every subsequent event in the same batch."""
+    good = RecordingSink()
+    engine = NotificationEngine([FailingSink(), good], AlertEngineSettings())
+    first = make_event(alert_type="momentum", detected_at=None)
+    second = make_event(alert_type="whale_exit", priority=AlertPriority.HIGH, detected_at=None)
+    delivered = await engine.dispatch([first, second])
+    # both events still reached the surviving sink and both count delivered
+    assert len(good.events) == 2
+    assert len(delivered) == 2
+
+
+async def test_total_delivery_outage_does_not_permanently_lose_the_alert():
+    """Bug-hunt: cooldown was stamped BEFORE any sink was attempted, so a
+    total delivery outage (all sinks failing) still marked the alert as
+    'sent' and it could never be retried within the cooldown window."""
+    engine = NotificationEngine([FailingSink()], AlertEngineSettings(cooldown_seconds=900.0))
+    event = make_event(detected_at=None)
+    delivered = await engine.dispatch([event])
+    assert delivered == []  # correctly not counted as delivered
+    # cooldown must NOT have been stamped — the same event tried again
+    # immediately (as the next scan cycle would) is not suppressed
+    key = (event.token.chain, event.token.address.lower(), event.alert_type, event.priority.value)
+    assert key not in engine._last_sent
+
+
 # ---- Sections 11-12: history and performance ----
 
 def make_master(score: float):

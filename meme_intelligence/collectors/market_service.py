@@ -40,6 +40,11 @@ class MarketDataService:
         cooldown_seconds: float = 60.0,
     ) -> None:
         self._providers = list(providers)
+        # Tracks which provider actually answered for each pair address, so
+        # cross_check_liquidity can exclude the TRUE source (failover means
+        # it is not always providers[0]) instead of guessing by position —
+        # see cross_check_liquidity for why that guess was wrong.
+        self._last_provider_by_pair: dict[str, str] = {}
         self._pool = ProviderPool(
             self._providers,
             failure_threshold=failure_threshold,
@@ -49,7 +54,11 @@ class MarketDataService:
 
     async def get_token_pairs(self, token_address: str, chain: str | None = None) -> list[DexPair]:
         """Pairs for a token from the first healthy provider (automatic failover)."""
-        return await self._pool.call("get_token_pairs", token_address, chain=chain)
+        pairs, provider_name = await self._pool.call_with_provider(
+            "get_token_pairs", token_address, chain=chain)
+        for pair in pairs:
+            self._last_provider_by_pair[pair.pair_address.lower()] = provider_name
+        return pairs
 
     async def get_best_pair(self, token_address: str, chain: str | None = None) -> DexPair | None:
         """The deepest-liquidity pair, or ``None`` when no provider knows the token."""
@@ -74,13 +83,21 @@ class MarketDataService:
         if len(self._providers) < 2:
             return None, "no second source configured for verification"
 
-        # Ask every *other* provider until one answers.
-        for provider in self._providers[1:]:
+        # Exclude the provider that actually supplied `pair` — failover
+        # means that is not always providers[0] (a hardcoded providers[1:]
+        # skip let a provider confirm its own data as "independent"
+        # whenever failover had returned providers[1]'s pair; bug-hunt
+        # finding). Falls back to "ask everyone" if provenance wasn't
+        # tracked (e.g. a pair built outside this service).
+        source_name = self._last_provider_by_pair.get(pair.pair_address.lower())
+        for provider in self._providers:
+            name = getattr(provider, "name", type(provider).__name__)
+            if source_name is not None and name == source_name:
+                continue
             try:
                 pairs = await provider.get_token_pairs(pair.base_token.address, chain=pair.chain)
             except Exception as exc:  # provider-specific failure: try the next one
-                self._logger.debug("verifier %s unavailable: %s",
-                                   getattr(provider, "name", "?"), exc)
+                self._logger.debug("verifier %s unavailable: %s", name, exc)
                 continue
             other = next((p for p in pairs if p.pair_address.lower() == pair.pair_address.lower()),
                          None)
@@ -90,13 +107,16 @@ class MarketDataService:
                 continue
 
             low, high = sorted((pair.liquidity_usd, other.liquidity_usd))
-            if low > 0 and high / low <= _AGREEMENT_FACTOR:
-                return True, (f"liquidity confirmed by "
-                              f"{getattr(provider, 'name', 'second source')} "
+            # Both sources reporting exactly $0 is agreement (a dead pool),
+            # not a disagreement — `low > 0` alone would report a $0-vs-$0
+            # pair as unable to verify instead of confirming the pool is
+            # genuinely empty on both sides (bug-hunt finding).
+            if low == high == 0.0 or (low > 0 and high / low <= _AGREEMENT_FACTOR):
+                return True, (f"liquidity confirmed by {name} "
                               f"(${other.liquidity_usd:,.0f} vs ${pair.liquidity_usd:,.0f})")
             return False, (f"sources disagree on liquidity: "
                            f"${pair.liquidity_usd:,.0f} vs ${other.liquidity_usd:,.0f} "
-                           f"({getattr(provider, 'name', 'second source')})")
+                           f"({name})")
 
         return None, "second source could not verify (unavailable or token unknown)"
 

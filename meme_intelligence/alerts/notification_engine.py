@@ -20,6 +20,7 @@ sinks arrive with the Part 29 build.
 from __future__ import annotations
 
 import dataclasses
+import math
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -116,8 +117,12 @@ class AutomationRules:
                           previous_score: float | None) -> AlertEvent | None:
         liquidity = result.pair.liquidity_usd
         # Unknown liquidity is NOT death — absence of data never becomes a
-        # conclusion (Rule 8).
-        if liquidity is None or liquidity >= self._s.dead_liquidity_usd:
+        # conclusion (Rule 8). NaN must bail out here too: `nan >= floor`
+        # is always False (same hazard as `nan <= 0` elsewhere), so without
+        # the explicit isfinite check a NaN liquidity value fell through
+        # to "dead" instead of being excluded, misclassifying a token with
+        # simply-unmeasurable liquidity and suppressing every real alert.
+        if liquidity is None or not math.isfinite(liquidity) or liquidity >= self._s.dead_liquidity_usd:
             return None
         reasons = [f"liquidity collapsed to ${liquidity:,.0f} "
                    f"(dead floor ${self._s.dead_liquidity_usd:,.0f})"]
@@ -477,10 +482,30 @@ class NotificationEngine:
                 self._logger.debug("alert suppressed by cooldown: %s %s",
                                    event.alert_type, event.token.address)
                 continue
-            self._last_sent[key] = now
             if event.detected_at is None:
                 event = dataclasses.replace(event, detected_at=datetime.now(timezone.utc))
+            # Per-sink isolation: one sink raising must not abort the rest
+            # of this event's sinks NOR every remaining event in the batch
+            # (previously an unhandled exception from one sink propagated
+            # out of dispatch() entirely). Cooldown is stamped only after
+            # at least one sink actually delivered — stamping it
+            # unconditionally beforehand meant a total delivery outage
+            # (e.g. Telegram down) permanently lost the alert instead of
+            # letting it retry once the cooldown window elapsed (Rule 7).
+            any_delivered = False
             for sink in self._sinks:
-                await sink.send(event)
-            delivered.append(event)
+                try:
+                    await sink.send(event)
+                    any_delivered = True
+                except Exception as exc:  # noqa: BLE001 — one sink's bug must not sink the batch
+                    self._logger.error("sink %s failed to deliver %s alert for %s: %s",
+                                       type(sink).__name__, event.alert_type,
+                                       event.token.address, exc)
+            if any_delivered:
+                self._last_sent[key] = now
+                delivered.append(event)
+            else:
+                self._logger.warning(
+                    "all sinks failed for %s %s; not marking delivered (will retry)",
+                    event.alert_type, event.token.address)
         return delivered

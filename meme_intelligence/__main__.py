@@ -728,9 +728,22 @@ async def _cmd_monitor(args, settings) -> int:
                 # when the user explicitly asked for per-token judging.
                 print("Note: MEMEINTEL_AI_ENABLE_IN_MONITOR is on but "
                       "MEMEINTEL_ANTHROPIC_API_KEY is not set — AI judgments stay off.")
+            elif ai_service is not None:
+                # AsyncAnthropic wraps its own httpx client; close it on
+                # shutdown like every other HTTP client this command opens.
+                stack.push_async_callback(ai_service._client.close)
+
+        alert_sinks = build_sinks(settings)
+        # Telegram/DiscordSink each hold an aiohttp session (BaseCollector);
+        # ConsoleSink (always sinks[0]) doesn't and has no close(). Without
+        # this, the monitor's session leaked for the process lifetime —
+        # harmless at hard process exit, but real for --cycles runs or any
+        # future long-lived host of this command (bug-hunt finding).
+        for sink in alert_sinks[1:]:
+            stack.push_async_callback(sink.close)
 
         with Storage(settings.database.path) as storage:
-            notifier = NotificationEngine(build_sinks(settings), settings.alert_engine)
+            notifier = NotificationEngine(alert_sinks, settings.alert_engine)
             scanner = ContinuousScanner(
                 settings, storage, notifier,
                 gecko_client=gecko, goplus_client=goplus,

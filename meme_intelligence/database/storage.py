@@ -7,9 +7,13 @@ compared against outcomes. SQLite keeps operations simple and reliable
 server database can replace it behind the same interface.
 
 The API is synchronous — local SQLite operations are sub-millisecond and
-the CLI flows call them between network awaits. The continuous scanner
-controller will wrap calls in a thread executor if profiling ever shows
-contention.
+the CLI flows call them between network awaits, all from the single
+asyncio event loop thread. The connection is opened with the default
+``check_same_thread=True``, so a ``Storage`` instance may only ever be
+used from the thread that created it — do NOT wrap calls in
+``run_in_executor``/a thread pool without first passing
+``check_same_thread=False`` and adding your own serialization, or every
+call from the executor thread raises immediately.
 """
 
 from __future__ import annotations
@@ -201,8 +205,20 @@ class Storage:
                         self._conn.execute(f"PRAGMA table_info({table})")}
             for name, sql_type in columns:
                 if name not in existing:
-                    self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}")
-                    self._logger.info("migrated %s: added column %s", table, name)
+                    try:
+                        self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}")
+                        self._logger.info("migrated %s: added column %s", table, name)
+                    except sqlite3.OperationalError as exc:
+                        # Two processes sharing this database (the monitor
+                        # and a cron job) can both start up against a
+                        # pre-upgrade file at once, both see the column
+                        # missing, and both attempt this ALTER TABLE — the
+                        # loser hits "duplicate column name", not a real
+                        # failure (Rule 7: the migration already happened).
+                        if "duplicate column" not in str(exc).lower():
+                            raise
+                        self._logger.info(
+                            "%s.%s already migrated by a concurrent process", table, name)
 
     def close(self) -> None:
         self._conn.close()
@@ -289,7 +305,17 @@ class Storage:
                    FROM watchlist w JOIN tokens t ON t.id = w.token_id"""
         if not include_archived:
             query += " WHERE w.tier != 'archived'"
-        query += " ORDER BY w.tier, w.last_score DESC"
+        # `ORDER BY w.tier` sorts the raw TEXT alphabetically, putting
+        # 'archived' before every 'tier_N_*' value ('a' < 't') — with
+        # include_archived=True, archived (lowest priority) entries sorted
+        # ahead of tier_1 (highest priority). Rank explicitly instead.
+        query += """ ORDER BY CASE w.tier
+                         WHEN 'tier_1_high_priority' THEN 1
+                         WHEN 'tier_2_developing' THEN 2
+                         WHEN 'tier_3_research_only' THEN 3
+                         WHEN 'archived' THEN 4
+                         ELSE 5
+                     END, w.last_score DESC"""
         rows = self._conn.execute(query).fetchall()
         return [
             WatchlistEntry(
@@ -322,27 +348,33 @@ class Storage:
         ).fetchone()
 
         classification_value = classification.value if classification else None
+        # A separate SELECT-then-INSERT/UPDATE had a race window between
+        # two processes sharing this database (the 24/7 monitor and the
+        # daily/backtest cron jobs, now that Storage runs in WAL mode):
+        # both could see "no existing row" for the same brand-new token
+        # and both attempt INSERT, the second raising IntegrityError on
+        # the token_id primary key. A single UPSERT is atomic — the write
+        # itself can no longer race, even though the human-readable
+        # change description below is best-effort (rare cosmetic staleness
+        # under true concurrency, never a crash).
+        self._conn.execute(
+            """INSERT INTO watchlist
+               (token_id, tier, thesis, added_at, updated_at, last_score, last_classification)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(token_id) DO UPDATE SET
+                   tier = excluded.tier,
+                   thesis = COALESCE(excluded.thesis, watchlist.thesis),
+                   updated_at = excluded.updated_at,
+                   last_score = COALESCE(excluded.last_score, watchlist.last_score),
+                   last_classification =
+                       COALESCE(excluded.last_classification, watchlist.last_classification)""",
+            (token_id, tier.value, thesis, now, now, score, classification_value),
+        )
         if existing is None:
-            self._conn.execute(
-                """INSERT INTO watchlist
-                   (token_id, tier, thesis, added_at, updated_at, last_score, last_classification)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (token_id, tier.value, thesis, now, now, score, classification_value),
-            )
             change = WatchlistChange(token, "added", tier,
                                      f"added at {tier.value}" + (f" (score {score:.0f})" if score is not None else ""))
         else:
             old_tier = WatchlistTier(existing["tier"])
-            # COALESCE keeps the last known score/classification when an
-            # update (e.g. archival) carries none — history feeds learning.
-            self._conn.execute(
-                """UPDATE watchlist SET tier = ?, thesis = COALESCE(?, thesis),
-                       updated_at = ?,
-                       last_score = COALESCE(?, last_score),
-                       last_classification = COALESCE(?, last_classification)
-                   WHERE token_id = ?""",
-                (tier.value, thesis, now, score, classification_value, token_id),
-            )
             if old_tier is not tier:
                 change = WatchlistChange(token, "tier_changed", tier,
                                          f"{old_tier.value} -> {tier.value}")

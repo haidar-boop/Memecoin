@@ -154,6 +154,17 @@ async def test_dead_honeypot_still_raises_critical_emergency():
     assert not any("opportunity" in t or t == "momentum" for t in types)
 
 
+async def test_nan_liquidity_is_not_death():
+    """Bug-hunt: `nan >= dead_floor` is always False (same hazard as
+    `nan <= 0` elsewhere), so the bail-out check let NaN liquidity fall
+    through to 'dead' instead of being excluded like unknown liquidity —
+    misclassifying a token with simply-unmeasurable liquidity as dead and
+    suppressing every real alert for it."""
+    result = await pipeline_result(pair=make_pair(liquidity_usd=float("nan")))
+    events = make_rules().evaluate(result)
+    assert not any(e.alert_type == "token_death" for e in events)
+
+
 async def test_unknown_liquidity_is_not_death():
     """Absence of data never becomes a conclusion (Rule 8)."""
     result = await pipeline_result(pair=make_pair(liquidity_usd=None))

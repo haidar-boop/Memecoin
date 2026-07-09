@@ -213,6 +213,60 @@ async def test_pipeline_ai_enrichment_fills_foundation_and_narrative():
         result.security.overall_score)
 
 
+ALL_NULL_JUDGMENT = {
+    "meme_strength": None, "narrative": None, "brand": None,
+    "dev_communication": None, "long_term": None,
+    "memorability": None, "shareability": None, "emotional_impact": None,
+    "cultural_timing": None, "community_participation": None,
+    "community_creativity": None, "long_term_strength": None,
+    "short_term_hype_risk": None, "trend_dependency_risk": None, "copycat_risk": None,
+    "narrative_category": "unknown", "narrative_stage": "unknown",
+    "narrative_summary": None,
+    "bull_case": [], "bear_case": [],
+    "confidence": 25,
+    "confidence_reason": "Snapshot is too thin to judge anything.",
+}
+
+
+class FakeCommunityClient:
+    """A community profile healthy enough that its creativity sub-score
+    would fabricate a narrative if the AI-enrichment guard were missing."""
+
+    async def get_community_profile(self, token):
+        from meme_intelligence.core.models import CommunityProfile
+        return CommunityProfile(
+            token=token, source="test",
+            twitter_followers=25000, twitter_engagement_rate_percent=6.0,
+            twitter_growth_rate_7d_percent=40.0, bot_follower_percent=5.0,
+            telegram_members=8000, telegram_active_members=1600,
+            telegram_admin_only_talk=False, duplicate_message_percent=2.0,
+            discord_members=3000, discord_active_percent=18.0,
+            member_retention_30d_percent=85.0, positive_sentiment_percent=75.0,
+            user_content_per_day=30.0, dev_updates_per_week=4.0,
+            dev_responds_to_community=True,
+        )
+
+
+async def test_all_null_ai_judgment_does_not_fabricate_narrative_from_community():
+    """Bug-hunt: the has_foundation_evidence guard (added for foundation)
+    was never applied to the narrative path — an all-null AI judgment
+    still triggered NarrativeAnalyzer.assess(), which falls back to the
+    community engine's creativity sub-score, fabricating a narrative
+    score from community data alone with ZERO actual narrative
+    judgment."""
+    messages = FakeMessages(payload=ALL_NULL_JUDGMENT)
+    service = make_service(messages)
+    pipeline = ResearchPipeline(
+        SETTINGS, OneShotGoPlus(make_profile()),
+        community_client=FakeCommunityClient(),
+        ai_service=service, now_func=lambda: NOW,
+    )
+    result = await pipeline.analyze_pair(make_pair(), regime=MarketRegime.NEUTRAL)
+    assert result.ai_judgment is not None  # the (empty) judgment was still recorded
+    assert result.community is not None    # community data WAS available
+    assert result.narrative is None        # but narrative must stay unfabricated
+
+
 async def test_pipeline_skips_ai_for_destructive_tokens():
     messages = FakeMessages()
     service = make_service(messages)
