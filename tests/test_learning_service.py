@@ -276,6 +276,15 @@ def test_short_trajectory_lowers_confidence():
     assert single["model_confidence"] <= 1 / 3 + 1e-9
 
 
+def test_evaluate_only_coin_persists_creator_for_blacklist():
+    """A coin known only through evaluate_coin still records its creator, so a
+    later rug grows the deployer blacklist (upgrade #2)."""
+    service = _service()
+    service.evaluate_coin("e1", "solana", _rug_series(), creator="devZ")
+    service.resolve_outcome("e1", "solana", 24.0, -95.0, is_rug=True)
+    assert service.store.deployer_rug_count("devZ", "solana") == 1
+
+
 def test_retrain_not_due_below_threshold():
     service = _service()
     service.record_detection("c1", "solana", detection_price_usd=1.0)

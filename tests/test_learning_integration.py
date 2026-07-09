@@ -27,13 +27,14 @@ def _pair(address="TokenA"):
     )
 
 
-def _profile(token):
+def _profile(token, creator_address=None):
     return SecurityProfile(
         token=token, source="goplus", is_honeypot=False, cannot_sell_all=False,
         is_mintable=False, ownership_renounced=True, is_freezable=False,
         buy_tax_percent=0.0, sell_tax_percent=0.0, honeypot_same_creator_count=0,
         holder_count=2500, top_holder_percent=3.0, top10_holder_percent=22.0,
-        creator_percent=1.5, lp_locked_percent=95.0)
+        creator_percent=1.5, lp_locked_percent=95.0,
+        creator_address=creator_address)
 
 
 class _FakeGecko:
@@ -106,6 +107,60 @@ async def test_scanner_skips_mind_layer_when_flag_off():
 
     assert learning.store.coin_id(pair.base_token) is None
     assert history[0].learned == 0
+
+
+# ---- Creator wallet + dev outflow (upgrade #2) ----
+
+class _FlowAssessment:
+    """Duck-typed stand-in exposing exactly what _creator_outflow_usd reads."""
+
+    def __init__(self, net_flows):
+        self.net_flows = net_flows
+
+
+def test_creator_outflow_from_net_flows():
+    from meme_intelligence.workflow.controller import _creator_outflow_usd
+
+    flows = _FlowAssessment([("WalletA", 500.0), ("DevWallet", -3_000.0)])
+    # Net seller -> positive outflow magnitude.
+    assert _creator_outflow_usd(flows, "DevWallet") == 3_000.0
+    # Net buyer -> observed zero outflow (a real observation, not unknown).
+    assert _creator_outflow_usd(flows, "WalletA") == 0.0
+    # Creator not seen trading in the window -> observed zero.
+    assert _creator_outflow_usd(flows, "SomeoneElse") == 0.0
+    # Unknown creator or no wallet data -> None (Rule 8).
+    assert _creator_outflow_usd(flows, None) is None
+    assert _creator_outflow_usd(None, "DevWallet") is None
+    # EVM addresses compare case-insensitively; base58 stays exact.
+    evm = _FlowAssessment([("0xDeAdBeEf", -100.0)])
+    assert _creator_outflow_usd(evm, "0xdeadbeef") == 100.0
+    assert _creator_outflow_usd(flows, "devwallet") == 0.0  # base58: no fold
+
+
+async def test_scanner_persists_creator_and_blacklist_fires():
+    """Creator flows from the security profile into the learning store, and a
+    confirmed rug makes the NEXT coin by the same deployer fire the
+    reputation signal (Section 5a end to end)."""
+    pair = _pair()
+    settings, learning = _learning(enable_in_monitor=True)
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner = _scanner(settings, storage, learning, [pair],
+                           {pair.base_token.address: _profile(pair.base_token,
+                                                              creator_address="devX")})
+        await scanner.run(max_cycles=1)
+
+    # Creator persisted on the coin record.
+    coin_id = learning.store.coin_id(pair.base_token)
+    record = learning.store.get_record(coin_id)
+    assert record.creator == "devX"
+
+    # The coin rugs -> deployer blacklisted -> next devX coin is flagged.
+    learning.resolve_outcome(pair.base_token.address, "solana", 24.0, -95.0, is_rug=True)
+    assert learning.store.deployer_rug_count("devX", "solana") == 1
+    verdict = learning.evaluate_coin("NextCoin", "solana",
+                                     [{"age_seconds": 0, "price_usd": 1.0}],
+                                     creator="devX")
+    assert "deployer_blacklisted" in verdict["rug_signals_fired"]
 
 
 # ---- Backtester -> resolve_outcome feed ----

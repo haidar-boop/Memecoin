@@ -170,6 +170,7 @@ class SecurityProfile:
     # Developer (Part 4 Section 8)
     creator_percent: float | None = None
     owner_percent: float | None = None
+    creator_address: str | None = None  # deployer wallet (feeds reputation checks)
 
     # Liquidity safety (Part 4 Section 4; USD depth comes from market data)
     lp_locked_percent: float | None = None

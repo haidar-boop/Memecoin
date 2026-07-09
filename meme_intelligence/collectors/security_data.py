@@ -220,6 +220,7 @@ class GoPlusClient(BaseCollector):
             top10_holder_percent=sum(holder_percents[:10]) if holder_percents else None,
             creator_percent=_fraction_to_percent(raw.get("creator_percent")),
             owner_percent=_fraction_to_percent(raw.get("owner_percent")),
+            creator_address=raw.get("creator_address") or None,
             lp_locked_percent=_lp_locked_percent(raw.get("lp_holders")),
         )
 
@@ -234,8 +235,10 @@ class GoPlusClient(BaseCollector):
         holder_percents = _holder_percents(raw.get("holders"))
         creators = raw.get("creators")
         creator_percent = None
+        creator_address = None
         if isinstance(creators, list) and creators and isinstance(creators[0], dict):
             creator_percent = _fraction_to_percent(creators[0].get("percent"))
+            creator_address = creators[0].get("address") or None
 
         metadata = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
         return SecurityProfile(
@@ -257,5 +260,6 @@ class GoPlusClient(BaseCollector):
             top_holder_percent=holder_percents[0] if holder_percents else None,
             top10_holder_percent=sum(holder_percents[:10]) if holder_percents else None,
             creator_percent=creator_percent,
+            creator_address=creator_address,
             lp_locked_percent=_lp_locked_percent(raw.get("lp_holders")),
         )

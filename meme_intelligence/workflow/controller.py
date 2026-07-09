@@ -61,6 +61,30 @@ _ERROR_BACKOFF_START = 5.0
 _ERROR_BACKOFF_MAX = 300.0
 
 
+def _creator_outflow_usd(wallet_assessment, creator: str | None) -> float | None:
+    """Observed net USD outflow of the creator wallet in the recent trade window.
+
+    Reads the per-wallet net flows the wallet analyzer already computed
+    (Part 17) — zero extra API calls. A negative net flow means the creator is
+    a net seller: that magnitude is the dev-dumping evidence the rug engine
+    checks. A creator present with a non-negative flow, or absent from the
+    observed window entirely, is an observed zero. No wallet data or no known
+    creator returns None — unknown, never fabricated (Rule 8).
+
+    EVM (0x…) addresses compare case-insensitively; Solana base58 addresses are
+    case-sensitive and compare exactly.
+    """
+    if wallet_assessment is None or not creator:
+        return None
+    fold = creator.lower().startswith("0x")
+    wanted = creator.lower() if fold else creator
+    for wallet, net_usd in wallet_assessment.net_flows:
+        candidate = wallet.lower() if fold else wallet
+        if candidate == wanted and net_usd is not None:
+            return -net_usd if net_usd < 0 else 0.0
+    return 0.0
+
+
 @dataclass
 class CycleStats:
     """What one scan cycle did (logged and aggregated)."""
@@ -340,12 +364,14 @@ class ContinuousScanner:
             await self._process_result(
                 result, stats, source="pumpfun_launch",
                 thesis=f"pump.fun launch (cycle {cycle}): " + "; ".join(candidate.reasons),
+                creator=candidate.launch.creator,  # launch tx signer -> deployer reputation
             )
 
         stats.launches_tracked = self._launch_monitor.tracked_count
 
     async def _process_result(
         self, result: PipelineResult, stats: CycleStats, *, source: str, thesis: str | None,
+        creator: str | None = None,
     ) -> None:
         """Persist, tier, apply rules, verify important alerts, dispatch."""
         token = result.pair.base_token
@@ -434,9 +460,10 @@ class ContinuousScanner:
                 token, "alert", f"{event.priority.value}/{event.alert_type}: {event.title}",
             )
 
-        self._feed_learning(result, stats)
+        self._feed_learning(result, stats, creator=creator)
 
-    def _feed_learning(self, result: PipelineResult, stats: CycleStats) -> None:
+    def _feed_learning(self, result: PipelineResult, stats: CycleStats,
+                       *, creator: str | None = None) -> None:
         """Feed one analyzed coin into the mind layer (Section 10).
 
         Additive and fully error-isolated: it records the coin and appends a
@@ -452,6 +479,10 @@ class ContinuousScanner:
             pair = result.pair
             token = pair.base_token
             profile = result.security_profile
+            # Launch-event signer wins (chain truth); GoPlus's creator_address
+            # covers tokens discovered without a launch event.
+            if creator is None and profile is not None:
+                creator = profile.creator_address
             age_seconds = 0.0
             if pair.pair_created_at is not None:
                 age_seconds = max(0.0, (self._now() - pair.pair_created_at).total_seconds())
@@ -466,10 +497,13 @@ class ContinuousScanner:
                 "sells": pair.sells_1h,
                 "top10_holder_percent":
                     profile.top10_holder_percent if profile is not None else None,
+                # Dev-dumping evidence from the wallet analyzer's net flows
+                # (Part 17) — None when wallet data / creator are unknown.
+                "dev_outflow_usd": _creator_outflow_usd(result.wallet, creator),
             }
             self._learning.record_detection(
                 token.address, token.chain, detection_price_usd=pair.price_usd,
-                symbol=token.symbol, name=token.name)
+                symbol=token.symbol, name=token.name, creator=creator)
             self._learning.capture_snapshot(token.address, token.chain, snapshot)
             stats.learned += 1
         except Exception as exc:  # noqa: BLE001 — additive; must not kill the cycle

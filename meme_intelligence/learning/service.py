@@ -280,18 +280,20 @@ class LearningService:
 
         self._store_prediction(token_address, chain, snaps, verdict, result,
                                analog_dist, model_dist, rug_dist, assignment.name,
-                               novelty_flagged)
+                               novelty_flagged, creator=creator)
         return verdict.to_dict()
 
     def _store_prediction(self, token_address, chain, snaps, verdict, result,
-                          analog_dist, model_dist, rug_dist, archetype, novelty_flagged) -> None:
+                          analog_dist, model_dist, rug_dist, archetype, novelty_flagged,
+                          *, creator: str | None = None) -> None:
         """Persist the coin's first verdict for later grading (Section 8)."""
         token = TokenIdentity(chain=chain, address=token_address)
         coin_id = self._store.coin_id(token)
         if coin_id is None:
             detection_price = next((s.price_usd for s in snaps if s.price_usd is not None), None)
             coin_id = self._store.record_detection(
-                token, detected_at=self._now(), detection_price_usd=detection_price)
+                token, detected_at=self._now(), detection_price_usd=detection_price,
+                creator=creator)
         # Persist the evaluated trajectory when the store holds none for this
         # coin, so a later resolution has a real fingerprint to add to the
         # analog index (a caller may use evaluate_coin without capture_snapshot).
