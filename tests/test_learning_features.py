@@ -131,6 +131,28 @@ def test_bounded_metrics_stay_raw():
     assert fp.vector[last] == pytest.approx(40.0)
 
 
+def test_presence_masks_distinguish_missing_from_zero():
+    """A metric that is absent vs one observed at 0.0 must differ in the mask."""
+    extractor = FingerprintExtractor()
+    absent = extractor.extract([CoinSnapshot(age_seconds=0, price_usd=1.0)])
+    observed_zero = extractor.extract([
+        CoinSnapshot(age_seconds=0, price_usd=1.0, dev_outflow_usd=0.0)])
+    mask = FEATURE_NAMES.index("dev_outflow_present")
+    value = FEATURE_NAMES.index("dev_outflow_last")
+    # Value columns are identical (0.0 either way)...
+    assert absent.vector[value] == observed_zero.vector[value] == 0.0
+    # ...but the mask tells them apart (Rule 8 in vector form).
+    assert absent.vector[mask] == 0.0
+    assert observed_zero.vector[mask] == 1.0
+
+
+def test_presence_masks_in_layout():
+    # One mask per base metric, appended after the scalar features.
+    masks = [n for n in FEATURE_NAMES if n.endswith("_present")]
+    assert len(masks) == 13
+    assert FEATURE_DIM == len(FEATURE_NAMES)
+
+
 def test_scaler_identity_until_fitted_then_standardizes():
     extractor = FingerprintExtractor()
     vectors = np.array([

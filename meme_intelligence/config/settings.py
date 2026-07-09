@@ -1000,6 +1000,10 @@ class LightGBMSettings:
     learning_rate: float = 0.05
     num_leaves: int = 31
     min_child_samples: int = 5
+    # Rugs/pumps are rare next to flats; balanced weighting (sklearn's
+    # N / (n_classes_present * class_count) formula) stops the model from
+    # buying accuracy by always predicting the majority class.
+    balanced_class_weights: bool = True
 
     def __post_init__(self) -> None:
         for name in ("full_retrain_rounds", "warm_start_rounds", "num_leaves",

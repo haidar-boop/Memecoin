@@ -259,6 +259,10 @@ class LearningService:
 
         resolved_count = self._store.resolved_count()
         cold_factor = min(1.0, resolved_count / max(1, self._ls.cold_start_samples))
+        # A 1-2 snapshot trajectory barely has a shape yet — its fingerprint is
+        # mostly `last` values with zero slopes/volatility. Confidence scales
+        # with observed trajectory depth (Section 11, Rule 8).
+        snap_factor = min(1.0, len(snaps) / max(1, self._ls.min_snapshots_for_confidence))
 
         verdict = CoinVerdict(
             token_address=token_address,
@@ -270,7 +274,7 @@ class LearningService:
             matched_archetype=assignment.name,
             novelty_score=assignment.novelty_score,
             ensemble_weights=result.weights,
-            model_confidence=result.confidence * cold_factor,
+            model_confidence=result.confidence * cold_factor * snap_factor,
             sample_size=resolved_count,
         )
 

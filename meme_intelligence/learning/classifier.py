@@ -91,19 +91,26 @@ class OutcomeClassifier:
             "verbosity": -1,
         }
 
-    def _sample_weights(self, resolution_times: Sequence[datetime]) -> np.ndarray:
-        """Exponential time-decay weights: recent coins dominate (Section 4).
+    def _sample_weights(
+        self,
+        resolution_times: Sequence[datetime],
+        buckets: Sequence[OutcomeBucket],
+    ) -> np.ndarray:
+        """Time-decay × class-balance sample weights (Section 4).
 
-        Decay weights are only meaningful *relatively* (recent > old), but
-        LightGBM enforces an ABSOLUTE per-leaf floor (min_sum_hessian_in_leaf).
-        An all-old batch keeps tiny-but-nonzero weights whose per-leaf sums
-        fall below that floor, so every candidate split is silently suppressed
-        — the model "trains" but produces only constant trees and predicts a
-        flat prior while reporting ready, a fabricated-confidence path that
-        violates the cold-start contract (Rule 8).
+        Time decay: ``exp(-age_days / half_life)`` so recent coins dominate and
+        the model tracks a shifting meta.
 
-        Fix: mean-normalize so the average weight is 1 (total = N, the same
-        absolute scale as unweighted training) while the recency *ratios* are
+        Class balance (when enabled): rare classes (rugs, pumps) are upweighted
+        by sklearn's balanced formula ``N / (n_classes_present × class_count)``
+        so the model can't buy accuracy by always predicting the majority class.
+
+        Decay weights are only meaningful *relatively*, but LightGBM enforces an
+        ABSOLUTE per-leaf floor (min_sum_hessian_in_leaf): an all-old batch kept
+        tiny-but-nonzero weights whose per-leaf sums fell below that floor and
+        every split was silently suppressed — a fabricated-confidence path
+        (Rule 8). So the COMBINED weights are mean-normalized to average 1
+        (total = N, the same absolute scale as unweighted training); ratios are
         untouched. A batch that decays entirely to ~0 falls back to uniform.
         """
         now = self._now()
@@ -112,6 +119,19 @@ class OutcomeClassifier:
             dtype=np.float64,
         )
         weights = np.exp(-ages_days / self._half_life_days)
+        if not np.isfinite(weights.sum()) or weights.sum() <= 0.0:
+            weights = np.ones_like(weights)
+
+        if self._settings.balanced_class_weights:
+            labels = [b.value for b in buckets]
+            counts = {label: labels.count(label) for label in set(labels)}
+            n_classes = len(counts)
+            n = len(labels)
+            class_weight = {label: n / (n_classes * count)
+                            for label, count in counts.items()}
+            weights = weights * np.array([class_weight[label] for label in labels],
+                                         dtype=np.float64)
+
         total = float(weights.sum())
         if not np.isfinite(total) or total <= 0.0:
             return np.ones_like(weights)
@@ -147,7 +167,7 @@ class OutcomeClassifier:
             return False
 
         labels = np.array([_LABEL_TO_INT[b.value] for b in buckets], dtype=np.int32)
-        weights = self._sample_weights(resolution_times)
+        weights = self._sample_weights(resolution_times, buckets)
         dataset = lgb.Dataset(matrix, label=labels, weight=weights,
                               params={"min_data_in_bin": 1, "feature_pre_filter": False})
 

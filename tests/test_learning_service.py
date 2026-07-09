@@ -263,6 +263,19 @@ def test_feature_version_mismatch_discards_models_and_rebuilds(tmp_path):
     assert metrics["analog_memory_size"] == 30
 
 
+def test_short_trajectory_lowers_confidence():
+    """A 1-snapshot coin barely has a shape — confidence must scale down
+    (min_snapshots_for_confidence, Section 11)."""
+    service = _service()
+    _seed(service)
+    service.retrain_if_due()
+    full = service.evaluate_coin("conf_full", "solana", _rug_series())       # 6 snaps
+    single = service.evaluate_coin("conf_one", "solana", _rug_series()[:1])  # 1 snap
+    # Default min_snapshots_for_confidence=3 -> the 1-snapshot factor is 1/3.
+    assert single["model_confidence"] < full["model_confidence"]
+    assert single["model_confidence"] <= 1 / 3 + 1e-9
+
+
 def test_retrain_not_due_below_threshold():
     service = _service()
     service.record_detection("c1", "solana", detection_price_usd=1.0)

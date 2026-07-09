@@ -103,7 +103,8 @@ _LOG_DOMAIN_METRICS = frozenset({
 # artifact; a mismatch on load means old models live in a different feature
 # space and must be discarded and rebuilt from the stored raw snapshots
 # (LearningService handles this automatically).
-FEATURE_VERSION = 2
+# v2: USD/count metrics moved to log domain. v3: per-metric presence masks.
+FEATURE_VERSION = 3
 
 # Scalar context features appended after the per-metric summaries.
 _SCALAR_FEATURES = ("age_hours", "snapshot_count", "price_acceleration")
@@ -115,6 +116,12 @@ def _feature_names() -> tuple[str, ...]:
         for stat in _SUMMARY_STATS:
             names.append(f"{metric}_{stat}")
     names.extend(_SCALAR_FEATURES)
+    # Presence masks: 1.0 when the metric had at least one real observation,
+    # 0.0 when entirely absent. Without these, "metric missing" (filled 0.0)
+    # is indistinguishable from a genuine zero — the mask makes "unknown"
+    # representable in vector form (Rule 8), so the models can learn that
+    # data-poor coins behave differently from truly-zero ones.
+    names.extend(f"{metric}_present" for metric, _ in _BASE_METRICS)
     return tuple(names)
 
 
@@ -216,10 +223,12 @@ class FingerprintExtractor:
         ages_all = np.array([s.age_seconds for s in snaps], dtype=float)
         features: list[float] = []
         present_metrics = 0
+        presence_flags: list[float] = []
 
         for metric, accessor in _BASE_METRICS:
             pairs = [(age, accessor(s)) for age, s in zip(ages_all, snaps)]
             present = [(age, val) for age, val in pairs if val is not None]
+            presence_flags.append(1.0 if present else 0.0)
             if present:
                 present_metrics += 1
                 ages = np.array([p[0] for p in present], dtype=float)
@@ -244,6 +253,7 @@ class FingerprintExtractor:
         else:
             accel = 0.0
         features.extend([age_hours, snapshot_count, accel])
+        features.extend(presence_flags)
 
         vector = np.array(features, dtype=np.float32)
         # Non-finite guards: a stray inf/nan anywhere would poison FAISS

@@ -146,6 +146,33 @@ def test_warm_start_failure_falls_back_and_logs_accurately(monkeypatch, caplog):
     assert any("warm-start fallback" in r.message for r in caplog.records)
 
 
+def test_balanced_class_weights_equalize_class_mass():
+    """With balancing on, each class's total sample weight is ~equal even at
+    a 9:1 imbalance; with it off, weight follows raw counts."""
+    times = [NOW - timedelta(days=1)] * 100
+    buckets = [OutcomeBucket.FLAT] * 90 + [OutcomeBucket.RUG] * 10
+
+    balanced = _classifier()._sample_weights(times, buckets)
+    flat_mass = balanced[:90].sum()
+    rug_mass = balanced[90:].sum()
+    assert flat_mass == pytest.approx(rug_mass, rel=1e-9)
+    assert balanced.mean() == pytest.approx(1.0)  # hessian-floor guard intact
+
+    unbalanced_clf = OutcomeClassifier(
+        LightGBMSettings(balanced_class_weights=False),
+        half_life_days=30.0, min_train_samples=20, now_func=lambda: NOW)
+    raw = unbalanced_clf._sample_weights(times, buckets)
+    assert raw[:90].sum() == pytest.approx(9 * raw[90:].sum(), rel=1e-9)
+
+
+def test_balancing_composes_with_time_decay():
+    """Within a class, recency still wins after balancing."""
+    times = ([NOW] * 5) + ([NOW - timedelta(days=100)] * 5)
+    buckets = [OutcomeBucket.RUG] * 10
+    weights = _classifier(half_life_days=1.0)._sample_weights(times, buckets)
+    assert weights[:5].min() > weights[5:].max()
+
+
 def test_save_load_roundtrip(tmp_path):
     X = np.vstack([_blob(+2.0, 40, 1), _blob(-2.0, 40, 2)])
     buckets = [OutcomeBucket.PUMP] * 40 + [OutcomeBucket.DUMP] * 40
