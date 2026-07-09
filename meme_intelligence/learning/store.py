@@ -99,6 +99,16 @@ CREATE TABLE IF NOT EXISTS learning_metrics (
 );
 CREATE INDEX IF NOT EXISTS idx_learning_metrics_win
     ON learning_metrics(window, created_at);
+
+-- The verdict recorded at a coin's FIRST evaluation (Section 8 / Section 10):
+-- kept so that once the coin resolves, the prediction can be graded and the
+-- ensemble's per-source accuracy updated. The first prediction is the one
+-- graded (like the Part 24 backtester), so this is insert-once per coin.
+CREATE TABLE IF NOT EXISTS learning_predictions (
+    coin_id INTEGER PRIMARY KEY REFERENCES learning_coins(id),
+    created_at TEXT NOT NULL,
+    payload TEXT NOT NULL          -- JSON: distribution, source labels, archetype, ...
+);
 """
 
 
@@ -363,6 +373,37 @@ class LearningStore:
             ))
         return labels
 
+    def coin_final_bucket(self, coin_id: int) -> OutcomeBucket | None:
+        """The coin's resolved outcome bucket, or None if still unresolved."""
+        row = self._conn.execute(
+            "SELECT final_bucket FROM learning_coins WHERE id = ?", (coin_id,),
+        ).fetchone()
+        if row is None or row["final_bucket"] is None:
+            return None
+        return OutcomeBucket(row["final_bucket"])
+
+    def get_record(self, coin_id: int) -> CoinRecord | None:
+        """Full lifecycle record for one coin (resolved or not)."""
+        row = self._conn.execute(
+            """SELECT id, chain, address, symbol, name, detected_at,
+                      detection_price_usd, creator
+               FROM learning_coins WHERE id = ?""",
+            (coin_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        token = TokenIdentity(chain=row["chain"], address=row["address"],
+                              symbol=row["symbol"], name=row["name"])
+        return CoinRecord(
+            token=token,
+            detected_at=datetime.fromisoformat(row["detected_at"]),
+            detection_price_usd=row["detection_price_usd"],
+            creator=row["creator"],
+            snapshots=tuple(self.snapshots_for(coin_id)),
+            labels=tuple(self._labels_for(coin_id)),
+            rug_signals=tuple(self.rug_signals_for(coin_id)),
+        )
+
     def unresolved_coins(self) -> list[tuple[int, TokenIdentity, datetime, float | None]]:
         """Coins still awaiting outcome resolution: (id, token, detected_at, price)."""
         rows = self._conn.execute(
@@ -387,6 +428,38 @@ class LearningStore:
         )
         self._conn.commit()
         return int(cursor.lastrowid)
+
+    # ---- Prediction records (Section 8 / Section 10) ----
+
+    def record_prediction(self, coin_id: int, payload: dict) -> bool:
+        """Persist the coin's FIRST evaluation verdict; returns True if stored.
+
+        Insert-once: a re-evaluation of a coin does not overwrite the original
+        prediction, because the first call is the one graded against the
+        eventual outcome (matches the Part 24 backtester's prediction record).
+        """
+        cursor = self._conn.execute(
+            """INSERT INTO learning_predictions (coin_id, created_at, payload)
+               VALUES (?, ?, ?)
+               ON CONFLICT (coin_id) DO NOTHING""",
+            (coin_id, self._now().isoformat(), json.dumps(payload)),
+        )
+        self._conn.commit()
+        return cursor.rowcount > 0
+
+    def get_prediction(self, coin_id: int) -> dict | None:
+        row = self._conn.execute(
+            "SELECT payload FROM learning_predictions WHERE coin_id = ?", (coin_id,),
+        ).fetchone()
+        return json.loads(row["payload"]) if row else None
+
+    def update_prediction(self, coin_id: int, payload: dict) -> None:
+        """Overwrite a stored prediction payload (e.g. to mark it graded)."""
+        self._conn.execute(
+            "UPDATE learning_predictions SET payload = ? WHERE coin_id = ?",
+            (json.dumps(payload), coin_id),
+        )
+        self._conn.commit()
 
     def metrics_history(self, window: str | None = None, limit: int = 50) -> list[dict]:
         if window is None:
