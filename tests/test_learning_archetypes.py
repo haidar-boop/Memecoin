@@ -66,6 +66,16 @@ def test_too_few_samples_finds_no_archetypes():
     assert model.is_fitted is False
 
 
+def test_min_cluster_size_below_two_degrades_gracefully():
+    """min_cluster_size < 2 (invalid for HDBSCAN) must not crash fit()."""
+    rng = np.random.default_rng(2)
+    vectors = rng.normal(size=(10, 4))
+    buckets = [OutcomeBucket.FLAT] * 10
+    model = ArchetypeModel()
+    assert model.fit(vectors, buckets, min_cluster_size=1) == 0
+    assert model.is_fitted is False
+
+
 def test_save_load_roundtrip(tmp_path):
     vectors, buckets = _two_blobs()
     model = ArchetypeModel()

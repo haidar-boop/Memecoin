@@ -59,6 +59,13 @@ def test_drift_floor_range_validated():
         LearningSettings(drift_accuracy_floor=1.5)
 
 
+def test_archetype_min_cluster_size_must_be_at_least_two():
+    # HDBSCAN invariant: 1 is positive but not a valid cluster size.
+    with pytest.raises(ConfigurationError):
+        LearningSettings(archetype_min_cluster_size=1)
+    assert LearningSettings(archetype_min_cluster_size=2).archetype_min_cluster_size == 2
+
+
 def test_horizons_must_list_at_least_one():
     with pytest.raises(ConfigurationError):
         LearningSettings(horizons_hours="  ,  ")

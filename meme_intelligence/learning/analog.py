@@ -207,10 +207,18 @@ class AnalogMemory:
         weights: dict[str, float] = {label.value: 0.0 for label in OutcomeBucket.training_labels()}
         total = 0.0
         for n in neighbors:
+            # Only neighbors that resolved to a *training* label vote. A
+            # non-training-label bucket (e.g. UNRESOLVED, if one ever reaches
+            # the index via the low-level add() path) must contribute to
+            # neither the numerator nor the denominator — otherwise it would
+            # silently under-normalize the distribution while leaving
+            # abstained=False, a fabricated-confidence result (Rule 8). If no
+            # neighbor carries a valid outcome, total stays 0 and we abstain.
+            if n.resolved_as.value not in weights:
+                continue
             decay = float(np.exp(-n.age_days / half_life_days))
             weight = n.similarity * decay
-            if n.resolved_as.value in weights:
-                weights[n.resolved_as.value] += weight
+            weights[n.resolved_as.value] += weight
             total += weight
 
         if total <= 0.0:

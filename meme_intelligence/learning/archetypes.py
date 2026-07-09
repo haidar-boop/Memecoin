@@ -112,6 +112,14 @@ class ArchetypeModel:
                               matrix.shape[0], min_cluster_size)
             self._reset()
             return 0
+        # HDBSCAN mandates min_cluster_size >= 2. Config validation already
+        # enforces this, but fit() takes the value as a parameter, so guard
+        # defensively and degrade gracefully (as the docstring promises)
+        # rather than letting HDBSCAN raise.
+        if min_cluster_size < 2:
+            self._logger.info("archetype fit skipped: min_cluster_size %d < 2", min_cluster_size)
+            self._reset()
+            return 0
 
         clusterer = hdbscan.HDBSCAN(min_cluster_size=int(min_cluster_size),
                                     metric="euclidean")

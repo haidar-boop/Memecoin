@@ -118,6 +118,32 @@ def test_build_from_records_skips_unresolved():
     assert mem.size == 1
 
 
+def test_non_training_label_neighbor_does_not_inflate_denominator():
+    """A non-training-label (UNRESOLVED) analog must not under-normalize the
+    distribution or fake confidence (Rule 8) — it is simply ignored."""
+    mem = AnalogMemory(now_func=lambda: NOW)
+    base = _vec(3)
+    mem.add(_entry("pump", OutcomeBucket.PUMP, 1.0), base)
+    for i in range(5):
+        mem.add(AnalogEntry(address=f"u{i}", chain="solana",
+                            bucket=OutcomeBucket.UNRESOLVED, resolved_at=NOW), _vec(20 + i))
+    vote = mem.forecast(base, k=10, half_life_days=30.0, min_neighbors=3)
+    assert vote.abstained is False
+    # Distribution renormalizes over the single valid PUMP neighbor.
+    assert vote.distribution["pump"] == pytest.approx(1.0)
+    assert sum(vote.distribution.values()) == pytest.approx(1.0)
+
+
+def test_all_non_training_label_neighbors_abstain():
+    mem = AnalogMemory(now_func=lambda: NOW)
+    for i in range(6):
+        mem.add(AnalogEntry(address=f"u{i}", chain="solana",
+                            bucket=OutcomeBucket.UNRESOLVED, resolved_at=NOW), _vec(i + 1))
+    vote = mem.forecast(_vec(1), k=10, half_life_days=30.0, min_neighbors=5)
+    assert vote.abstained is True
+    assert vote.distribution["pump"] == pytest.approx(0.25)
+
+
 def test_save_and_load_roundtrip(tmp_path):
     mem = AnalogMemory(now_func=lambda: NOW)
     target = _vec(1)

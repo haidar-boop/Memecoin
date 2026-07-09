@@ -938,7 +938,7 @@ class LearningSettings:
         if self.dump_return_percent >= self.pump_return_percent:
             raise ConfigurationError(
                 "learning: dump_return_percent must be below pump_return_percent")
-        for name in ("knn_neighbors", "min_analog_neighbors", "archetype_min_cluster_size",
+        for name in ("knn_neighbors", "min_analog_neighbors",
                      "retrain_every_n", "min_train_samples", "accuracy_window",
                      "scaler_refit_every_n", "fast_snapshot_seconds", "fast_window_minutes",
                      "slow_snapshot_minutes", "min_snapshots_for_confidence",
@@ -946,6 +946,12 @@ class LearningSettings:
             value = getattr(self, name)
             if value <= 0:
                 raise ConfigurationError(f"learning setting '{name}' must be positive, got {value}")
+        # HDBSCAN requires min_cluster_size >= 2; 1 is not a meaningful cluster
+        # size and would crash the archetype pass, so reject it at config time.
+        if self.archetype_min_cluster_size < 2:
+            raise ConfigurationError(
+                "learning archetype_min_cluster_size must be >= 2, got "
+                f"{self.archetype_min_cluster_size}")
         for name in ("recency_half_life_days", "model_half_life_days", "capture_until_hours"):
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
