@@ -117,6 +117,21 @@ async def test_low_ai_confidence_vetoes_strong_candidate():
                for r in types["early_opportunity"].reasons)
 
 
+async def test_inconclusive_ai_verification_vetoes_strong_candidate():
+    """Bug-hunt regression: a judgment DISCARDED below the confidence floor
+    left ai_judgment None, so a 15/100 judgment fired HIGH while 22/100
+    vetoed — inverted protection. The scanner now reports 'verification ran
+    but was inconclusive' and the rules treat it as unconfirmed."""
+    result = await pipeline_result()
+    events = make_rules().evaluate(result, ai_verification_inconclusive=True)
+    types = {e.alert_type: e for e in events}
+    assert "strong_candidate" not in types
+    assert any("no usable judgment" in r for r in types["early_opportunity"].reasons)
+    # Default (verification never ran, e.g. no API key) is unchanged: HIGH fires.
+    default_events = make_rules().evaluate(result)
+    assert "strong_candidate" in {e.alert_type for e in default_events}
+
+
 async def test_confident_ai_keeps_strong_candidate_high():
     import dataclasses
     from types import SimpleNamespace

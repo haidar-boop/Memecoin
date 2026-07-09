@@ -362,13 +362,20 @@ class LearningService:
             return
 
         # Instant learning: append the resolved fingerprint to the analog index.
+        # A coin with no real observations extracts a zero vector; inserting it
+        # would pollute the index with a meaningless "analog" that still counts
+        # toward the min-neighbors gate (Rule 8 — no data is not a data point).
         fingerprint = self._extractor.extract(record.snapshots)
-        scaled = self._scaler.transform(fingerprint.vector)
-        self._analog.add(
-            AnalogEntry(address=record.token.address, chain=record.token.chain,
-                        bucket=bucket, resolved_at=_resolution_time(record)),
-            scaled,
-        )
+        if fingerprint.coverage > 0.0:
+            scaled = self._scaler.transform(fingerprint.vector)
+            self._analog.add(
+                AnalogEntry(address=record.token.address, chain=record.token.chain,
+                            bucket=bucket, resolved_at=_resolution_time(record)),
+                scaled,
+            )
+        else:
+            self._logger.info("analog insert skipped for %s: empty trajectory",
+                              record.token.address)
 
         # Grow the deployer blacklist on confirmed rugs (Section 5a / Section 7).
         if bucket is OutcomeBucket.RUG and record.creator:

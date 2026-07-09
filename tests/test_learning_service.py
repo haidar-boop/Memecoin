@@ -285,6 +285,17 @@ def test_evaluate_only_coin_persists_creator_for_blacklist():
     assert service.store.deployer_rug_count("devZ", "solana") == 1
 
 
+def test_empty_trajectory_resolution_does_not_pollute_analog_index():
+    """Bug-hunt regression: a coin resolved with zero snapshots extracted a
+    zero-vector fingerprint that entered the analog index as a meaningless
+    'analog' counting toward the min-neighbors gate."""
+    service = _service()
+    service.record_detection("ghost", "solana", detection_price_usd=1.0)
+    service.resolve_outcome("ghost", "solana", 24.0, -90.0, is_rug=True)
+    assert service.store.resolved_count() == 1  # labeled and graded...
+    assert service.get_learning_metrics(persist=False)["analog_memory_size"] == 0
+
+
 def test_retrain_not_due_below_threshold():
     service = _service()
     service.record_detection("c1", "solana", detection_price_usd=1.0)

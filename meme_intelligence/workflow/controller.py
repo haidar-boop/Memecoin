@@ -184,8 +184,12 @@ class ContinuousScanner:
         # without this, a persistent gate-passer got re-judged with a
         # fresh paid Claude call on EVERY watchlist recheck (Part 15
         # Section 2 cadence) forever, even while its alert sat
-        # cooldown-suppressed and unseen (bug-hunt finding).
-        self._ai_verified: set[tuple[str, str]] = set()
+        # cooldown-suppressed and unseen (bug-hunt finding). The value
+        # remembers whether that one verification was INCONCLUSIVE (judgment
+        # discarded below the confidence floor / call failed) so the
+        # strong-candidate veto holds on later rechecks too — otherwise a
+        # token whose judgment was thrown away fired HIGH one cycle later.
+        self._ai_verified: dict[tuple[str, str], bool] = {}
         # Self-learning mind layer (Section 10): additive and off by default.
         # Like the metered layers, the settings flag is authoritative — a
         # wired service with the flag off stays out of the loop (Rule 10/11).
@@ -385,6 +389,7 @@ class ContinuousScanner:
         # the alert fires annotated; if it knocks the score below a gate,
         # the high-priority alert simply never fires (Rule 13 logs why).
         verify_key = (token.chain, token.address.lower())
+        ai_inconclusive = self._ai_verified.get(verify_key, False)
         if (self._ai_verifier is not None and not result.security.is_destructive
                 and verify_key not in self._ai_verified):
             provisional = self._rules.evaluate(result, previous_score=previous_score)
@@ -394,7 +399,12 @@ class ContinuousScanner:
                                   token.address)
                 enriched = await self._pipeline.enrich_with_ai(
                     result, service=self._ai_verifier)
-                self._ai_verified.add(verify_key)
+                # No judgment attached means the verification produced nothing
+                # usable (discarded below the confidence floor, or the call
+                # failed) — recorded so the alert rules treat it as
+                # unconfirmed rather than as if AI never looked (Rule 8).
+                ai_inconclusive = enriched.ai_judgment is None
+                self._ai_verified[verify_key] = ai_inconclusive
                 if (enriched is not result
                         and enriched.master.final_score < result.master.final_score):
                     self._logger.info(
@@ -441,7 +451,8 @@ class ContinuousScanner:
                 )
                 self._storage.archive(token, reason)
 
-        events = self._rules.evaluate(result, previous_score=previous_score)
+        events = self._rules.evaluate(result, previous_score=previous_score,
+                                      ai_verification_inconclusive=ai_inconclusive)
         if result.ai_judgment is not None:
             events = [self._annotate_with_ai(event, result.ai_judgment)
                       for event in events]

@@ -87,7 +87,14 @@ class AutomationRules:
         result: PipelineResult,
         *,
         previous_score: float | None = None,
+        ai_verification_inconclusive: bool = False,
     ) -> list[AlertEvent]:
+        """``ai_verification_inconclusive`` — the caller ran AI verification
+        but no usable judgment came back (discarded below the confidence
+        floor, or the call failed). Without this flag a judgment of 15/100
+        vanished entirely and fired the HIGH tier, while 22/100 attached and
+        vetoed it — inverted protection. The scanner is the only caller that
+        knows verification ran, so it must say so."""
         # A dead token is a closed case (Part 29 Section 1 — alerts protect
         # decisions, and no entry/exit decision remains once liquidity has
         # collapsed): one MEDIUM post-mortem replaces the warning/drop pair,
@@ -103,7 +110,8 @@ class AutomationRules:
 
         events: list[AlertEvent] = []
         events.extend(self._emergency_rule(result))
-        opportunity = self._opportunity_rule(result)
+        opportunity = self._opportunity_rule(
+            result, ai_verification_inconclusive=ai_verification_inconclusive)
         if opportunity is not None:
             events.append(opportunity)
         momentum = self._momentum_rule(result)
@@ -181,7 +189,8 @@ class AutomationRules:
         return events
 
     # IF gates pass THEN move to high-priority watchlist (Parts 2/13).
-    def _opportunity_rule(self, result: PipelineResult) -> AlertEvent | None:
+    def _opportunity_rule(self, result: PipelineResult, *,
+                          ai_verification_inconclusive: bool = False) -> AlertEvent | None:
         if result.security.is_destructive:
             return None
 
@@ -227,7 +236,8 @@ class AutomationRules:
         caveats: list[str] = []
         if (set(unverified) <= _STRONG_CANDIDATE_ALLOWED_UNVERIFIED
                 and overall_score >= self._t.strong_candidate_overall):
-            caveats = self._strong_candidate_caveats(result)
+            caveats = self._strong_candidate_caveats(
+                result, ai_verification_inconclusive=ai_verification_inconclusive)
             if not caveats:
                 return AlertEvent(
                     priority=AlertPriority.HIGH,
@@ -260,7 +270,8 @@ class AutomationRules:
                              for name in unverified),
         )
 
-    def _strong_candidate_caveats(self, result: PipelineResult) -> list[str]:
+    def _strong_candidate_caveats(self, result: PipelineResult, *,
+                                  ai_verification_inconclusive: bool = False) -> list[str]:
         """Vetoes keeping a gate-passing fresh launch out of the HIGH tier.
 
         Two live failure modes both produced HIGH alerts on junk: the
@@ -286,6 +297,13 @@ class AutomationRules:
                 f"AI verification confidence {judgment.confidence:.0f}/100 is below "
                 f"the strong-candidate floor "
                 f"({self._t.strong_candidate_min_ai_confidence:.0f})")
+        elif ai_verification_inconclusive:
+            # Verification ran but no usable judgment survived (discarded
+            # below the confidence floor, or the call failed). That is even
+            # LESS confirmation than a lukewarm judgment — without this, a
+            # 15/100 judgment vanished and fired HIGH while 22/100 vetoed.
+            caveats.append("AI verification ran but produced no usable judgment "
+                           "— treated as unconfirmed, not as a pass (Rule 8)")
         return caveats
 
     # IF momentum accelerates through the gate in a sane entry zone THEN
