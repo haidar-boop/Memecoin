@@ -92,18 +92,30 @@ class OutcomeClassifier:
         }
 
     def _sample_weights(self, resolution_times: Sequence[datetime]) -> np.ndarray:
-        """Exponential time-decay weights: recent coins dominate (Section 4)."""
+        """Exponential time-decay weights: recent coins dominate (Section 4).
+
+        Decay weights are only meaningful *relatively* (recent > old), but
+        LightGBM enforces an ABSOLUTE per-leaf floor (min_sum_hessian_in_leaf).
+        An all-old batch keeps tiny-but-nonzero weights whose per-leaf sums
+        fall below that floor, so every candidate split is silently suppressed
+        — the model "trains" but produces only constant trees and predicts a
+        flat prior while reporting ready, a fabricated-confidence path that
+        violates the cold-start contract (Rule 8).
+
+        Fix: mean-normalize so the average weight is 1 (total = N, the same
+        absolute scale as unweighted training) while the recency *ratios* are
+        untouched. A batch that decays entirely to ~0 falls back to uniform.
+        """
         now = self._now()
         ages_days = np.array(
             [max(0.0, (now - t).total_seconds() / 86400.0) for t in resolution_times],
             dtype=np.float64,
         )
         weights = np.exp(-ages_days / self._half_life_days)
-        # Guard against a fully-decayed batch summing to ~0 (all ancient):
-        # fall back to uniform so training still has signal (Rule 6).
-        if not np.any(weights > 0.0):
-            weights = np.ones_like(weights)
-        return weights
+        total = float(weights.sum())
+        if not np.isfinite(total) or total <= 0.0:
+            return np.ones_like(weights)
+        return weights * (weights.size / total)
 
     def fit(
         self,
@@ -142,6 +154,9 @@ class OutcomeClassifier:
         init_model = self._booster if (warm_start and self._booster is not None) else None
         rounds = (self._settings.warm_start_rounds if init_model is not None
                   else self._settings.full_retrain_rounds)
+        # Track the path actually taken so the log reflects reality even when a
+        # warm-start falls back to a from-scratch retrain (Rule 13).
+        mode = "warm-start" if init_model is not None else "full"
         try:
             self._booster = lgb.train(
                 self._params(), dataset, num_boost_round=rounds,
@@ -152,6 +167,7 @@ class OutcomeClassifier:
                 self._logger.error("classifier training failed: %s", exc)
                 raise
             self._logger.warning("warm-start failed (%s); retraining from scratch", exc)
+            mode = "full (warm-start fallback)"
             self._booster = lgb.train(
                 self._params(), dataset,
                 num_boost_round=self._settings.full_retrain_rounds,
@@ -159,8 +175,7 @@ class OutcomeClassifier:
             )
         self._trained_samples = n
         self._logger.info("classifier trained on %d samples (%s, %d trees)",
-                          n, "warm-start" if init_model is not None else "full",
-                          self.tree_count)
+                          n, mode, self.tree_count)
         return True
 
     def predict_proba(self, fingerprint: np.ndarray) -> dict[str, float] | None:

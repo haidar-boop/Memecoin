@@ -84,6 +84,68 @@ def test_warm_start_adds_trees_and_still_predicts():
     assert max(proba, key=proba.get) == "pump"
 
 
+def test_all_old_batch_still_learns_not_flat_prior():
+    """Regression: an all-old resolved batch must still train a real model.
+
+    Raw decay weights collapse below LightGBM's per-leaf hessian floor and
+    produce a flat feature-independent prior; mean-normalized weights fix it
+    (Rule 8 — never fabricate a confident-looking uniform distribution)."""
+    pump = _blob(+2.0, 60, 1)
+    dump = _blob(-2.0, 60, 2)
+    X = np.vstack([pump, dump])
+    buckets = [OutcomeBucket.PUMP] * 60 + [OutcomeBucket.DUMP] * 60
+    # Every coin resolved ~1 year ago, default half-life 30d -> tiny raw weights.
+    times = [NOW - timedelta(days=365)] * 120
+    clf = _classifier(half_life_days=30.0)
+    assert clf.fit(X, buckets, times) is True
+    pump_proba = clf.predict_proba(_blob(+2.0, 1, 91)[0])
+    dump_proba = clf.predict_proba(_blob(-2.0, 1, 92)[0])
+    # A real (non-flat) model separates the two regions.
+    assert pump_proba["pump"] > 0.7
+    assert dump_proba["dump"] > 0.7
+    assert max(pump_proba, key=pump_proba.get) == "pump"
+
+
+def test_short_halflife_moderately_old_batch_learns():
+    """Short half-life with moderately-old coins must not collapse training."""
+    X = np.vstack([_blob(+2.0, 50, 1), _blob(-2.0, 50, 2)])
+    buckets = [OutcomeBucket.PUMP] * 50 + [OutcomeBucket.DUMP] * 50
+    times = [NOW - timedelta(days=11)] * 100
+    clf = _classifier(half_life_days=1.0)
+    assert clf.fit(X, buckets, times) is True
+    proba = clf.predict_proba(_blob(+2.0, 1, 5)[0])
+    assert max(proba, key=proba.get) == "pump"
+
+
+def test_warm_start_failure_falls_back_and_logs_accurately(monkeypatch, caplog):
+    """A failed warm-start must retrain from scratch and log the real path."""
+    import lightgbm as lgb
+
+    X = np.vstack([_blob(+2.0, 40, 1), _blob(-2.0, 40, 2)])
+    buckets = [OutcomeBucket.PUMP] * 40 + [OutcomeBucket.DUMP] * 40
+    times = [NOW - timedelta(days=1)] * 80
+    clf = _classifier()
+    clf.fit(X, buckets, times, warm_start=False)  # establishes a base model
+
+    real_train = lgb.train
+    calls = {"n": 0}
+
+    def flaky_train(*args, **kwargs):
+        # Fail only the warm-start attempt (init_model set); allow the fallback.
+        if kwargs.get("init_model") is not None:
+            calls["n"] += 1
+            raise RuntimeError("incompatible init_model")
+        return real_train(*args, **kwargs)
+
+    monkeypatch.setattr(lgb, "train", flaky_train)
+    with caplog.at_level("INFO"):
+        assert clf.fit(X, buckets, times, warm_start=True) is True
+    assert calls["n"] == 1
+    assert clf.is_ready is True
+    assert any("warm-start failed" in r.message for r in caplog.records)
+    assert any("warm-start fallback" in r.message for r in caplog.records)
+
+
 def test_save_load_roundtrip(tmp_path):
     X = np.vstack([_blob(+2.0, 40, 1), _blob(-2.0, 40, 2)])
     buckets = [OutcomeBucket.PUMP] * 40 + [OutcomeBucket.DUMP] * 40
