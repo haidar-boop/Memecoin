@@ -21,6 +21,7 @@ See ``.env.example`` at the repository root for the full list of variables.
 from __future__ import annotations
 
 import dataclasses
+import math
 import os
 from dataclasses import dataclass, field
 from typing import Any, Mapping
@@ -38,7 +39,10 @@ def _check_range(name: str, value: float, low: float, high: float) -> None:
 
 def _check_weight_sum(group: str, values: Mapping[str, float]) -> None:
     total = sum(values.values())
-    if abs(total - 1.0) > _WEIGHT_SUM_TOLERANCE:
+    # A NaN weight makes `abs(nan - 1.0) > tolerance` False (NaN comparisons
+    # are always False), silently passing an invalid config — check
+    # finiteness explicitly rather than relying on the comparison to catch it.
+    if not math.isfinite(total) or abs(total - 1.0) > _WEIGHT_SUM_TOLERANCE:
         detail = ", ".join(f"{k}={v}" for k, v in values.items())
         raise ConfigurationError(f"{group} weights must sum to 1.0, got {total} ({detail})")
 
@@ -169,7 +173,7 @@ class ScanIntervals:
 
     def __post_init__(self) -> None:
         for name, value in dataclasses.asdict(self).items():
-            if value <= 0:
+            if not math.isfinite(value) or value <= 0:
                 raise ConfigurationError(f"scan interval '{name}' must be positive, got {value}")
 
 
@@ -185,10 +189,23 @@ class HttpSettings:
     cache_max_entries: int = 2048
 
     def __post_init__(self) -> None:
-        if self.timeout_seconds <= 0:
+        if not math.isfinite(self.timeout_seconds) or self.timeout_seconds <= 0:
             raise ConfigurationError(f"timeout_seconds must be positive, got {self.timeout_seconds}")
         if self.retry_attempts < 1:
             raise ConfigurationError(f"retry_attempts must be >= 1, got {self.retry_attempts}")
+        # Previously unvalidated: a bad cache_ttl_seconds/cache_max_entries
+        # value reached TTLCache's constructor and raised a raw ValueError
+        # far from the setting that caused it; negative retry delays
+        # silently disabled backoff instead of erroring (Rule 6).
+        for name in ("retry_base_delay", "retry_max_delay", "cache_ttl_seconds"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value <= 0:
+                raise ConfigurationError(f"http setting '{name}' must be positive, got {value}")
+        if self.cache_max_entries < 1:
+            raise ConfigurationError(
+                f"cache_max_entries must be >= 1, got {self.cache_max_entries}")
+        if self.retry_max_delay < self.retry_base_delay:
+            raise ConfigurationError("retry_max_delay must be >= retry_base_delay")
 
 
 @dataclass(frozen=True)
@@ -221,10 +238,14 @@ class ProviderSettings:
     def __post_init__(self) -> None:
         for name in ("dexscreener", "geckoterminal", "goplus", "coingecko",
                      "helius", "birdeye", "pumpfun"):
-            if getattr(self, f"{name}_requests_per_minute") <= 0:
+            value = getattr(self, f"{name}_requests_per_minute")
+            if not math.isfinite(value) or value <= 0:
                 raise ConfigurationError(f"{name}_requests_per_minute must be positive")
         if self.failure_threshold < 1:
             raise ConfigurationError("failure_threshold must be >= 1")
+        if not math.isfinite(self.cooldown_seconds) or self.cooldown_seconds <= 0:
+            raise ConfigurationError(
+                f"cooldown_seconds must be positive, got {self.cooldown_seconds}")
 
 
 @dataclass(frozen=True)
@@ -244,7 +265,7 @@ class DiscoverySettings:
 
     def __post_init__(self) -> None:
         for name, value in dataclasses.asdict(self).items():
-            if value <= 0:
+            if not math.isfinite(value) or value <= 0:
                 raise ConfigurationError(f"discovery setting '{name}' must be positive, got {value}")
         if self.target_liquidity_usd < self.min_liquidity_usd:
             raise ConfigurationError("target_liquidity_usd must be >= min_liquidity_usd")
@@ -288,7 +309,8 @@ class PumpFunSettings:
                      "recheck_interval_seconds", "max_rechecks_per_cycle",
                      "min_market_cap_growth_ratio", "min_usd_market_cap",
                      "min_reply_count", "max_last_trade_age_minutes"):
-            if getattr(self, name) <= 0:
+            value = getattr(self, name)
+            if not math.isfinite(value) or value <= 0:
                 raise ConfigurationError(f"pumpfun setting '{name}' must be positive")
         if self.max_creator_buy_percent > 100.0:
             raise ConfigurationError("max_creator_buy_percent must be within (0, 100]")
@@ -320,7 +342,7 @@ class SecurityThresholds:
 
     def __post_init__(self) -> None:
         for name, value in dataclasses.asdict(self).items():
-            if value <= 0:
+            if not math.isfinite(value) or value <= 0:
                 raise ConfigurationError(f"security threshold '{name}' must be positive, got {value}")
         if self.extreme_tax_percent < self.max_tax_percent:
             raise ConfigurationError("extreme_tax_percent must be >= max_tax_percent")
@@ -374,7 +396,7 @@ class TokenThresholds:
 
     def __post_init__(self) -> None:
         for name, value in dataclasses.asdict(self).items():
-            if value <= 0:
+            if not math.isfinite(value) or value <= 0:
                 raise ConfigurationError(f"token threshold '{name}' must be positive, got {value}")
         if self.early_stage_mcap_usd >= self.mature_stage_mcap_usd:
             raise ConfigurationError("early_stage_mcap_usd must be below mature_stage_mcap_usd")
@@ -403,7 +425,7 @@ class TradingSettings:
 
     def __post_init__(self) -> None:
         for name, value in dataclasses.asdict(self).items():
-            if value <= 0:
+            if not math.isfinite(value) or value <= 0:
                 raise ConfigurationError(f"trading setting '{name}' must be positive, got {value}")
         if self.medium_conviction_min_score >= self.high_conviction_min_score:
             raise ConfigurationError("medium_conviction_min_score must be below high_conviction_min_score")
@@ -441,7 +463,8 @@ class AISettings:
         if self.effort not in ("low", "medium", "high", "xhigh", "max"):
             raise ConfigurationError(f"ai effort must be a valid level, got {self.effort!r}")
         for name in ("max_tokens", "requests_per_minute", "timeout_seconds"):
-            if getattr(self, name) <= 0:
+            value = getattr(self, name)
+            if not math.isfinite(value) or value <= 0:
                 raise ConfigurationError(f"ai setting '{name}' must be positive")
         _check_range("ai min_confidence", self.min_confidence, 0.0, 100.0)
 
@@ -477,7 +500,8 @@ class BacktestSettings:
             parsed = [float(w) for w in windows]
         except ValueError as exc:
             raise ConfigurationError(f"invalid backtest window: {exc}") from exc
-        if any(w <= 0 for w in parsed) or parsed != sorted(parsed):
+        if (any(not math.isfinite(w) or w <= 0 for w in parsed)
+                or parsed != sorted(parsed)):
             raise ConfigurationError("backtest windows must be positive and ascending")
         if not (0 < self.window_tolerance_fraction < 1):
             raise ConfigurationError("window_tolerance_fraction must be within (0, 1)")
@@ -489,7 +513,8 @@ class BacktestSettings:
             raise ConfigurationError("signal_low_score must be below signal_high_score")
         for name in ("survival_min_liquidity_usd", "alert_useful_drift_points",
                      "min_predictions_for_weights"):
-            if getattr(self, name) <= 0:
+            value = getattr(self, name)
+            if not math.isfinite(value) or value <= 0:
                 raise ConfigurationError(f"backtest setting '{name}' must be positive")
 
     @property
@@ -532,7 +557,8 @@ class WorkflowSettings:
         for name in ("top_candidates", "watchlist_review_limit",
                      "risk_on_btc_change_percent", "risk_off_btc_drop_percent",
                      "monitor_interval_seconds", "watchlist_recheck_cycles"):
-            if getattr(self, name) <= 0:
+            value = getattr(self, name)
+            if not math.isfinite(value) or value <= 0:
                 raise ConfigurationError(f"workflow setting '{name}' must be positive")
 
     @property
@@ -576,11 +602,17 @@ class WalletIntelSettings:
     def __post_init__(self) -> None:
         for name in ("whale_min_percent", "risk_whale_percent", "top_holders_limit",
                      "recent_trades_limit", "target_accumulating_wallets"):
-            if getattr(self, name) <= 0:
+            value = getattr(self, name)
+            if not math.isfinite(value) or value <= 0:
                 raise ConfigurationError(f"wallet setting '{name}' must be positive")
         for name in ("artificial_same_size_fraction", "dominant_buyer_volume_fraction"):
             if not (0 < getattr(self, name) <= 1):
                 raise ConfigurationError(f"wallet setting '{name}' must be within (0, 1]")
+        if (not math.isfinite(self.min_buy_volume_for_dominance_usd)
+                or self.min_buy_volume_for_dominance_usd <= 0):
+            raise ConfigurationError(
+                "wallet setting 'min_buy_volume_for_dominance_usd' must be positive, "
+                f"got {self.min_buy_volume_for_dominance_usd}")
 
 
 @dataclass(frozen=True)
@@ -610,7 +642,7 @@ class MomentumThresholds:
 
     def __post_init__(self) -> None:
         for name, value in dataclasses.asdict(self).items():
-            if value <= 0:
+            if not math.isfinite(value) or value <= 0:
                 raise ConfigurationError(f"momentum threshold '{name}' must be positive, got {value}")
         if self.volume_fade_ratio >= self.volume_acceleration_ratio:
             raise ConfigurationError("volume_fade_ratio must be below volume_acceleration_ratio")
@@ -631,7 +663,7 @@ class AlertEngineSettings:
 
     def __post_init__(self) -> None:
         for name, value in dataclasses.asdict(self).items():
-            if value <= 0:
+            if not math.isfinite(value) or value <= 0:
                 raise ConfigurationError(f"alert setting '{name}' must be positive, got {value}")
 
 
@@ -657,6 +689,9 @@ class AlertDeliverySettings:
         if self.external_min_priority not in ("critical", "high", "medium", "low"):
             raise ConfigurationError(
                 f"external_min_priority must be a valid priority, got {self.external_min_priority!r}")
+        if not math.isfinite(self.requests_per_minute) or self.requests_per_minute <= 0:
+            raise ConfigurationError(
+                f"requests_per_minute must be positive, got {self.requests_per_minute}")
         if self.requests_per_minute <= 0:
             raise ConfigurationError("alert delivery requests_per_minute must be positive")
 
@@ -695,7 +730,7 @@ class RiskSettings:
 
     def __post_init__(self) -> None:
         for name, value in dataclasses.asdict(self).items():
-            if value <= 0:
+            if not math.isfinite(value) or value <= 0:
                 raise ConfigurationError(f"risk setting '{name}' must be positive, got {value}")
         if self.reduced_daily_loss_percent >= self.defensive_daily_loss_percent:
             raise ConfigurationError("reduced_daily_loss_percent must be below defensive_daily_loss_percent")
@@ -724,7 +759,7 @@ class CommunityThresholds:
 
     def __post_init__(self) -> None:
         for name, value in dataclasses.asdict(self).items():
-            if value <= 0:
+            if not math.isfinite(value) or value <= 0:
                 raise ConfigurationError(f"community threshold '{name}' must be positive, got {value}")
 
 
@@ -793,7 +828,7 @@ class OnChainThresholds:
 
     def __post_init__(self) -> None:
         for name, value in dataclasses.asdict(self).items():
-            if value <= 0:
+            if not math.isfinite(value) or value <= 0:
                 raise ConfigurationError(f"on-chain threshold '{name}' must be positive, got {value}")
         if self.wash_trades_per_trader <= self.healthy_trades_per_trader:
             raise ConfigurationError("wash_trades_per_trader must exceed healthy_trades_per_trader")
@@ -908,7 +943,17 @@ def _convert(raw: str, default: Any, key: str) -> Any:
     """Convert an env string to the type of the field's default value."""
     try:
         if isinstance(default, bool):  # bool is a subclass of int; check first
-            return raw.strip().lower() in ("1", "true", "yes", "on")
+            normalized = raw.strip().lower()
+            if normalized in ("1", "true", "yes", "on"):
+                return True
+            if normalized in ("0", "false", "no", "off"):
+                return False
+            # An unrecognized string silently became False before this fix —
+            # a typo like "MEMEINTEL_AI_ENABLE_IN_MONITOR=treu" would quietly
+            # disable a feature the user meant to enable (Rule 6/13: fail
+            # loudly, don't guess). Numeric fields already raise on garbage;
+            # booleans should too.
+            raise ValueError(f"expected a boolean (true/false/yes/no/1/0/on/off), got {raw!r}")
         if isinstance(default, int):
             return int(raw)
         if isinstance(default, float):

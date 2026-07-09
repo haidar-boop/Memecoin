@@ -235,6 +235,19 @@ async def test_coin_state_missing_fields_stay_none(monkeypatch):
     assert state.curve_progress_percent is None
 
 
+async def test_malformed_timestamps_do_not_crash_coin_state(monkeypatch):
+    """Bug-hunt: OverflowError/ValueError from an out-of-range/NaN/Infinity
+    timestamp escaped _from_ms_timestamp and killed the whole scanner."""
+    client = make_frontend_client()
+    for bad in (1e30, float("nan"), float("inf"), 1e17, "1e30", "nan"):
+        payload = dict(COIN_PAYLOAD, created_timestamp=bad, last_trade_timestamp=bad)
+        patch_frontend(monkeypatch, client, payload=payload)
+        state = await client.get_coin_state(TOKEN)
+        assert state is not None  # must not raise
+        assert state.created_at is None
+        assert state.last_trade_at is None
+
+
 async def test_unknown_coin_404_returns_none(monkeypatch):
     client = make_frontend_client()
     patch_frontend(monkeypatch, client,

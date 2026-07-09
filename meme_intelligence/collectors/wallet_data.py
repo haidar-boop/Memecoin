@@ -17,6 +17,7 @@ wallet layer only runs on demand (Rule 10/11).
 
 from __future__ import annotations
 
+import math
 from datetime import datetime, timezone
 from typing import Any
 
@@ -46,11 +47,22 @@ def _to_float(value: Any) -> float | None:
         return None
 
 
+def _to_int(value: Any) -> int | None:
+    """Parse a count field that providers sometimes send as a decimal
+    string (e.g. "1234.0") — int() rejects those directly, so go through
+    float first."""
+    parsed = _to_float(value)
+    return int(parsed) if parsed is not None else None
+
+
 def _from_unix(value: Any) -> datetime | None:
     ts = _to_float(value)
-    if ts is None or ts <= 0:
+    if ts is None or not math.isfinite(ts) or ts <= 0:
         return None
-    return datetime.fromtimestamp(ts, tz=timezone.utc)
+    try:
+        return datetime.fromtimestamp(ts, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 class HeliusClient(BaseCollector):
@@ -62,6 +74,11 @@ class HeliusClient(BaseCollector):
             raise ValueError("HeliusClient requires an API key")
         kwargs.setdefault("name", "helius")
         kwargs.setdefault("base_url", rpc_url)
+        # The key is embedded directly in the RPC request path (Helius has
+        # no header-auth option), so it must be scrubbed from any raised
+        # error message the same way Telegram/Discord credentials are
+        # (Rule 16) — otherwise a timeout/429/5xx logs it in plaintext.
+        kwargs.setdefault("redact", (api_key,))
         super().__init__(**kwargs)
         self._api_key = api_key
         self._api_url = api_url.rstrip("/")
@@ -187,9 +204,8 @@ class BirdeyeClient(BaseCollector):
             cache_key=f"birdeye:overview:{mint}", cache_ttl=120.0,
         )
         return {
-            "holder_count": int(data["holder"]) if _to_float(data.get("holder")) is not None else None,
-            "unique_wallets_24h": (int(data["uniqueWallet24h"])
-                                   if _to_float(data.get("uniqueWallet24h")) is not None else None),
+            "holder_count": _to_int(data.get("holder")),
+            "unique_wallets_24h": _to_int(data.get("uniqueWallet24h")),
         }
 
     async def get_recent_trades(self, mint: str, limit: int = 50) -> list[TokenTrade]:

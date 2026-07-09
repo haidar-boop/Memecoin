@@ -142,6 +142,29 @@ async def test_birdeye_overview_parsed(monkeypatch):
     assert overview == {"holder_count": 12345, "unique_wallets_24h": 678}
 
 
+async def test_birdeye_overview_accepts_decimal_string_holder_counts(monkeypatch):
+    """Bug-hunt: int("1234.0") raises ValueError; providers sometimes send
+    counts as decimal strings."""
+    client = make_birdeye()
+
+    async def fake_get_json(path, params=None, *, cache_key=None, cache_ttl=None,
+                            headers=None, json_body=None):
+        return {"success": True, "data": {"holder": "1234.0", "uniqueWallet24h": "56.0"}}
+
+    monkeypatch.setattr(client, "_get_json", fake_get_json)
+    overview = await client.get_token_overview(MINT)
+    assert overview == {"holder_count": 1234, "unique_wallets_24h": 56}
+
+
+async def test_helius_key_redacted_from_error_messages():
+    """Bug-hunt: the RPC path embeds the key directly (no header auth
+    option); a timeout/429/5xx must not leak it in plaintext (Rule 16)."""
+    client = HeliusClient("SECRET_HELIUS_KEY_123", rate_limiter=RateLimiter(100.0, burst=10))
+    assert client._scrub(
+        "https://mainnet.helius-rpc.com/?api-key=SECRET_HELIUS_KEY_123 timed out"
+    ) == "https://mainnet.helius-rpc.com/?api-key=***REDACTED*** timed out"
+
+
 async def test_birdeye_unsuccessful_response_raises(monkeypatch):
     client = make_birdeye()
 

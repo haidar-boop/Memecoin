@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import ssl
 from collections import deque
 from datetime import datetime, timezone
@@ -63,10 +64,16 @@ def _to_bool(value: Any) -> bool | None:
 
 
 def _from_ms_timestamp(value: Any) -> datetime | None:
+    """Parse a millisecond epoch timestamp; any out-of-range/non-finite value
+    is treated as missing, never a crash (Rule 6/8) — this frontend API is
+    unofficial and has sent garbage before."""
     ms = _to_float(value)
-    if ms is None or ms <= 0:
+    if ms is None or not math.isfinite(ms) or ms <= 0:
         return None
-    return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc)
+    try:
+        return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 # Buffer bounds: the scanner drains every cycle (default 45s); Pump.fun

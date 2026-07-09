@@ -89,3 +89,60 @@ def test_load_dotenv(tmp_path, monkeypatch):
     assert loaded == 1
     monkeypatch.delenv("MEMEINTEL_TEST_DOTENV_A")
     assert load_dotenv(str(tmp_path / "missing.env")) == 0
+
+
+# ---- Bug-hunt fixes: NaN-blind validation, bool parsing (Rule 6/8) ----
+
+def test_nan_rejected_by_positivity_validation():
+    """`nan <= 0` is always False, so a naive check lets NaN slip through."""
+    with pytest.raises(ConfigurationError):
+        from meme_intelligence.config.settings import ScanIntervals
+        ScanIntervals(ultra_fast=float("nan"))
+
+
+def test_nan_rejected_by_weight_sum_check():
+    with pytest.raises(ConfigurationError, match="must sum to 1.0"):
+        ScoringWeights(security=float("nan"))
+
+
+def test_nan_rejected_by_http_settings():
+    from meme_intelligence.config.settings import HttpSettings
+    with pytest.raises(ConfigurationError):
+        HttpSettings(timeout_seconds=float("nan"))
+
+
+def test_http_settings_validates_previously_unchecked_fields():
+    from meme_intelligence.config.settings import HttpSettings
+    with pytest.raises(ConfigurationError):
+        HttpSettings(cache_ttl_seconds=-1.0)
+    with pytest.raises(ConfigurationError):
+        HttpSettings(cache_max_entries=0)
+    with pytest.raises(ConfigurationError):
+        HttpSettings(retry_base_delay=10.0, retry_max_delay=1.0)
+
+
+def test_wallet_dominance_usd_now_validated():
+    from meme_intelligence.config.settings import WalletIntelSettings
+    with pytest.raises(ConfigurationError):
+        WalletIntelSettings(min_buy_volume_for_dominance_usd=-1.0)
+
+
+def test_provider_cooldown_now_validated():
+    from meme_intelligence.config.settings import ProviderSettings
+    with pytest.raises(ConfigurationError):
+        ProviderSettings(cooldown_seconds=0.0)
+
+
+def test_bool_env_rejects_unrecognized_string_instead_of_silently_false():
+    """A typo like 'treu' previously became False silently."""
+    with pytest.raises(ConfigurationError):
+        Settings.from_env(env={"MEMEINTEL_AI_ENABLE_IN_MONITOR": "treu"})
+
+
+def test_bool_env_still_accepts_common_spellings():
+    for value in ("1", "true", "TRUE", "yes", "on"):
+        settings = Settings.from_env(env={"MEMEINTEL_AI_ENABLE_IN_MONITOR": value})
+        assert settings.ai.enable_in_monitor is True
+    for value in ("0", "false", "no", "off"):
+        settings = Settings.from_env(env={"MEMEINTEL_AI_ENABLE_IN_MONITOR": value})
+        assert settings.ai.enable_in_monitor is False

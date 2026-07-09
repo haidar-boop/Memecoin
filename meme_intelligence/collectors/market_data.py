@@ -15,6 +15,7 @@ normalized). Default request budgets stay safely below documented limits
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -56,9 +57,12 @@ def _to_percent(value: Any) -> float | None:
 
 def _from_ms_timestamp(value: Any) -> datetime | None:
     ms = _to_float(value)
-    if ms is None or ms <= 0:
+    if ms is None or not math.isfinite(ms) or ms <= 0:
         return None
-    return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc)
+    try:
+        return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 def _from_iso_timestamp(value: Any) -> datetime | None:
