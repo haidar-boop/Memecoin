@@ -67,6 +67,7 @@ async def refresh_outcomes(
     market_service=None,  # optional: fills windows live when no snapshot exists
     *,
     settings: BacktestSettings,
+    learning_service=None,  # optional: feed the mind layer (Section 1 resolution)
     now_func: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
 ) -> int:
     """Measure every due, unmeasured (prediction, window) pair.
@@ -76,6 +77,12 @@ async def refresh_outcomes(
     market service is provided, the current pair is fetched live and the
     actual elapsed time recorded. Windows that are not due yet stay open.
     Returns the number of outcomes recorded.
+
+    When a ``learning_service`` is supplied, every measured outcome is also
+    handed to the self-learning mind layer (``resolve_outcome``) so it can
+    label the coin and fire instant learning (Section 1). This is best-effort
+    and duck-typed: a coin the mind layer never saw is a safe no-op, and any
+    failure is logged, never propagated (Rule 7).
     """
     now = now_func()
     recorded = 0
@@ -121,6 +128,19 @@ async def refresh_outcomes(
                 source=source,
             )
             recorded += 1
+
+            # Feed the mind layer the same measurement (Section 1): a return
+            # we could compute, with a confirmed rug when liquidity fell below
+            # the survival floor (survived is False; unknown liquidity is not
+            # a rug — Rule 8).
+            if learning_service is not None and change is not None:
+                try:
+                    learning_service.resolve_outcome(
+                        prediction["address"], prediction["chain"],
+                        float(window), change, is_rug=(survived is False))
+                except Exception as exc:  # noqa: BLE001 — best-effort, never break
+                    _logger.warning("mind-layer resolve_outcome failed for %s: %s",
+                                    prediction["address"], exc)
     if recorded:
         _logger.info("recorded %d new outcome measurement(s)", recorded)
     return recorded

@@ -24,3 +24,6 @@ logs/
 *.log
 *.sqlite3
 *.db
+
+# Self-learning mind-layer persisted state (SQLite db + FAISS index + models)
+learning_state/

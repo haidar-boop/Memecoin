@@ -603,3 +603,47 @@ satisfying both. Weights are configurable (`OpportunityWeights`,
   This was treated as non-negotiable under Rule 8, even where the spec
   didn't explicitly ask for it — the spec's own doctrine ("unverified is
   not a pass," Part 31 §6) implies it.
+
+### Self-learning "mind" layer: analog + model + rug, reusing existing engines
+
+The "Self-Learning Mind Layer" prompt asked for analog pattern recognition
+(FAISS k-NN over past coins), a warm-started LightGBM classifier, HDBSCAN
+archetypes + novelty, a hard-signal rug engine, and an accuracy-weighted
+ensemble — as a reasoning layer on top of the existing scanner, returning
+structured data (never auto-trading). Several design choices were made under
+Rules 1/8/18/20:
+
+- **Reuse over reinvention (Rule 18).** The rug engine's contract-level
+  signals (honeypot/un-sellable, mint & freeze authority, concentration, LP
+  lock, sell tax, same-creator honeypot count) read the existing
+  `SecurityProfile` (populated by the GoPlus collector) rather than
+  re-collecting. "Rug-by-analogy" (§5b) is not separate code — confirmed rugs
+  land in the same FAISS index as any outcome, so a coin near past rugs is
+  flagged by resemblance.
+- **One feature space.** Analog search, the classifier, and archetype
+  clustering all operate on the *scaled* fingerprint; refitting the
+  `StandardScaler` (drift handling) triggers a full rebuild so the three models
+  never disagree about coordinates.
+- **Honest uncertainty, not fabricated confidence (Rule 8).** A source with
+  too few analogs or an untrained classifier abstains (`None`) and is dropped
+  from the ensemble; with no source available the verdict is a uniform
+  distribution, and cold start scales confidence down. Missing fingerprint
+  metrics lower a reported `coverage` rather than being invented.
+- **Active honeypot simulation deferred with a seam (Rule 20).** The spec's
+  live Solana Jupiter round-trip / EVM `eth_call` sell simulation needs RPC we
+  don't run in this environment and is a distinct collector; the rug engine
+  exposes an `unsellable_override` parameter so that simulator plugs in later,
+  and uses the existing GoPlus honeypot flags today.
+- **Additive, off-by-default integration (Rules 3/7/10/11).** The scanner hook,
+  the backtester `resolve_outcome` feed, and the CLI `mind` command are all
+  opt-in (`MEMEINTEL_LEARNING_ENABLED` / `_ENABLE_IN_MONITOR`, `monitor
+  --learn`) and fully error-isolated — a learning failure logs and is
+  swallowed, never breaking a scan cycle.
+
+**Resolution:** Implemented in `meme_intelligence/learning/` (`models`,
+`features`, `analog`, `archetypes`, `classifier`, `rug_engine`, `ensemble`,
+`metrics`, `store`, `service`), config groups `LearningSettings` /
+`LightGBMSettings` / `RugThresholds` / `RugSignalWeights` in
+`config/settings.py`, the `mind` CLI command, and the opt-in hooks in
+`workflow/controller.py` and `analytics/backtesting.py`. Decision-support only;
+it never trades (Rule 21).

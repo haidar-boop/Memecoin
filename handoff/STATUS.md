@@ -469,6 +469,48 @@ source neither current API exposes).
 
 ---
 
+## Self-Learning "Mind" Layer (analog + continuous learning + rug) → ✅
+
+An analog pattern-recognition + continuous-learning reasoning layer on top of
+the scanner (package `meme_intelligence/learning/`). For every coin it answers
+"which past coins does this most resemble right now, and how did those end
+up?", forecasts the outcome, and flags rugs — getting measurably smarter as
+coins resolve. Off by default (`MEMEINTEL_LEARNING_ENABLED` /
+`_ENABLE_IN_MONITOR`); needs `numpy/scikit-learn/faiss-cpu/lightgbm/hdbscan`.
+
+- `learning/models.py` — coin lifecycle model: `OutcomeBucket`
+  (PUMP/FLAT/DUMP/RUG), `CoinSnapshot` trajectory point, `OutcomeLabel`,
+  `RugSignal`/`RugAssessment`, `AnalogNeighbor`, `CoinRecord`, `CoinVerdict`.
+- `learning/features.py` — `FingerprintExtractor`: a variable-length snapshot
+  series → a fixed-length vector (7 trajectory summaries per metric + ratios +
+  scalars), with coverage tracking + a persisted `StandardScaler`.
+- `learning/analog.py` — `AnalogMemory`: append-only FAISS cosine index +
+  recency-weighted k-NN voting (`similarity × exp(-age/half_life)`); the
+  instant-learning path (§3).
+- `learning/archetypes.py` — HDBSCAN archetypes labeled by dominant outcome +
+  a bounded novelty percentile ("catch what's coming next").
+- `learning/classifier.py` — `OutcomeClassifier`: LightGBM multiclass, num_class
+  pinned to 4, warm-start via `init_model`, time-decay sample weights (§4).
+- `learning/rug_engine.py` — hard-signal rug score (0-100) reusing
+  `SecurityProfile` + trajectory + deployer blacklist; rug-by-analogy is the
+  analog index itself (§5).
+- `learning/ensemble.py` — adaptive accuracy-weighted blend of analog + model +
+  rug (§6); `learning/metrics.py` — self-evaluation (hit-rate, rug P/R/F1,
+  Brier, calibration, per-archetype, novelty) (§8).
+- `learning/store.py` — SQLite (records, snapshots, labels, rug signals,
+  deployer blacklist, predictions, metrics); `learning/service.py` —
+  `LearningService.evaluate_coin()` + `record_detection`/`capture_snapshot`/
+  `resolve_outcome`/`retrain_if_due`/`refresh_archetypes`/`get_learning_metrics`.
+  Every artifact persists so learning compounds across restarts (§9).
+- **Integration:** CLI `mind evaluate <address>` / `mind metrics`; opt-in
+  scanner hook (`monitor --learn`) that feeds analyzed coins in with zero extra
+  API calls; the backtester's `refresh_outcomes` resolves the mind layer's
+  coins from the same measurements. All hooks are additive and error-isolated —
+  a learning failure never breaks a scan cycle (Rule 7).
+- **Never trades** — decision-support only (Rule 21). ~150 new tests.
+
+---
+
 ## What's NOT built yet
 
 The **web/monitoring dashboard** (Part 21 §10 / 22 / 27 §12 / 28 §11) and

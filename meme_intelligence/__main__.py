@@ -150,6 +150,18 @@ def build_wallet_service(settings: Settings) -> WalletDataService | None:
     )
 
 
+def build_learning_service(settings: Settings):
+    """Construct the self-learning mind layer (Section 10).
+
+    Imported lazily so the numpy/faiss/lightgbm stack is loaded only when the
+    ``mind`` command or the opt-in monitor hook actually needs it — every other
+    CLI command stays fast and dependency-light.
+    """
+    from meme_intelligence.learning.service import LearningService
+
+    return LearningService(settings)
+
+
 def build_sinks(settings: Settings) -> list:
     """Console always; Telegram/Discord activate when their secrets exist (Part 29)."""
     sinks: list = [ConsoleSink()]
@@ -519,6 +531,11 @@ async def _cmd_backtest(args, settings) -> int:
         weight_experiments,
     )
 
+    # When the mind layer is enabled, measured outcomes also resolve its coins
+    # and fire instant learning (Section 1). Built lazily so the ML stack loads
+    # only for users who opted in.
+    learning_service = build_learning_service(settings) if settings.learning.enabled else None
+
     with Storage(settings.database.path) as storage:
         recorded = 0
         if args.refresh:
@@ -527,10 +544,15 @@ async def _cmd_backtest(args, settings) -> int:
                 build_geckoterminal(settings) as gecko,
             ):
                 service = build_market_service(settings, dex, gecko)
-                recorded = await refresh_outcomes(storage, service,
-                                                  settings=settings.backtest)
+                recorded = await refresh_outcomes(
+                    storage, service, settings=settings.backtest,
+                    learning_service=learning_service)
         else:
-            recorded = await refresh_outcomes(storage, None, settings=settings.backtest)
+            recorded = await refresh_outcomes(
+                storage, None, settings=settings.backtest,
+                learning_service=learning_service)
+        if learning_service is not None:
+            learning_service.persist()
 
         labeled = label_alert_outcomes(storage, settings.backtest)
         verdicts = evaluate_predictions(storage, settings.backtest)
@@ -702,6 +724,90 @@ async def _cmd_wallets(args, settings) -> int:
     return 0
 
 
+# A rug-risk score at/above this (0-100) makes `mind evaluate` exit with code 2,
+# mirroring the destructive-security convention of the `security` command.
+_MIND_DESTRUCTIVE_RUG_SCORE = 70
+
+
+def _fmt_opt(value, spec: str = ".2f") -> str:
+    """Format an optional metric: 'n/a' when there is no data (Rule 8)."""
+    return "n/a" if value is None else format(value, spec)
+
+
+async def _cmd_mind(args, settings) -> int:
+    """Self-learning mind layer: analog + model + rug verdict, or metrics (Section 10)."""
+    service = build_learning_service(settings)
+
+    if args.mind_command == "metrics":
+        metrics = service.get_learning_metrics(persist=False)
+        rug = metrics["rug"]
+        print("Mind-layer self-evaluation metrics")
+        print(f"  Resolved samples:      {metrics['resolved_count']}")
+        print(f"  Overall accuracy:      {_fmt_opt(metrics['overall_accuracy'])}")
+        print(f"  Directional hit-rate:  {_fmt_opt(metrics['directional']['hit_rate'])} "
+              f"(n={metrics['directional']['samples']})")
+        print(f"  Rug precision/recall:  {_fmt_opt(rug['precision'])} / {_fmt_opt(rug['recall'])} "
+              f"(F1 {_fmt_opt(rug['f1'])}, {rug['actual_rugs']} actual rug(s))")
+        print(f"  Brier score:           {_fmt_opt(metrics['brier_score'])}")
+        print(f"  Analog memory size:    {metrics['analog_memory_size']}")
+        print(f"  Classifier ready:      {metrics['classifier_ready']}")
+        return 0
+
+    # mind evaluate <address>
+    async with build_dexscreener(settings) as dex, build_geckoterminal(settings) as gecko:
+        market = build_market_service(settings, dex, gecko)
+        pair = await market.get_best_pair(args.address, chain=args.chain)
+    if pair is None:
+        print(f"No tradable pair found for {args.address} on {args.chain}.")
+        return 1
+
+    profile = None
+    async with build_goplus(settings) as goplus:
+        try:
+            profile = await goplus.get_token_security(args.chain, args.address)
+        except CollectorError as exc:
+            print(f"(security data unavailable: {exc} — proceeding without it)")
+
+    from datetime import datetime, timezone
+    age_seconds = 0.0
+    if pair.pair_created_at is not None:
+        age_seconds = max(0.0, (datetime.now(timezone.utc)
+                                - pair.pair_created_at).total_seconds())
+    snapshot = {
+        "age_seconds": age_seconds,
+        "price_usd": pair.price_usd,
+        "liquidity_usd": pair.liquidity_usd,
+        "market_cap_usd": pair.market_cap,
+        "volume_1h_usd": pair.volume_1h,
+        "holder_count": profile.holder_count if profile else None,
+        "buys": pair.buys_1h,
+        "sells": pair.sells_1h,
+        "top10_holder_percent": profile.top10_holder_percent if profile else None,
+    }
+    verdict = service.evaluate_coin(args.address, args.chain, [snapshot], security=profile)
+    service.persist()
+
+    probs = verdict["final_probabilities"]
+    print(f"Mind-layer verdict for {args.address} ({args.chain})")
+    print("  Outcome probabilities: " + "  ".join(
+        f"{label}={probs.get(label, 0.0):.0%}" for label in ("pump", "flat", "dump", "rug")))
+    print(f"  Rug risk score:        {verdict['rug_risk_score']}/100")
+    print(f"  Rug signals fired:     {', '.join(verdict['rug_signals_fired']) or 'none'}")
+    print(f"  Matched archetype:     {verdict['matched_archetype'] or 'none'}")
+    print(f"  Novelty score:         {_fmt_opt(verdict['novelty_score'], '.2f')}")
+    print(f"  Model confidence:      {verdict['model_confidence']:.0%}")
+    print(f"  Learned sample size:   {verdict['sample_size']}")
+    if verdict["nearest_analogs"]:
+        print("  Nearest past analogs:")
+        for analog in verdict["nearest_analogs"]:
+            print(f"    - {analog['address']} ({analog['chain']}): "
+                  f"{analog['similarity']:.0%} similar, resolved as {analog['resolved_as']}")
+    else:
+        print("  Nearest past analogs:  none yet (memory still cold)")
+    # Treat a high rug-risk score as the destructive exit code, like `security`.
+    return 2 if verdict["rug_risk_score"] >= _MIND_DESTRUCTIVE_RUG_SCORE else 0
+
+
 async def _cmd_monitor(args, settings) -> int:
     """Run the continuous scanning loop (Part 13). Ctrl-C stops gracefully."""
     import contextlib
@@ -715,6 +821,9 @@ async def _cmd_monitor(args, settings) -> int:
     if args.pumpfun:
         settings = _dc.replace(
             settings, pumpfun=_dc.replace(settings.pumpfun, enable_in_monitor=True))
+    if args.learn:
+        settings = _dc.replace(
+            settings, learning=_dc.replace(settings.learning, enable_in_monitor=True))
 
     async with contextlib.AsyncExitStack() as stack:
         gecko = await stack.enter_async_context(build_geckoterminal(settings))
@@ -751,6 +860,14 @@ async def _cmd_monitor(args, settings) -> int:
                 # shutdown like every other HTTP client this command opens.
                 stack.push_async_callback(ai_service._client.close)
 
+        # Self-learning mind layer (Section 10): opt-in via --learn or
+        # MEMEINTEL_LEARNING_ENABLE_IN_MONITOR. Its state is flushed to disk on
+        # shutdown so learning compounds across restarts (Rule 7).
+        learning_service = None
+        if settings.learning.enable_in_monitor:
+            learning_service = build_learning_service(settings)
+            stack.callback(learning_service.persist)
+
         alert_sinks = build_sinks(settings)
         # Telegram/DiscordSink each hold an aiohttp session (BaseCollector);
         # ConsoleSink (always sinks[0]) doesn't and has no close(). Without
@@ -771,6 +888,7 @@ async def _cmd_monitor(args, settings) -> int:
                 pumpfun_client=pumpfun,
                 wallet_service=wallet_service,
                 ai_service=ai_service,
+                learning_service=learning_service,
                 regime=MarketRegime(args.regime),
             )
             try:
@@ -805,6 +923,7 @@ async def _run(args: argparse.Namespace) -> int:
         "wallets": _cmd_wallets,
         "daily": _cmd_daily,
         "monitor": _cmd_monitor,
+        "mind": _cmd_mind,
     }[args.command]
     return await handler(args, settings)
 
@@ -912,6 +1031,19 @@ def main(argv: list[str] | None = None) -> int:
     monitor.add_argument("--pumpfun", action="store_true",
                          help="also watch pump.fun launches via the free "
                               "PumpPortal stream (Part 32.5)")
+    monitor.add_argument("--learn", action="store_true",
+                         help="feed analyzed coins into the self-learning mind "
+                              "layer as the scanner runs")
+
+    # Self-learning mind layer: analog + model + rug reasoning (Section 10).
+    mind = sub.add_parser("mind", help="self-learning mind layer (evaluate / metrics)")
+    mind_sub = mind.add_subparsers(dest="mind_command", required=True)
+    mind_eval = mind_sub.add_parser(
+        "evaluate", help="analog + model + rug verdict for one token")
+    mind_eval.add_argument("address")
+    mind_eval.add_argument("--chain", default="solana", help="chain id (default solana)")
+    mind_sub.add_parser(
+        "metrics", help="self-evaluation metrics over resolved predictions")
 
     args = parser.parse_args(argv)
     if getattr(args, "network", None) is None and args.command in ("discover", "scan"):

@@ -893,6 +893,7 @@ class LearningSettings:
     """
 
     enabled: bool = False              # opt-in; off by default (Rule 11 — extra work)
+    enable_in_monitor: bool = False    # feed the 24/7 scanner into the mind layer
 
     # Outcome label buckets (return %, relative to detection price) — Section 1
     pump_return_percent: float = 50.0        # >= this at a horizon -> PUMP

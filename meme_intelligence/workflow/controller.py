@@ -70,6 +70,7 @@ class CycleStats:
     candidates: int = 0
     analyzed: int = 0
     launches_tracked: int = 0  # pump.fun launches under observation (Part 32.5)
+    learned: int = 0           # coins fed into the self-learning mind layer
     alerts: list[AlertEvent] = field(default_factory=list)
 
 
@@ -90,6 +91,7 @@ class ContinuousScanner:
         pumpfun_client=None,     # PumpFunFrontendClient-compatible traction rechecks
         wallet_service=None,     # WalletDataService (Part 17); metered credits
         ai_service=None,         # AIJudgmentService (Part 23); costs API tokens
+        learning_service=None,   # LearningService (mind layer, Section 10); off by default
         regime: MarketRegime = MarketRegime.UNKNOWN,
         now_func: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         sleep_func: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -160,6 +162,15 @@ class ContinuousScanner:
         # Section 2 cadence) forever, even while its alert sat
         # cooldown-suppressed and unseen (bug-hunt finding).
         self._ai_verified: set[tuple[str, str]] = set()
+        # Self-learning mind layer (Section 10): additive and off by default.
+        # Like the metered layers, the settings flag is authoritative — a
+        # wired service with the flag off stays out of the loop (Rule 10/11).
+        if learning_service is not None and not settings.learning.enable_in_monitor:
+            self._logger.info(
+                "learning service wired but MEMEINTEL_LEARNING_ENABLE_IN_MONITOR is off; "
+                "the mind layer stays out of the scan loop")
+            learning_service = None
+        self._learning = learning_service
         self._pipeline = ResearchPipeline(settings, goplus_client,
                                           community_client=community_client,
                                           wallet_service=wallet_service,
@@ -206,9 +217,9 @@ class ContinuousScanner:
                 backoff = _ERROR_BACKOFF_START  # healthy cycle resets the backoff
                 self._logger.info(
                     "cycle %d: %d pools, %d candidates, %d analyzed, "
-                    "%d launches tracked, %d alerts",
+                    "%d launches tracked, %d learned, %d alerts",
                     cycle, stats.pools_seen, stats.candidates, stats.analyzed,
-                    stats.launches_tracked, len(stats.alerts),
+                    stats.launches_tracked, stats.learned, len(stats.alerts),
                 )
             except MemeIntelError as exc:
                 self._logger.error("cycle %d failed: %s (backing off %.0fs)", cycle, exc, backoff)
@@ -270,6 +281,16 @@ class ContinuousScanner:
             and cycle % self._settings.workflow.watchlist_recheck_cycles == 0
         ):
             await self._recheck_watchlist(stats, skip=processed_this_cycle)
+
+        # Periodic learning (Section 4/7): the classifier warm-starts once
+        # enough coins have resolved. Cheap when not due; error-isolated so a
+        # training failure never breaks the loop (Rule 7).
+        if self._learning is not None:
+            try:
+                if self._learning.retrain_if_due():
+                    self._logger.info("mind layer retrained (cycle %d)", cycle)
+            except Exception as exc:  # noqa: BLE001 — additive; must not kill the cycle
+                self._logger.warning("mind layer retrain failed: %s", exc)
 
         return stats
 
@@ -412,6 +433,48 @@ class ContinuousScanner:
             self._storage.add_journal(
                 token, "alert", f"{event.priority.value}/{event.alert_type}: {event.title}",
             )
+
+        self._feed_learning(result, stats)
+
+    def _feed_learning(self, result: PipelineResult, stats: CycleStats) -> None:
+        """Feed one analyzed coin into the mind layer (Section 10).
+
+        Additive and fully error-isolated: it records the coin and appends a
+        trajectory snapshot (built from data already collected — zero extra API
+        calls) so the mind layer accumulates memory as the scanner runs. Any
+        failure is logged and swallowed — the learning hook must never break a
+        scan cycle (Rule 7/9). The outer loop only catches ``MemeIntelError``,
+        so this catches broadly (the LearningService uses numpy/faiss/lightgbm).
+        """
+        if self._learning is None:
+            return
+        try:
+            pair = result.pair
+            token = pair.base_token
+            profile = result.security_profile
+            age_seconds = 0.0
+            if pair.pair_created_at is not None:
+                age_seconds = max(0.0, (self._now() - pair.pair_created_at).total_seconds())
+            snapshot = {
+                "age_seconds": age_seconds,
+                "price_usd": pair.price_usd,
+                "liquidity_usd": pair.liquidity_usd,
+                "market_cap_usd": pair.market_cap,
+                "volume_1h_usd": pair.volume_1h,
+                "holder_count": profile.holder_count if profile is not None else None,
+                "buys": pair.buys_1h,
+                "sells": pair.sells_1h,
+                "top10_holder_percent":
+                    profile.top10_holder_percent if profile is not None else None,
+            }
+            self._learning.record_detection(
+                token.address, token.chain, detection_price_usd=pair.price_usd,
+                symbol=token.symbol, name=token.name)
+            self._learning.capture_snapshot(token.address, token.chain, snapshot)
+            stats.learned += 1
+        except Exception as exc:  # noqa: BLE001 — additive; must not kill the cycle
+            self._logger.warning("learning hook failed for %s: %s",
+                                 result.pair.base_token.address, exc)
 
     async def _recheck_watchlist(self, stats: CycleStats, *, skip: set[str] = frozenset()) -> None:
         """Re-analyze tracked tokens on the slower cadence (Part 15, Section 2)."""
