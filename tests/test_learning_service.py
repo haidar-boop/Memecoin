@@ -285,6 +285,36 @@ def test_evaluate_only_coin_persists_creator_for_blacklist():
     assert service.store.deployer_rug_count("devZ", "solana") == 1
 
 
+def test_slow_rug_upgrade_grows_blacklist_and_analog_memory():
+    """Bug-hunt regression: a coin that resolved FLAT at +1h and was confirmed
+    RUG at +24h never blacklisted its deployer or taught the analog memory —
+    the common slow-rug shape was invisible to instant learning."""
+    service = _service()
+    service.record_detection("slowrug", "solana", detection_price_usd=1.0, creator="devSlow")
+    for snap in _rug_series():
+        service.capture_snapshot("slowrug", "solana", snap)
+    # +1h window: still looks alive -> FLAT (coin becomes resolved).
+    service.resolve_outcome("slowrug", "solana", 1.0, 5.0)
+    assert service.store.deployer_rug_count("devSlow", "solana") == 0
+    size_before = service.get_learning_metrics(persist=False)["analog_memory_size"]
+    # +24h window: pool drained -> confirmed rug.
+    service.resolve_outcome("slowrug", "solana", 24.0, -95.0, is_rug=True)
+    assert service.store.deployer_rug_count("devSlow", "solana") == 1
+    after = service.get_learning_metrics(persist=False)["analog_memory_size"]
+    assert after == size_before + 1  # corrected RUG fingerprint inserted
+
+
+def test_rug_upgrade_does_not_double_blacklist():
+    """First-resolution RUG then a later RUG window must blacklist exactly once."""
+    service = _service()
+    service.record_detection("fastrug", "solana", detection_price_usd=1.0, creator="devFast")
+    for snap in _rug_series():
+        service.capture_snapshot("fastrug", "solana", snap)
+    service.resolve_outcome("fastrug", "solana", 1.0, -95.0, is_rug=True)
+    service.resolve_outcome("fastrug", "solana", 24.0, -99.0, is_rug=True)
+    assert service.store.deployer_rug_count("devFast", "solana") == 1
+
+
 def test_empty_trajectory_resolution_does_not_pollute_analog_index():
     """Bug-hunt regression: a coin resolved with zero snapshots extracted a
     zero-vector fingerprint that entered the analog index as a meaningless

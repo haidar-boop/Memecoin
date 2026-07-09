@@ -335,13 +335,17 @@ class LearningService:
         if coin_id is None:
             self._logger.warning("resolve_outcome: unknown coin %s", token_address)
             return
-        was_resolved = self._store.coin_final_bucket(coin_id) is not None
+        previous = self._store.coin_final_bucket(coin_id)
         bucket = self._bucket_for_return(forward_return_percent, is_rug)
         self._store.record_label(coin_id, OutcomeLabel(
             horizon_hours=horizon_hours, bucket=bucket,
             forward_return_percent=forward_return_percent, resolved_at=self._now()))
-        if not was_resolved and self._store.coin_final_bucket(coin_id) is not None:
+        current = self._store.coin_final_bucket(coin_id)
+        if previous is None and current is not None:
             self._on_resolved(coin_id)
+        elif (current is OutcomeBucket.RUG and previous is not None
+              and previous is not OutcomeBucket.RUG):
+            self._on_rug_upgrade(coin_id)
 
     def _bucket_for_return(self, ret: float, is_rug: bool) -> OutcomeBucket:
         if is_rug:
@@ -390,6 +394,39 @@ class LearningService:
             prediction["scored"] = True
             self._store.update_prediction(coin_id, prediction)
 
+        self.persist()
+
+    def _on_rug_upgrade(self, coin_id: int) -> None:
+        """A later horizon confirmed RUG on an already-resolved coin.
+
+        Slow rugs are the COMMON shape: the +1h window still looks alive
+        (labels FLAT) and only a later window shows the drained pool. Instant
+        learning fired once at first resolution, so without this path the
+        deployer blacklist never grew for real-world rugs and the analog
+        memory kept the stale non-rug label until the next full rebuild —
+        blinding exactly the two mechanisms rug detection is supposed to
+        sharpen (Sections 5b/7). The corrected RUG fingerprint is inserted
+        immediately; the earlier entry for this coin stays until the next
+        full rebuild reconstructs the index from records (their votes cancel
+        at worst). Non-rug label refinements stay rebuild-only — they are not
+        emergencies and per-window inserts would bloat the index.
+        """
+        record = self._store.get_record(coin_id)
+        if record is None:
+            return
+        if record.creator:
+            count = self._store.blacklist_deployer(record.creator, record.token.chain)
+            self._logger.info("rug upgrade for %s: deployer %s blacklisted (%d rug(s))",
+                              record.token.address, record.creator, count)
+        fingerprint = self._extractor.extract(record.snapshots)
+        if fingerprint.coverage > 0.0:
+            scaled = self._scaler.transform(fingerprint.vector)
+            self._analog.add(
+                AnalogEntry(address=record.token.address, chain=record.token.chain,
+                            bucket=OutcomeBucket.RUG,
+                            resolved_at=_resolution_time(record)),
+                scaled,
+            )
         self.persist()
 
     # ---- Learning loops (Section 4 / Section 7) ----
