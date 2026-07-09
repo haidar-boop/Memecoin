@@ -30,8 +30,17 @@ Community/Blockchain/Momentum/Narrative at 15% each, Timing at 10%.
 Three slightly different breakdowns appeared across the security-focused
 parts. Part 33 ("Security & Rug Detection Intelligence Engine") is the
 most detailed and most recently written version, so it was adopted as
-canonical: Contract 25%, Liquidity 25%, Distribution 20%, Developer 15%,
-Manipulation 15%. Implemented in `SecuritySubWeights`.
+canonical. Its Section 11 literal weighting is **Contract 25%, Liquidity
+20%, Developer 20%, Distribution 20%, Social/Manipulation 15%**, now
+implemented exactly in `SecuritySubWeights`.
+
+Correction (Parts 20-33 verification pass): an earlier version of this
+entry recorded "Liquidity 25% / Developer 15%", and the shipped code
+matched that — but neither figure appears in Part 33 Section 11, which
+says Liquidity /20 and Developer /20. That was an undocumented drift
+(the Part 33 handoff note even claimed the code already used 20/20). The
+code has been corrected to the literal spec (Rule 1) and a test now locks
+the five values so the drift cannot silently recur.
 
 ### 3. Final classification label set
 
@@ -555,6 +564,26 @@ fails the community gate and suppresses the alert. Wired into market
 cross-verification, the Part 32.5 §8 AI-verification trigger, and the
 "discoveries" delivery channel. Threshold is config (Rule 17), so the
 operator can raise it for fewer/stronger alerts.
+
+### Watchlist opportunity ranking (Part 28 §5/§6) — second, separate axis
+
+Part 28 §5 specifies an upside-tilted "Opportunity Ranking" (Growth 30 /
+Momentum 25 / Foundation 20 / Risk 15 / Timing 10) to decide which
+tracked tokens deserve attention. This is genuinely distinct from the
+master score, whose weights are frozen by the Part 31 Framework
+Consistency Lock. Rather than conflate them (which would break Part 31),
+the ranking is a **separate advisory axis** in
+`analyzers/opportunity_ranker.py`: it composes already-computed category
+scores (narrative→growth, momentum, foundation, 100−risk, timing) under
+the §5 weights, coverage-honest (a missing factor drops out and the rest
+renormalize — never scored as 0). It never alters the master score or its
+Elite/Strong/Avoid classification. Persisted per snapshot
+(`snapshots.opportunity_rank`, added via the in-place migration) and
+surfaced with `watchlist --top`. Part 25 §10 specifies a near-identical
+rating with slightly different weights; per the owner's direction to
+consolidate overlapping formulas, the Part 28 ranking is treated as
+satisfying both. Weights are configurable (`OpportunityWeights`,
+`MEMEINTEL_OPPORTUNITY_WEIGHTS_*`) per Rule 17.
 
 ## Notable implementation choices (Rule 19)
 

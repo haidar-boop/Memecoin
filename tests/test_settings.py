@@ -34,6 +34,29 @@ def test_security_sub_weights_sum_to_one():
     assert w.contract + w.liquidity + w.distribution + w.developer + w.manipulation == pytest.approx(1.0)
 
 
+def test_security_sub_weights_match_part_33_section_11():
+    """Lock the values to Part 33 Section 11's literal weighting (Rule 1) so
+    the earlier undocumented drift (liquidity 0.25 / developer 0.15) can't
+    silently recur."""
+    w = SecuritySubWeights()
+    assert (w.contract, w.liquidity, w.developer, w.distribution, w.manipulation) == (
+        0.25, 0.20, 0.20, 0.20, 0.15)
+
+
+def test_opportunity_weights_match_part_28_section_5():
+    from meme_intelligence.config.settings import OpportunityWeights
+    w = OpportunityWeights()
+    assert (w.growth_potential, w.momentum, w.foundation, w.risk, w.timing) == (
+        0.30, 0.25, 0.20, 0.15, 0.10)
+
+
+def test_opportunity_weights_loaded_from_env():
+    settings = Settings.from_env(env={"MEMEINTEL_OPPORTUNITY_WEIGHTS_GROWTH_POTENTIAL": "0.40",
+                                      "MEMEINTEL_OPPORTUNITY_WEIGHTS_MOMENTUM": "0.15"})
+    assert settings.opportunity_weights.growth_potential == 0.40
+    assert settings.opportunity_weights.momentum == 0.15
+
+
 def test_invalid_weight_sum_rejected():
     with pytest.raises(ConfigurationError, match="must sum to 1.0"):
         ScoringWeights(security=0.50)  # breaks the sum

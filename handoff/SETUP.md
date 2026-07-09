@@ -91,7 +91,9 @@ any of them by adding the line (uncommented, with your value) to `.env`.
 ## Deploying for 24/7 operation (not done yet)
 
 Not required for local testing. When ready to run `monitor` continuously:
-a small VPS (Hetzner CX22 or similar, ~€4/mo) is more than sufficient —
-the system is I/O-bound and rate-limited by design. A systemd service
-file to keep it running and auto-restart on reboot has not been written
-yet; this belongs to Part 21/22's deployment step.
+a small VPS (~$6/mo DigitalOcean droplet or similar) is more than
+sufficient — the system is I/O-bound and rate-limited by design. The
+full deployment kit lives in `deploy/`: `meme-intelligence.service`
+(systemd unit with `Restart=always`), `setup.sh` (one-shot bootstrap),
+`install-cron.sh` (daily routine + backtest refresh + DB backup), and
+`README.md` with step-by-step DigitalOcean instructions.

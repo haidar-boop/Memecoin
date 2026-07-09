@@ -144,6 +144,7 @@ _MIGRATIONS = {
         ("liquidity_usd", "REAL"),
         ("market_cap", "REAL"),
         ("regime", "TEXT"),          # market condition bucketing (Part 24 S9)
+        ("opportunity_rank", "REAL"),  # Part 28 S5 watchlist opportunity ranking
     ),
 }
 
@@ -258,14 +259,15 @@ class Storage:
         *,
         pair=None,          # DexPair: market facts at prediction time (Part 24 S2)
         regime: str | None = None,  # market condition bucket (Part 24 S9)
+        opportunity_rank: float | None = None,  # Part 28 S5 watchlist ranking
     ) -> int:
         token_id = self.upsert_token(assessment.token)
         cursor = self._conn.execute(
             """INSERT INTO snapshots
                (token_id, created_at, final_score, classification, confidence,
                 coverage, category_scores, overrides, source,
-                price_usd, liquidity_usd, market_cap, regime)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                price_usd, liquidity_usd, market_cap, regime, opportunity_rank)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 token_id,
                 assessment.generated_at.isoformat(),
@@ -280,6 +282,7 @@ class Storage:
                 pair.liquidity_usd if pair is not None else None,
                 pair.market_cap if pair is not None else None,
                 regime,
+                opportunity_rank,
             ),
         )
         self._conn.commit()
@@ -330,6 +333,27 @@ class Storage:
             )
             for row in rows
         ]
+
+    def top_opportunities(self, limit: int = 10) -> list[dict]:
+        """Active watchlist tokens ranked by their latest opportunity rank
+        (Part 28 Sections 5-6 — 'which are the strongest available
+        opportunities right now?'). Archived tokens are excluded; a token
+        whose latest snapshot predates the opportunity-rank feature (NULL)
+        sorts last rather than being dropped, so nothing silently vanishes.
+        """
+        rows = self._conn.execute(
+            """SELECT t.chain, t.address, t.symbol, t.name,
+                      w.tier, w.thesis, w.last_score, w.last_classification,
+                      (SELECT s.opportunity_rank FROM snapshots s
+                       WHERE s.token_id = w.token_id
+                       ORDER BY s.created_at DESC LIMIT 1) AS opportunity_rank
+               FROM watchlist w JOIN tokens t ON t.id = w.token_id
+               WHERE w.tier != 'archived'
+               ORDER BY opportunity_rank IS NULL, opportunity_rank DESC
+               LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def update_watchlist(
         self,

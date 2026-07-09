@@ -34,6 +34,7 @@ from meme_intelligence.analyzers.onchain_analyzer import (
     OnChainAssessment,
     derive_onchain_profile,
 )
+from meme_intelligence.analyzers.opportunity_ranker import OpportunityRank, OpportunityRanker
 from meme_intelligence.analyzers.risk_analyzer import RiskAnalyzer, RiskAssessment
 from meme_intelligence.analyzers.scoring_engine import (
     MasterAssessment,
@@ -72,6 +73,7 @@ class PipelineResult:
     community: CommunityAssessment | None = None
     community_profile: CommunityProfile | None = None
     ai_judgment: AIJudgment | None = None  # Part 23 reasoning-layer output
+    opportunity: "OpportunityRank | None" = None  # Part 28 S5 watchlist ranking
 
 
 class ResearchPipeline:
@@ -106,6 +108,7 @@ class ResearchPipeline:
         self._wallet = WalletIntelligenceAnalyzer(settings.wallet, settings.smart_money_weights)
         self._risk = RiskAnalyzer(settings.risk_weights)
         self._scoring = ScoringEngine(settings.weights, settings.bands, now_func=now_func)
+        self._opportunity = OpportunityRanker(settings.opportunity_weights)
 
     async def analyze_pair(
         self,
@@ -212,6 +215,7 @@ class ResearchPipeline:
             onchain=onchain, token=token, momentum=momentum, risk=risk, master=master,
             wallet=wallet, narrative=narrative,
             community=community, community_profile=community_profile,
+            opportunity=self._opportunity.rank(master.category_scores, risk.risk_score),
         )
 
         # AI reasoning layer (Part 23): only after the deterministic chain,
@@ -325,4 +329,5 @@ class ResearchPipeline:
         return dataclasses.replace(
             result, master=master, narrative=narrative,
             foundation=foundation, ai_judgment=judgment,
+            opportunity=self._opportunity.rank(master.category_scores, result.risk.risk_score),
         )

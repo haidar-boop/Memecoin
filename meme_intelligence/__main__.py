@@ -384,8 +384,10 @@ async def _cmd_report(args, settings) -> int:
         print("\n" + result.ai_judgment.summary())
 
     with Storage(settings.database.path) as storage:
-        storage.record_snapshot(result.master, source="report_cli",
-                                pair=result.pair, regime=args.regime)
+        storage.record_snapshot(
+            result.master, source="report_cli",
+            pair=result.pair, regime=args.regime,
+            opportunity_rank=result.opportunity.score if result.opportunity else None)
         if result.wallet is not None:
             # Sightings feed wallet track records for Part 24's learning loop.
             storage.record_wallet_sightings(
@@ -626,6 +628,22 @@ async def _cmd_watchlist(args, settings) -> int:
                 symbol = change.token.symbol or change.token.address[:8]
                 print(f"  - {symbol}: {change.change} ({change.detail})")
             print()
+
+        if getattr(args, "top", False):
+            ranked = storage.top_opportunities(limit=args.limit)
+            if not ranked:
+                print("No ranked opportunities yet. Run `daily` or `monitor` to populate.")
+                return 0
+            print(f"TOP OPPORTUNITIES (Part 28 §5 ranking — top {len(ranked)})")
+            for row in ranked:
+                symbol = row["symbol"] or row["address"][:8]
+                rank = f"{row['opportunity_rank']:.0f}" if row["opportunity_rank"] is not None else "?"
+                score = f"{row['last_score']:.0f}" if row["last_score"] is not None else "?"
+                print(f"  opportunity={rank:>3}  {symbol:>10} ({row['chain']}) "
+                      f"[{row['tier']}] master={score} class={row['last_classification'] or '?'}")
+                if row["thesis"]:
+                    print(f"{'':>16}thesis: {row['thesis']}")
+            return 0
 
         entries = storage.get_watchlist(include_archived=args.include_archived)
         if not entries:
@@ -868,6 +886,10 @@ def main(argv: list[str] | None = None) -> int:
     watchlist = sub.add_parser("watchlist", help="show tracked tokens; --refresh re-scores")
     watchlist.add_argument("--refresh", action="store_true")
     watchlist.add_argument("--include-archived", action="store_true")
+    watchlist.add_argument("--top", action="store_true",
+                           help="rank tracked tokens by opportunity score (Part 28 §5)")
+    watchlist.add_argument("--limit", type=int, default=10,
+                           help="number of ranked opportunities to show with --top")
 
     wallets = sub.add_parser("wallets", help="smart money & whale intelligence (Part 17)")
     wallets.add_argument("address")

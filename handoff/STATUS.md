@@ -1,6 +1,9 @@
-# Build Status — Parts 1 through 19, plus 23, 24, 29 and 32.5
+# Build Status — Parts 1 through 33 (built or verified-satisfied)
 
-**400 tests passing.** ~13,200 lines of source, ~6,300 lines of tests.
+**457 tests passing.** ~13,900 lines of source, ~7,300 lines of tests.
+Parts 20-33 completed a verification pass (see `next_steps/INDEX.md`);
+the only unbuilt items are the web dashboard and creator-history
+intelligence (data-source-blocked).
 Parts 1–18 were built on `claude/large-prompt-review-l49wp1`; Parts 19
 and 23 on `claude/handoff-folder-review-fuu9dq`.
 
@@ -435,12 +438,44 @@ The classification/scoring framework, config system, and logging.
   13/15/21 (caching, provider pools, prioritization, 24/7 recovery) —
   verified against the spec text rather than rebuilt (Rule 18).
 
+## Part 28 — Portfolio Management & Opportunity Rotation (§5/§6) → ✅
+
+- `analyzers/opportunity_ranker.py` — `OpportunityRanker`: the Section 5
+  upside-tilted ranking (Growth 30 / Momentum 25 / Foundation 20 / Risk
+  15 / Timing 10), composed from already-computed category scores,
+  coverage-honest (missing factor renormalizes, never scored 0). A
+  **second axis deliberately separate from the Part 31-locked master
+  score** — it orders *which watchlist tokens deserve attention*, never
+  changes the Elite/Strong/Avoid classification.
+- Persisted per snapshot (`snapshots.opportunity_rank`, in-place
+  migration) at every scan/recheck/report; `Storage.top_opportunities()`
+  ranks active watchlist tokens by their latest value.
+- CLI: `watchlist --top` (Section 6 "strongest available opportunities").
+  Weights configurable via `OpportunityWeights` / `MEMEINTEL_OPPORTUNITY_
+  WEIGHTS_*`.
+- Part 25 §10's near-identical opportunity rating is treated as satisfied
+  by this ranking (owner direction to consolidate overlapping formulas).
+
+## Parts 20-33 verification pass → ✅ (see `next_steps/INDEX.md`)
+
+Every remaining spec part was read against the code. Parts 20, 22, 26,
+30, 31, 32 are satisfied as-is (Part 31's locked weights match exactly).
+Part 33's security sub-weights were corrected to the literal §11 text
+(Liquidity /20, Developer /20 — an undocumented drift from 0.25/0.15) and
+locked with a test. Part 28 §5/§6 built (above). The only remaining
+unbuilt items are the **web dashboard** (deferred; CLI + Telegram today)
+and Part 27's **creator-track-record intelligence** (blocked on a data
+source neither current API exposes).
+
 ---
 
 ## What's NOT built yet
 
-Everything in `next_steps/` — **Parts 20-22, 25-28, and 30-33** (see
-`next_steps/INDEX.md`). Some of these (20, 21, 22, 23, 30, 31, 32)
+The **web/monitoring dashboard** (Part 21 §10 / 22 / 27 §12 / 28 §11) and
+Part 27's **creator launch-history intelligence** (data-source-blocked).
+Everything else in `next_steps/` has been built or verified-satisfied
+(see the verification-pass section in `next_steps/INDEX.md`). Some parts
+(20, 21, 22, 23, 30, 31, 32)
 substantially overlap with what's already built, since they're
 architecture/consolidation parts written before the earlier build parts
 existed in code — read them anyway, since they sometimes add specific

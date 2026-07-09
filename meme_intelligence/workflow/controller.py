@@ -356,8 +356,10 @@ class ContinuousScanner:
                         enriched.master.final_score)
                 result = enriched
 
-        self._storage.record_snapshot(result.master, source=source,
-                                      pair=result.pair, regime=self._regime.value)
+        self._storage.record_snapshot(
+            result.master, source=source,
+            pair=result.pair, regime=self._regime.value,
+            opportunity_rank=result.opportunity.score if result.opportunity else None)
 
         # Contract-change monitoring (Part 18, Section 10): diff the security
         # facts against the last known baseline, then update the baseline.

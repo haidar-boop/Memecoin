@@ -72,12 +72,20 @@ class ScoringWeights:
 
 @dataclass(frozen=True)
 class SecuritySubWeights:
-    """Sub-weights inside the security score (Part 33, Section 10)."""
+    """Sub-weights inside the security score (Part 33, Section 11).
+
+    Match Part 33 Section 11's literal rug-risk weighting exactly (Rule 1 —
+    the spec is the source of truth): Contract Safety /25, Liquidity Safety
+    /20, Developer Safety /20, Distribution Safety /20, Social Authenticity
+    (manipulation) /15. An earlier build shipped liquidity 0.25 / developer
+    0.15, which matched neither the spec nor its own handoff note; corrected
+    here during the Parts 20-33 verification pass.
+    """
 
     contract: float = 0.25
-    liquidity: float = 0.25
+    liquidity: float = 0.20
     distribution: float = 0.20
-    developer: float = 0.15
+    developer: float = 0.20
     manipulation: float = 0.15
 
     def __post_init__(self) -> None:
@@ -641,6 +649,28 @@ class MomentumSubWeights:
 
 
 @dataclass(frozen=True)
+class OpportunityWeights:
+    """Watchlist opportunity-ranking weights (Part 28, Section 5).
+
+    A SECOND, upside-tilted ranking axis, distinct from the Part 31-locked
+    master score: it decides which tracked tokens deserve attention/recheck
+    priority, and never changes the master score or its Elite/Strong/Avoid
+    classification. Literal Section 5 weights:
+    Growth Potential 30 / Current Momentum 25 / Foundation Quality 20 /
+    Risk Level 15 / Timing 10.
+    """
+
+    growth_potential: float = 0.30
+    momentum: float = 0.25
+    foundation: float = 0.20
+    risk: float = 0.15
+    timing: float = 0.10
+
+    def __post_init__(self) -> None:
+        _check_weight_sum("opportunity", dataclasses.asdict(self))
+
+
+@dataclass(frozen=True)
 class MomentumThresholds:
     """Momentum analysis anchors (Parts 14 and 26)."""
 
@@ -877,6 +907,7 @@ class Settings:
     workflow: WorkflowSettings = field(default_factory=WorkflowSettings)
     momentum: MomentumThresholds = field(default_factory=MomentumThresholds)
     momentum_weights: MomentumSubWeights = field(default_factory=MomentumSubWeights)
+    opportunity_weights: OpportunityWeights = field(default_factory=OpportunityWeights)
     narrative: NarrativeThresholds = field(default_factory=NarrativeThresholds)
     narrative_weights: NarrativeSubWeights = field(default_factory=NarrativeSubWeights)
     viral_weights: ViralSubWeights = field(default_factory=ViralSubWeights)
@@ -930,6 +961,7 @@ class Settings:
             workflow=_load_group(WorkflowSettings, "WORKFLOW", env),
             momentum=_load_group(MomentumThresholds, "MOMENTUM", env),
             momentum_weights=_load_group(MomentumSubWeights, "MOMENTUM_WEIGHTS", env),
+            opportunity_weights=_load_group(OpportunityWeights, "OPPORTUNITY_WEIGHTS", env),
             narrative=_load_group(NarrativeThresholds, "NARRATIVE", env),
             narrative_weights=_load_group(NarrativeSubWeights, "NARRATIVE_WEIGHTS", env),
             viral_weights=_load_group(ViralSubWeights, "VIRAL_WEIGHTS", env),

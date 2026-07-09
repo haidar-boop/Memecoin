@@ -58,6 +58,33 @@ def test_snapshot_roundtrip(storage):
     assert history[0]["source"] == "test"
 
 
+def test_top_opportunities_ranks_by_latest_opportunity_rank(storage):
+    """Part 28 S5/S6: active watchlist tokens ordered by their latest
+    opportunity rank; archived excluded; NULL-rank tokens sort last."""
+    import dataclasses as _dc
+    from meme_intelligence.core.models import TokenIdentity
+    a = TokenIdentity(chain="solana", address="TokA", symbol="AAA")
+    b = TokenIdentity(chain="solana", address="TokB", symbol="BBB")
+    c = TokenIdentity(chain="solana", address="TokC", symbol="CCC")
+    dead = TokenIdentity(chain="solana", address="TokDead", symbol="DED")
+    for tok in (a, b, c, dead):
+        storage.update_watchlist(tok, WatchlistTier.TIER_2_DEVELOPING, score=70.0)
+    storage.record_snapshot(_dc.replace(make_master(), token=a),
+                            source="t", opportunity_rank=55.0)
+    storage.record_snapshot(_dc.replace(make_master(), token=b),
+                            source="t", opportunity_rank=88.0)
+    # c gets no opportunity_rank (NULL) -> sorts last but not dropped
+    storage.record_snapshot(_dc.replace(make_master(), token=c), source="t")
+    storage.archive(dead, "gone")  # archived must be excluded
+
+    ranked = storage.top_opportunities(limit=10)
+    addresses = [r["address"] for r in ranked]
+    assert "TokDead" not in addresses            # archived excluded
+    assert addresses[0] == "TokB"                # highest rank first (88)
+    assert addresses[1] == "TokA"                # then 55
+    assert addresses[-1] == "TokC"               # NULL rank sorts last, still present
+
+
 def test_watchlist_add_update_tier_change(storage):
     added = storage.update_watchlist(TOKEN, WatchlistTier.TIER_2_DEVELOPING,
                                      score=72.0, classification=Classification.WATCHLIST)

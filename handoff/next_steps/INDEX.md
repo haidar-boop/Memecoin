@@ -66,3 +66,30 @@ Parts 20, 21, 22 (minus §4), 25, 26, 27, 28, 30, 31, 32, 33 are lower
 priority since they're substantially already reflected in the codebase —
 treat them as a verification pass (does the current implementation
 actually satisfy this text?) rather than a from-scratch build.
+
+## Verification pass — completed 2026-07-09
+
+All of Parts 20-33 were read against the code. Results:
+
+- **Satisfied, no work needed:** Parts 20, 22, 26, 30, 31, 32. (Part 31's
+  locked scoring weights match the code exactly; the momentum, data-
+  source and consolidation parts are fully covered. Documented deviations
+  — e.g. Part 20 §3's weights superseded by the Part 31 lock — are
+  intentional and recorded in `../DECISIONS_LOG.md`.)
+- **Part 33 — corrected:** §11's security sub-weights (Liquidity /20,
+  Developer /20) did not match the shipped code (Liquidity 0.25 /
+  Developer 0.15), an undocumented drift. Code aligned to the literal
+  spec (Rule 1) and locked with a test; `DECISIONS_LOG.md` item 2
+  corrected.
+- **Part 28 — built:** §5/§6 Opportunity Ranking implemented
+  (`analyzers/opportunity_ranker.py`) — an upside-tilted watchlist
+  attention-ranking (Growth 30 / Momentum 25 / Foundation 20 / Risk 15 /
+  Timing 10) that is deliberately separate from the Part 31-locked master
+  score. Persisted per snapshot; surfaced via `watchlist --top`.
+- **Part 25 §10** (a near-identical opportunity-rating with different
+  weights) is treated as satisfied by the Part 28 ranking above, per the
+  owner's direction to consolidate overlapping formulas.
+- **Genuinely deferred (documented, not spec-compliance failures):** the
+  web/monitoring **dashboard** (Part 21 §10 / 22 / 27 §12 / 28 §11) —
+  the system is CLI + Telegram; Part 27 §10 **creator-track-record
+  intelligence** — blocked on a data source neither current API provides.
