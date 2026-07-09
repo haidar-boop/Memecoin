@@ -326,10 +326,13 @@ def make_rule_result(community, overall=88.0):
         sub_scores={"liquidity": 85.0}, findings=(),
     )
     return SimpleNamespace(
-        pair=SimpleNamespace(base_token=TOKEN),
+        # Deep liquidity + no AI judgment: the strong-candidate vetoes
+        # (depth floor, AI-confidence floor) stay out of these gate tests.
+        pair=SimpleNamespace(base_token=TOKEN, liquidity_usd=90_000.0),
         security=security,
         onchain=SimpleNamespace(overall_score=80.0),
         community=community,
+        ai_judgment=None,
         master=SimpleNamespace(
             final_score=overall,
             classification=SimpleNamespace(value="strong_candidate"),

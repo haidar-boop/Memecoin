@@ -172,14 +172,30 @@ class AlertThresholds:
     # so a genuinely strong launch still reaches the operator (Part 2 S4;
     # Rule 8 — the missing gate is named, never assumed passed).
     strong_candidate_overall: float = 88.0
+    # Depth veto: the "liquidity" gate scores lock SAFETY, not pool depth, so
+    # a $16k pool could clear every gate and fire a HIGH alert while being
+    # trivially manipulable. Below this absolute USD depth (or with unknown
+    # liquidity — Rule 8), a strong candidate downgrades to MEDIUM.
+    strong_candidate_min_liquidity_usd: float = 25000.0
+    # AI veto: when an AI verification ran, a lukewarm judgment (confidence
+    # below this) downgrades the alert instead of riding along as a footnote.
+    # No AI configured -> no veto (Rule 9 — degrade gracefully).
+    strong_candidate_min_ai_confidence: float = 40.0
 
     def __post_init__(self) -> None:
-        for name, value in dataclasses.asdict(self).items():
-            _check_range(f"alert threshold '{name}'", value, 0.0, 100.0)
+        for name in ("security", "community", "liquidity", "onchain", "overall",
+                     "momentum", "strong_candidate_overall",
+                     "strong_candidate_min_ai_confidence"):
+            _check_range(f"alert threshold '{name}'", getattr(self, name), 0.0, 100.0)
         if self.strong_candidate_overall < self.overall:
             raise ConfigurationError(
                 "strong_candidate_overall must be >= overall "
                 f"({self.strong_candidate_overall} < {self.overall})")
+        if (not math.isfinite(self.strong_candidate_min_liquidity_usd)
+                or self.strong_candidate_min_liquidity_usd <= 0):
+            raise ConfigurationError(
+                "alert threshold 'strong_candidate_min_liquidity_usd' must be "
+                f"positive, got {self.strong_candidate_min_liquidity_usd}")
 
 
 @dataclass(frozen=True)

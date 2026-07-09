@@ -85,6 +85,50 @@ async def test_strong_fresh_token_gets_high_strong_candidate_alert():
     assert "high_priority_opportunity" not in types
 
 
+async def test_shallow_liquidity_vetoes_strong_candidate():
+    """A gate-passing fresh launch with pool depth below the floor is
+    downgraded to MEDIUM with the depth named — the liquidity GATE scores
+    lock safety, not depth, so this veto is what keeps $16k pools off a
+    HIGH-filtered phone."""
+    rules = AutomationRules(
+        AlertThresholds(strong_candidate_min_liquidity_usd=100_000.0),  # fixture has 90k
+        AlertEngineSettings())
+    result = await pipeline_result()
+    assert result.master.final_score >= 88.0  # would otherwise be a strong candidate
+    events = rules.evaluate(result)
+    types = {e.alert_type: e for e in events}
+    assert "strong_candidate" not in types
+    assert types["early_opportunity"].priority is AlertPriority.MEDIUM
+    assert any("liquidity depth" in r for r in types["early_opportunity"].reasons)
+
+
+async def test_low_ai_confidence_vetoes_strong_candidate():
+    """A lukewarm AI verification (below the confidence floor) downgrades the
+    alert instead of riding along as a footnote."""
+    import dataclasses
+    from types import SimpleNamespace
+
+    result = await pipeline_result()
+    judged = dataclasses.replace(result, ai_judgment=SimpleNamespace(confidence=22.0))
+    events = make_rules().evaluate(judged)
+    types = {e.alert_type: e for e in events}
+    assert "strong_candidate" not in types
+    assert any("AI verification confidence" in r
+               for r in types["early_opportunity"].reasons)
+
+
+async def test_confident_ai_keeps_strong_candidate_high():
+    import dataclasses
+    from types import SimpleNamespace
+
+    result = await pipeline_result()
+    judged = dataclasses.replace(result, ai_judgment=SimpleNamespace(confidence=80.0))
+    events = make_rules().evaluate(judged)
+    types = {e.alert_type: e for e in events}
+    assert "strong_candidate" in types
+    assert types["strong_candidate"].priority is AlertPriority.HIGH
+
+
 async def test_good_but_not_strong_token_stays_medium_provisional():
     """A token that passes the gates but does NOT clear the raised strong
     bar stays a MEDIUM early_opportunity (Rule 8 — unverified community).

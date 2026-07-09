@@ -224,24 +224,27 @@ class AutomationRules:
         # HIGH delivery filter. The missing gate is named, never assumed
         # passed (Rule 8), so this stays honest confirmation-with-a-caveat.
         overall_score = result.master.final_score
+        caveats: list[str] = []
         if (set(unverified) <= _STRONG_CANDIDATE_ALLOWED_UNVERIFIED
                 and overall_score >= self._t.strong_candidate_overall):
-            return AlertEvent(
-                priority=AlertPriority.HIGH,
-                alert_type="strong_candidate",
-                token=result.pair.base_token,
-                title=f"Strong candidate (score {overall_score:.0f}) — "
-                      f"community unverified",
-                reasons=(f"classification: {result.master.classification.value}",
-                         "every measurable gate passed strongly; "
-                         "community data not yet available (Rule 8)"),
-                scores=scores,
-                why_it_matters="A fresh launch clearing security, on-chain and "
-                               "liquidity strongly — the early setup worth watching, "
-                               "pending community confirmation.",
-                monitoring=("confirm community traction before sizing any position",
-                            "watch holder growth and volume quality for continuation"),
-            )
+            caveats = self._strong_candidate_caveats(result)
+            if not caveats:
+                return AlertEvent(
+                    priority=AlertPriority.HIGH,
+                    alert_type="strong_candidate",
+                    token=result.pair.base_token,
+                    title=f"Strong candidate (score {overall_score:.0f}) — "
+                          f"community unverified",
+                    reasons=(f"classification: {result.master.classification.value}",
+                             "every measurable gate passed strongly; "
+                             "community data not yet available (Rule 8)"),
+                    scores=scores,
+                    why_it_matters="A fresh launch clearing security, on-chain and "
+                                   "liquidity strongly — the early setup worth watching, "
+                                   "pending community confirmation.",
+                    monitoring=("confirm community traction before sizing any position",
+                                "watch holder growth and volume quality for continuation"),
+                )
 
         return AlertEvent(
             priority=AlertPriority.MEDIUM,
@@ -250,11 +253,40 @@ class AutomationRules:
             title=f"Provisional opportunity (score {result.master.final_score:.0f}) — "
                   f"unverified gates: {', '.join(unverified)}",
             reasons=(f"classification: {result.master.classification.value}",
-                     "unverified categories are NOT confirmation (Part 31 Section 6)"),
+                     "unverified categories are NOT confirmation (Part 31 Section 6)",
+                     *caveats),
             scores=scores,
             monitoring=tuple(f"verify the {name} gate before sizing any position"
                              for name in unverified),
         )
+
+    def _strong_candidate_caveats(self, result: PipelineResult) -> list[str]:
+        """Vetoes keeping a gate-passing fresh launch out of the HIGH tier.
+
+        Two live failure modes both produced HIGH alerts on junk: the
+        "liquidity" gate scores lock safety, not DEPTH, so a ~$16k pool
+        (trivially manipulable) cleared every gate; and a lukewarm AI
+        verification rode along as a footnote instead of counting. Each veto
+        downgrades the alert to MEDIUM with the reason named (Rule 8), so a
+        HIGH-filtered phone never sees it. Unknown liquidity vetoes too —
+        unverified depth is not depth.
+        """
+        caveats: list[str] = []
+        liquidity = result.pair.liquidity_usd
+        floor = self._t.strong_candidate_min_liquidity_usd
+        if liquidity is None or not math.isfinite(liquidity) or liquidity < floor:
+            shown = (f"${liquidity:,.0f}" if liquidity is not None
+                     and math.isfinite(liquidity) else "unknown")
+            caveats.append(f"liquidity depth {shown} is below the strong-candidate "
+                           f"floor (${floor:,.0f}) — thin pools are easily manipulated")
+        judgment = result.ai_judgment
+        if (judgment is not None
+                and judgment.confidence < self._t.strong_candidate_min_ai_confidence):
+            caveats.append(
+                f"AI verification confidence {judgment.confidence:.0f}/100 is below "
+                f"the strong-candidate floor "
+                f"({self._t.strong_candidate_min_ai_confidence:.0f})")
+        return caveats
 
     # IF momentum accelerates through the gate in a sane entry zone THEN
     # surface it (Part 15 Section 5 — momentum alert).
