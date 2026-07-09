@@ -165,11 +165,13 @@ from meme_intelligence.core.models import TokenIdentity
 class FakeMarketService:
     """Market service double: serves best pairs and a fixed verification verdict."""
 
-    def __init__(self, pairs_by_address=None, verdict=(None, "no second source")):
+    def __init__(self, pairs_by_address=None, verdict=(None, "no second source"),
+                 all_providers_down=False):
         self.pairs_by_address = pairs_by_address or {}
         self.verdict = verdict
         self.recheck_calls = 0
         self.verify_calls = 0
+        self._all_providers_down = all_providers_down
 
     async def get_best_pair(self, address, chain=None):
         self.recheck_calls += 1
@@ -178,6 +180,16 @@ class FakeMarketService:
     async def cross_check_liquidity(self, pair):
         self.verify_calls += 1
         return self.verdict
+
+    def health(self):
+        from meme_intelligence.core.provider_pool import ProviderHealth
+        if self._all_providers_down:
+            return [ProviderHealth(name="dexscreener", healthy=False,
+                                   consecutive_failures=5, total_failures=5,
+                                   total_successes=0, cooldown_remaining=45.0)]
+        return [ProviderHealth(name="dexscreener", healthy=True,
+                               consecutive_failures=0, total_failures=0,
+                               total_successes=10)]
 
 
 def fast_recheck_settings() -> Settings:
@@ -227,6 +239,24 @@ async def test_recheck_archives_token_with_no_pairs():
         assert storage.get_watchlist() == []
         archived = storage.get_watchlist(include_archived=True)
         assert archived and archived[0].tier is WatchlistTier.ARCHIVED
+
+
+async def test_transient_provider_outage_does_not_archive_healthy_token():
+    """Bug-hunt: get_best_pair returning None during a total provider
+    outage (AllProvidersFailedError) was indistinguishable from a token
+    genuinely having no pairs left, so a transient outage silently
+    archived healthy watchlist tokens."""
+    alive = TokenIdentity(chain="solana", address="TokenAlive", symbol="OK")
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        storage.update_watchlist(alive, WatchlistTier.TIER_2_DEVELOPING, score=70.0)
+        market = FakeMarketService({}, all_providers_down=True)  # outage, not death
+        scanner = make_scanner_with_market(
+            storage, [], {}, market, settings=fast_recheck_settings(),
+        )
+        await scanner.run(max_cycles=1)
+        assert storage.get_watchlist() != []  # still tracked, not archived
+        archived = storage.get_watchlist(include_archived=True)
+        assert not any(e.tier is WatchlistTier.ARCHIVED for e in archived)
 
 
 async def test_source_disagreement_downgrades_opportunity_alert():
@@ -397,6 +427,56 @@ async def test_verification_off_means_no_ai_call():
         await scanner.run(max_cycles=1)
         assert ai.judge_calls == 0
         assert any(e.alert_type == "high_priority_opportunity" for e in sink.sent)
+
+
+async def test_verify_opportunities_false_respected_even_with_enable_in_monitor_true():
+    """Bug-hunt: an `or` in the constructor meant verify_opportunities=false
+    was ignored whenever enable_in_monitor was true, so a per-token
+    judgment discarded for low confidence got silently re-attempted a
+    second time on a gate-passing token — a real extra paid call the
+    user explicitly disabled."""
+    settings = Settings.from_env(env={
+        "MEMEINTEL_AI_ENABLE_IN_MONITOR": "true",
+        "MEMEINTEL_AI_VERIFY_OPPORTUNITIES": "false",
+    })
+    ai = VerifierAI(judgment=None)  # simulates a discarded/low-confidence judgment
+    sink = RecordingSink()
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner, _ = gate_passing_scanner(storage, ai, sink, settings=settings)
+        assert scanner._ai_verifier is None
+        await scanner.run(max_cycles=1)
+        # exactly one call: the per-token enable_in_monitor pass, NOT a
+        # second verification call on top of it
+        assert ai.judge_calls == 1
+
+
+async def test_persistent_gate_passer_verified_only_once():
+    """Bug-hunt: a token still passing every gate on its Nth watchlist
+    recheck got re-judged with a fresh paid Claude call every single
+    time, even while its alert sat cooldown-suppressed and unseen."""
+    judgment = weak_narrative_judgment()
+    import dataclasses as _dc4
+    strong = _dc4.replace(
+        judgment,
+        narrative_inputs=NarrativeInputs(
+            memorability=90.0, shareability=90.0, emotional_impact=85.0,
+            cultural_timing=85.0, community_participation=90.0,
+            meme_strength=90.0, community_creativity=85.0, long_term_strength=80.0,
+        ),
+    )
+    ai = VerifierAI(judgment=strong)
+    sink = RecordingSink()
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner, pair = gate_passing_scanner(
+            storage, ai, sink, settings=fast_recheck_settings())
+        # cycle 1: discovers + verifies + tiers the token
+        await scanner.run(max_cycles=1)
+        assert ai.judge_calls == 1
+        # cycle 2: the SAME token comes up again via watchlist recheck
+        # (fast_recheck_settings reruns every cycle) and still passes
+        # every gate — must NOT trigger a second AI call
+        await scanner.run(max_cycles=1)
+        assert ai.judge_calls == 1
 
 
 async def test_dead_watchlist_token_archived_with_postmortem():

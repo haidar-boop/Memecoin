@@ -75,6 +75,7 @@ class _TrackedLaunch:
     graduated: bool = False          # migration event seen (fast-path promotion)
     frontend_misses: int = 0
     promotion_reasons: tuple[str, ...] = field(default_factory=tuple)
+    promoted_at: datetime | None = None  # set once, at the actual promotion moment
 
 
 class LaunchMonitor:
@@ -101,6 +102,11 @@ class LaunchMonitor:
         :class:`~meme_intelligence.scanners.discovery.RejectedPool`.
         """
         now = self._now()
+        # Free up slots taken by expired launches BEFORE checking capacity —
+        # otherwise a full tracking table stays full forever once the TTL
+        # starts elapsing, permanently rejecting new launches even though
+        # the old ones are long past their window (bug-hunt finding).
+        self._expire_stale(now)
         accepted = 0
         rejections: list[LaunchRejection] = []
         for launch in launches:
@@ -158,6 +164,7 @@ class LaunchMonitor:
         if entry.status is LaunchStatus.PENDING:
             entry.status = LaunchStatus.READY
             entry.promotion_reasons = ("bonding curve completed: token graduated to a DEX",)
+            entry.promoted_at = self._now()
             entry.next_check_at = self._now()  # confirmable immediately
             self._logger.info("launch graduated: %s (%s)",
                               token.address, entry.launch.token.symbol or "?")
@@ -208,6 +215,7 @@ class LaunchMonitor:
         if passed:
             entry.status = LaunchStatus.READY
             entry.promotion_reasons = tuple(reasons)
+            entry.promoted_at = now
             entry.next_check_at = now  # confirmable immediately
             self._logger.info("launch promoted: %s (%s) — %s",
                               key, entry.launch.token.symbol or "?", "; ".join(reasons))
@@ -256,8 +264,16 @@ class LaunchMonitor:
         return True, reasons
 
     def _expire_stale(self, now: datetime) -> None:
+        # Only PENDING entries expire on the TTL — a READY candidate has
+        # already earned promotion and is just waiting on independent
+        # market confirmation (Section 2), which can legitimately take
+        # longer than pending_ttl_hours for a token the market providers
+        # haven't indexed yet. Expiring it here would silently discard an
+        # already-vetted candidate and contradicts the module's own
+        # documented retry guarantee (Rule 7).
         cutoff = now - timedelta(hours=self._s.pending_ttl_hours)
-        stale = [key for key, e in self._tracked.items() if e.first_seen < cutoff]
+        stale = [key for key, e in self._tracked.items()
+                 if e.status is LaunchStatus.PENDING and e.first_seen < cutoff]
         for key in stale:
             entry = self._tracked.pop(key)
             self._logger.info("expiring tracked launch %s (%s): no promotion within %.0fh",
@@ -274,7 +290,7 @@ class LaunchMonitor:
                 launch=e.launch,
                 state=e.last_state,
                 reasons=e.promotion_reasons,
-                promoted_at=now,
+                promoted_at=e.promoted_at,
             )
             for e in self._tracked.values()
             if e.status is LaunchStatus.READY and e.next_check_at <= now

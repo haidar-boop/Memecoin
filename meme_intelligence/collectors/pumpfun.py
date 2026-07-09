@@ -148,7 +148,18 @@ class PumpPortalClient:
             self._task.cancel()
             try:
                 await self._task
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001 — shutdown must not raise
+            except asyncio.CancelledError:
+                # This is expected: we just cancelled the listener task
+                # ourselves. But if the task RUNNING close() is itself
+                # being cancelled (e.g. an outer shutdown timeout), that
+                # cancellation must propagate rather than be silently
+                # swallowed here — otherwise the caller's cancel request
+                # is lost and shutdown can hang past its deadline.
+                current = asyncio.current_task()
+                if current is not None and current.cancelling() > 0:
+                    self._task = None
+                    raise
+            except Exception:  # noqa: BLE001 — listener errors must not block shutdown
                 pass
             self._task = None
         if self._session is not None and self._owns_session and not self._session.closed:
@@ -190,9 +201,17 @@ class PumpPortalClient:
                     await ws.send_json({"method": "subscribeNewToken"})
                     await ws.send_json({"method": "subscribeMigration"})
                     self._connected = True
-                    delay = _RECONNECT_BASE_DELAY  # healthy connection resets backoff
                     self._logger.info("pumpportal stream connected and subscribed")
                     async for msg in ws:
+                        # Reset backoff only once the connection PROVES
+                        # healthy (a message actually arrives) — resetting
+                        # right after the handshake let a server that
+                        # accepts-then-immediately-drops (overload, or
+                        # PumpPortal's one-connection-per-client policy
+                        # rejecting us) hammer it at ~1 reconnect/second
+                        # forever, worsening the exact ban this class warns
+                        # about (Rule 11).
+                        delay = _RECONNECT_BASE_DELAY
                         if msg.type == aiohttp.WSMsgType.TEXT:
                             self._handle_message(msg.data)
                         elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):

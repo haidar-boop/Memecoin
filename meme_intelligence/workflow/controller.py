@@ -134,21 +134,31 @@ class ContinuousScanner:
                 "wallet service wired but MEMEINTEL_WALLET_ENABLE_IN_MONITOR is off; "
                 "smart-money analysis stays out of the scan loop")
             wallet_service = None
-        # Two AI modes (Part 23 + Part 32.5 Section 8): enable_in_monitor
-        # judges every analyzed token (expensive — the pipeline gets the
-        # service); verify_opportunities judges ONLY tokens that passed all
-        # review gates, right before their alert dispatches (the scanner
-        # keeps the service for that single call).
-        self._ai_verifier = None
-        if ai_service is not None:
-            if settings.ai.verify_opportunities or settings.ai.enable_in_monitor:
-                self._ai_verifier = ai_service
-            else:
-                self._logger.info(
-                    "AI service wired but both MEMEINTEL_AI_ENABLE_IN_MONITOR and "
-                    "MEMEINTEL_AI_VERIFY_OPPORTUNITIES are off; AI stays out of the loop")
-            if not settings.ai.enable_in_monitor:
-                ai_service = None  # pipeline judges nothing per-token
+        # Two INDEPENDENT AI modes (Part 23 + Part 32.5 Section 8) — neither
+        # flag implies the other. enable_in_monitor judges every analyzed
+        # token (expensive — the pipeline gets the service);
+        # verify_opportunities judges ONLY tokens that passed all review
+        # gates. Previously an `or` here meant MEMEINTEL_AI_VERIFY_
+        # OPPORTUNITIES=false was ignored whenever enable_in_monitor was
+        # on: a per-token judgment discarded for low confidence (or any
+        # other reason) got silently re-attempted a second time on a
+        # gate-passing token — a real extra paid call the user explicitly
+        # disabled (bug-hunt finding).
+        had_ai_service = ai_service is not None
+        self._ai_verifier = (ai_service if had_ai_service and settings.ai.verify_opportunities
+                             else None)
+        if had_ai_service and not settings.ai.enable_in_monitor:
+            ai_service = None  # pipeline judges nothing per-token
+        if had_ai_service and not settings.ai.enable_in_monitor and not settings.ai.verify_opportunities:
+            self._logger.info(
+                "AI service wired but both MEMEINTEL_AI_ENABLE_IN_MONITOR and "
+                "MEMEINTEL_AI_VERIFY_OPPORTUNITIES are off; AI stays out of the loop")
+        # A token verified once stays verified for this scanner's lifetime:
+        # without this, a persistent gate-passer got re-judged with a
+        # fresh paid Claude call on EVERY watchlist recheck (Part 15
+        # Section 2 cadence) forever, even while its alert sat
+        # cooldown-suppressed and unseen (bug-hunt finding).
+        self._ai_verified: set[tuple[str, str]] = set()
         self._pipeline = ResearchPipeline(settings, goplus_client,
                                           community_client=community_client,
                                           wallet_service=wallet_service,
@@ -227,11 +237,17 @@ class ContinuousScanner:
             key = (token.chain, token.address.lower())
             if key in self._seen:
                 continue
-            self._seen.add(key)
 
             result = await self._pipeline.analyze_pair(candidate.pair, regime=self._regime)
             if result is None:
+                # Security data not indexed yet — do NOT mark as seen: a
+                # never-actually-analyzed token must stay a live candidate
+                # for the pump.fun launch path (or a later cycle) to pick
+                # up, not get silently dropped when it's confirmed there
+                # (bug-hunt finding — _seen previously meant "attempted",
+                # not "analyzed").
                 continue
+            self._seen.add(key)
             stats.analyzed += 1
             processed_this_cycle.add(token.address.lower())
             await self._process_result(
@@ -320,13 +336,16 @@ class ContinuousScanner:
         # again on the enriched result — if the judgment holds the score up,
         # the alert fires annotated; if it knocks the score below a gate,
         # the high-priority alert simply never fires (Rule 13 logs why).
-        if self._ai_verifier is not None and not result.security.is_destructive:
+        verify_key = (token.chain, token.address.lower())
+        if (self._ai_verifier is not None and not result.security.is_destructive
+                and verify_key not in self._ai_verified):
             provisional = self._rules.evaluate(result, previous_score=previous_score)
             if any(e.alert_type == "high_priority_opportunity" for e in provisional):
                 self._logger.info("all gates passed for %s: running AI verification",
                                   token.address)
                 enriched = await self._pipeline.enrich_with_ai(
                     result, service=self._ai_verifier)
+                self._ai_verified.add(verify_key)
                 if (enriched is not result
                         and enriched.master.final_score < result.master.final_score):
                     self._logger.info(
@@ -404,6 +423,24 @@ class ContinuousScanner:
                 continue  # research-only entries wait for the daily routine
             pair = await self._market.get_best_pair(entry.token.address, chain=entry.token.chain)
             if pair is None:
+                # get_best_pair collapses two different situations into the
+                # same None: the token genuinely has no pairs left (dead),
+                # or every provider is transiently unavailable
+                # (AllProvidersFailedError). Archiving on the latter would
+                # silently discard a healthy watchlist token during a
+                # provider outage. Check health() to tell them apart —
+                # only archive when at least one provider is actually up
+                # and still reports nothing (Rule 6/9).
+                # Duck-typed market services (test doubles, older clients)
+                # may not implement health() — treat that as "unknown",
+                # not "all down", so archiving still proceeds as before.
+                health = self._market.health() if hasattr(self._market, "health") else []
+                if health and all(not p.healthy for p in health):
+                    self._logger.warning(
+                        "watchlist recheck for %s skipped: all market providers "
+                        "unavailable (transient outage, not archiving)",
+                        entry.token.address)
+                    continue
                 self._storage.archive(entry.token, "no active trading pairs remain")
                 continue
             result = await self._pipeline.analyze_pair(pair, regime=self._regime)

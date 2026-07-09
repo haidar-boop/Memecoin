@@ -169,6 +169,49 @@ def test_acks_and_malformed_messages_ignored():
     assert client.drain_migrations() == []
 
 
+# ---- PumpPortalClient reconnect backoff (Rule 7/11) ----
+
+class _FakeWS:
+    def __aiter__(self):
+        return self._agen()
+    async def _agen(self):
+        return
+        yield  # empty: handshake succeeds, stream ends with zero messages
+    async def send_json(self, data):
+        pass
+
+
+class _FakeWSCtx:
+    async def __aenter__(self):
+        return _FakeWS()
+    async def __aexit__(self, *exc_info):
+        return False
+
+
+class _FakeSession:
+    closed = False
+    def ws_connect(self, url, heartbeat=30.0):
+        return _FakeWSCtx()
+
+
+async def test_reconnect_backoff_escalates_on_accept_then_drop():
+    """Bug-hunt: delay was reset to base right after the handshake, before
+    any message proved the connection healthy. A server that accepts the
+    WS then immediately drops it (overload, or PumpPortal's one-connection
+    policy rejecting us) made the client hammer it at ~1/second forever."""
+    client = PumpPortalClient("wss://example.invalid", session=_FakeSession())
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+        if len(sleeps) >= 6:
+            client._stopping = True
+
+    client._sleep = fake_sleep
+    await client._listen_forever()
+    assert sleeps == [1.0, 2.0, 4.0, 8.0, 16.0, 32.0]
+
+
 def test_launch_without_optional_fields_still_parses():
     client = make_stream_client()
     client._handle_message(json.dumps({"txType": "create", "mint": "M1"}))
@@ -323,6 +366,22 @@ def test_tracking_capacity_bounded():
     assert all("capacity" in r.reason for r in rejections)
 
 
+def test_capacity_freed_by_expiry_before_new_launches_are_rejected():
+    """Bug-hunt: the capacity cap was enforced before stale entries were
+    expired, so a full table stayed permanently full and rejected new
+    launches even though old slots were long past their TTL."""
+    clock = Clock()
+    monitor = make_monitor(clock, max_pending=2, pending_ttl_hours=1.0)
+    monitor.ingest([make_launch(address="Old1"), make_launch(address="Old2")])
+    assert monitor.tracked_count == 2
+
+    clock.advance(hours=2)  # both originals are now past their TTL
+    accepted, rejections = monitor.ingest([make_launch(address="New1")])
+    assert accepted == 1
+    assert rejections == []
+    assert monitor.tracked_count == 1
+
+
 # ---- LaunchMonitor: rechecks, promotion, expiry ----
 
 class FakeFrontend:
@@ -465,6 +524,44 @@ def test_migration_event_fast_paths_tracked_launch():
     # untracked mints are ignored, not adopted
     monitor.note_migration(TokenIdentity(chain="solana", address="Unknown"))
     assert monitor.tracked_count == 1
+
+
+def test_ready_candidate_survives_pending_ttl_while_awaiting_confirmation():
+    """Bug-hunt: _expire_stale dropped READY candidates on the same TTL as
+    PENDING ones, discarding an already-vetted candidate that was simply
+    waiting on independent market confirmation (Section 2) — a token the
+    market providers haven't indexed yet must be retried, not lost."""
+    clock = Clock()
+    monitor = make_monitor(clock, pending_ttl_hours=1.0)
+    monitor.ingest([make_launch()])
+    monitor.note_migration(TokenIdentity(chain="solana", address=MINT))
+    assert len(monitor.ready_candidates()) == 1
+
+    monitor.defer(TOKEN)  # market hasn't indexed it yet
+    clock.advance(hours=5)  # long past pending_ttl_hours
+    candidates = monitor.ready_candidates()
+    assert monitor.tracked_count == 1  # NOT expired despite the long wait
+    assert len(candidates) == 1
+
+
+def test_promoted_at_is_stable_across_repeated_calls():
+    """Bug-hunt: promoted_at was set to the ready_candidates() call time,
+    not the actual promotion moment, so it drifted on every call instead
+    of recording when the token actually qualified."""
+    clock = Clock()
+    monitor = make_monitor(clock)
+    monitor.ingest([make_launch()])
+    monitor.note_migration(TokenIdentity(chain="solana", address=MINT))
+    promotion_time = clock()
+
+    first = monitor.ready_candidates()[0]
+    clock.advance(hours=1)
+    monitor.defer(TOKEN)
+    clock.advance(seconds=200)
+    second = monitor.ready_candidates()[0]
+
+    assert first.promoted_at == promotion_time
+    assert second.promoted_at == promotion_time  # unchanged, not "now" again
 
 
 def test_confirm_and_defer_lifecycle():
