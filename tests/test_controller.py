@@ -259,6 +259,11 @@ async def test_transient_provider_outage_does_not_archive_healthy_token():
         assert not any(e.tier is WatchlistTier.ARCHIVED for e in archived)
 
 
+# The healthy make_pair() fixture scores ~93 overall with only community
+# unverified, so its opportunity alert is a HIGH strong_candidate.
+_CANDIDATE_TYPES = {"high_priority_opportunity", "strong_candidate", "early_opportunity"}
+
+
 async def test_source_disagreement_downgrades_opportunity_alert():
     """Part 15 Section 10: important events need multi-source confirmation."""
     pair = make_pair()
@@ -271,10 +276,11 @@ async def test_source_disagreement_downgrades_opportunity_alert():
         )
         await scanner.run(max_cycles=1)
         assert market.verify_calls >= 1
-        opportunity = [e for e in sink.sent if "opportunity" in e.alert_type]
-        assert opportunity
-        assert opportunity[0].priority is AlertPriority.LOW  # MEDIUM downgraded
-        assert any("DOWNGRADED" in r for r in opportunity[0].reasons)
+        candidate = [e for e in sink.sent if e.alert_type in _CANDIDATE_TYPES]
+        assert candidate
+        # a HIGH strong_candidate downgrades one step to MEDIUM on disagreement
+        assert candidate[0].priority is AlertPriority.MEDIUM
+        assert any("DOWNGRADED" in r for r in candidate[0].reasons)
 
 
 async def test_source_agreement_annotates_alert():
@@ -287,9 +293,28 @@ async def test_source_agreement_annotates_alert():
             market, sink=sink,
         )
         await scanner.run(max_cycles=1)
-        opportunity = [e for e in sink.sent if "opportunity" in e.alert_type]
-        assert opportunity
-        assert any("confirmed" in r for r in opportunity[0].reasons)
+        candidate = [e for e in sink.sent if e.alert_type in _CANDIDATE_TYPES]
+        assert candidate
+        assert any("confirmed" in r for r in candidate[0].reasons)
+
+
+async def test_strong_fresh_token_reaches_sink_at_high_priority():
+    """The whole point of the strong_candidate tier: a fresh launch with
+    NO community data but strong measurable gates produces a HIGH alert,
+    so it survives an external_min_priority=high delivery filter that was
+    hiding every MEDIUM opportunity signal."""
+    pair = make_pair()  # ~93 overall, no community client -> community unverified
+    sink = RecordingSink()
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        market = FakeMarketService(verdict=(True, "confirmed"))
+        scanner = make_scanner_with_market(
+            storage, [pair], {pair.base_token.address: clean_profile(pair.base_token)},
+            market, sink=sink,
+        )
+        await scanner.run(max_cycles=1)
+        strong = [e for e in sink.sent if e.alert_type == "strong_candidate"]
+        assert strong
+        assert strong[0].priority is AlertPriority.HIGH
 
 
 # ---- Part 32.5 S8: AI verification of gate-passing opportunities ----
@@ -565,13 +590,16 @@ def make_scanner_with_metered(storage, pools, profiles, *, wallet=None, ai=None,
 
 async def test_metered_services_off_by_default_even_when_wired():
     """Rule 10/11: wallet/AI never run in the loop without explicit opt-in —
-    the settings flags are authoritative over what the caller wired in."""
+    the settings flags are authoritative over what the caller wired in.
+    verify_opportunities is disabled here so this isolates the
+    enable_in_monitor gating from the separate gate-passer AI pass."""
     pair = make_pair()
     wallet, ai = RecordingWalletService(), RecordingAIService()
+    settings = Settings.from_env(env={"MEMEINTEL_AI_VERIFY_OPPORTUNITIES": "false"})
     with Storage(":memory:", now_func=lambda: NOW) as storage:
         scanner = make_scanner_with_metered(
             storage, [pair], {pair.base_token.address: clean_profile(pair.base_token)},
-            wallet=wallet, ai=ai,  # wired, but default settings say off
+            wallet=wallet, ai=ai, settings=settings,  # wired, but flags say off
         )
         history = await scanner.run(max_cycles=1)
         assert history[0].analyzed == 1
@@ -582,10 +610,17 @@ async def test_metered_services_off_by_default_even_when_wired():
 async def test_metered_services_run_when_opted_in():
     pair = make_pair()
     wallet, ai = RecordingWalletService(), RecordingAIService()
+    # enable_in_monitor on, verify_opportunities off: isolates the
+    # per-token pipeline judgment (one call) from the gate-passer pass.
+    settings = Settings.from_env(env={
+        "MEMEINTEL_WALLET_ENABLE_IN_MONITOR": "true",
+        "MEMEINTEL_AI_ENABLE_IN_MONITOR": "true",
+        "MEMEINTEL_AI_VERIFY_OPPORTUNITIES": "false",
+    })
     with Storage(":memory:", now_func=lambda: NOW) as storage:
         scanner = make_scanner_with_metered(
             storage, [pair], {pair.base_token.address: clean_profile(pair.base_token)},
-            wallet=wallet, ai=ai, settings=metered_on_settings(),
+            wallet=wallet, ai=ai, settings=settings,
         )
         history = await scanner.run(max_cycles=1)
         assert history[0].analyzed == 1  # a no-data wallet answer never blocks analysis

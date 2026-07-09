@@ -522,6 +522,40 @@ calling task's own cancellation.
 
 444 tests green (33 new, spanning all of the above).
 
+### Strong-candidate HIGH alert tier for fresh launches (live-feedback tuning)
+
+Second round of live-operation feedback: the operator was getting only
+HIGH risk warnings, never the positive opportunity signals, and asked
+why the bot "only finds rug pulls." Root cause was a design/config
+interaction, not a detection failure:
+
+1. Every positive opportunity signal (`early_opportunity`, `momentum`,
+   `smart_money_accumulation`) is MEDIUM priority by design, because for
+   a fresh pump.fun-era token the community gate can never be verified
+   (CoinGecko doesn't list it for days), so the "all gates verified"
+   HIGH `high_priority_opportunity` is unreachable.
+2. The operator had earlier raised `external_min_priority=high` to cut
+   alert-fatigue noise — which asymmetrically deleted every MEDIUM
+   positive signal while keeping every HIGH warning.
+
+Observed in their own data: HUHCAT was scored 86 (a strong provisional
+opportunity) then dropped to 50; they only received the HIGH score-drop
+warning, never the entry signal.
+
+Fix (chosen by the operator over "just lower the filter"): a new
+`strong_candidate` alert at HIGH priority. It fires when a token clears
+a raised overall bar (`AlertThresholds.strong_candidate_overall`,
+default 88, must be >= `overall`) with every MEASURABLE gate passing and
+the ONLY unverified gate being community. This lets a genuinely strong
+fresh launch reach a HIGH-filtered phone while staying honest (the
+alert names community as unverified — Rule 8; it is not the full
+"every gate verified" tier). It only fires when community data is
+genuinely absent: a present-but-weak or artificial community still
+fails the community gate and suppresses the alert. Wired into market
+cross-verification, the Part 32.5 §8 AI-verification trigger, and the
+"discoveries" delivery channel. Threshold is config (Rule 17), so the
+operator can raise it for fewer/stronger alerts.
+
 ## Notable implementation choices (Rule 19)
 
 - **Python 3.11 + asyncio** over Node.js (both allowed by spec): the

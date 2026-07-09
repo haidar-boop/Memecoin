@@ -317,7 +317,7 @@ def test_build_sinks_activates_on_secrets():
 
 # ---- Community-aware rules (gate now fed by the live collector) ----
 
-def make_rule_result(community):
+def make_rule_result(community, overall=88.0):
     """Minimal PipelineResult stand-in for targeted rule tests."""
     from types import SimpleNamespace
 
@@ -331,7 +331,7 @@ def make_rule_result(community):
         onchain=SimpleNamespace(overall_score=80.0),
         community=community,
         master=SimpleNamespace(
-            final_score=88.0,
+            final_score=overall,
             classification=SimpleNamespace(value="strong_candidate"),
         ),
     )
@@ -354,8 +354,16 @@ def test_opportunity_gate_uses_live_community_score():
     weak = SimpleNamespace(overall_score=40.0, is_artificial=False, findings=())
     assert rules._opportunity_rule(make_rule_result(weak)) is None
 
-    # No community data -> provisional MEDIUM, exactly as before (Rule 8).
-    event = rules._opportunity_rule(make_rule_result(None))
+    # No community data but overall clears the strong bar (88) -> HIGH
+    # strong_candidate (the fresh-launch tier).
+    event = rules._opportunity_rule(make_rule_result(None, overall=88.0))
+    assert event.alert_type == "strong_candidate"
+    assert event.priority is AlertPriority.HIGH
+    assert any("community" in r or "unverified" in r.lower()
+               for r in (event.title,) + event.reasons)
+
+    # No community data and below the strong bar -> MEDIUM provisional.
+    event = rules._opportunity_rule(make_rule_result(None, overall=86.0))
     assert event.alert_type == "early_opportunity"
     assert event.priority is AlertPriority.MEDIUM
 

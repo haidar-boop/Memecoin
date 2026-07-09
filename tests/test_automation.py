@@ -69,15 +69,37 @@ def make_rules() -> AutomationRules:
     return AutomationRules(AlertThresholds(), AlertEngineSettings())
 
 
-async def test_healthy_token_gets_provisional_opportunity_alert():
-    result = await pipeline_result()
+async def test_strong_fresh_token_gets_high_strong_candidate_alert():
+    """A fresh launch that clears the raised overall bar with every
+    measurable gate passing (only community unverified) earns a HIGH
+    strong_candidate alert — not capped at MEDIUM (Part 2 S4)."""
+    result = await pipeline_result()  # this fixture scores ~93 overall
+    assert result.master.final_score >= 88.0  # sanity: it IS a strong candidate
     events = make_rules().evaluate(result)
     types = {e.alert_type: e for e in events}
-    # community gate is unverified -> MEDIUM provisional, never HIGH
+    assert "strong_candidate" in types
+    assert types["strong_candidate"].priority is AlertPriority.HIGH
+    assert any("community" in r or "unverified" in r.lower()
+               for r in (types["strong_candidate"].title,) + types["strong_candidate"].reasons)
+    # the full "every gate verified" tier still requires community data
+    assert "high_priority_opportunity" not in types
+
+
+async def test_good_but_not_strong_token_stays_medium_provisional():
+    """A token that passes the gates but does NOT clear the raised strong
+    bar stays a MEDIUM early_opportunity (Rule 8 — unverified community).
+    Uses a high strong-candidate bar so the healthy fixture (~93) passes
+    'overall' but falls below it, landing deterministically in the MEDIUM
+    provisional tier."""
+    from meme_intelligence.config.settings import AlertThresholds
+    rules = AutomationRules(AlertThresholds(strong_candidate_overall=99.0),
+                            AlertEngineSettings())
+    result = await pipeline_result()
+    events = rules.evaluate(result)
+    types = {e.alert_type: e for e in events}
     assert "early_opportunity" in types
     assert types["early_opportunity"].priority is AlertPriority.MEDIUM
-    assert any("community" in r or "unverified" in r.lower()
-               for r in (types["early_opportunity"].title,) + types["early_opportunity"].reasons)
+    assert "strong_candidate" not in types
     assert "high_priority_opportunity" not in types
 
 

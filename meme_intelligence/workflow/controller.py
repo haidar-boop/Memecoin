@@ -54,7 +54,8 @@ from meme_intelligence.workflow.watchlist_review import (
 
 # Alert types whose evidence rests on market data and therefore get
 # multi-source verification before dispatch (Part 15, Section 10).
-_VERIFIABLE_ALERT_TYPES = {"high_priority_opportunity", "early_opportunity", "momentum"}
+_VERIFIABLE_ALERT_TYPES = {"high_priority_opportunity", "strong_candidate",
+                           "early_opportunity", "momentum"}
 
 _ERROR_BACKOFF_START = 5.0
 _ERROR_BACKOFF_MAX = 300.0
@@ -340,8 +341,9 @@ class ContinuousScanner:
         if (self._ai_verifier is not None and not result.security.is_destructive
                 and verify_key not in self._ai_verified):
             provisional = self._rules.evaluate(result, previous_score=previous_score)
-            if any(e.alert_type == "high_priority_opportunity" for e in provisional):
-                self._logger.info("all gates passed for %s: running AI verification",
+            if any(e.alert_type in ("high_priority_opportunity", "strong_candidate")
+                   for e in provisional):
+                self._logger.info("gate-passing candidate %s: running AI verification",
                                   token.address)
                 enriched = await self._pipeline.enrich_with_ai(
                     result, service=self._ai_verifier)
@@ -461,7 +463,8 @@ class ContinuousScanner:
         alert never reads as unconditional endorsement (Part 23 doctrine:
         always surface possible losses).
         """
-        if event.alert_type not in ("high_priority_opportunity", "early_opportunity"):
+        if event.alert_type not in ("high_priority_opportunity", "strong_candidate",
+                                    "early_opportunity"):
             return event
         extra = [f"AI verification: judgment confidence "
                  f"{judgment.confidence:.0f}/100 ({judgment.model})"]

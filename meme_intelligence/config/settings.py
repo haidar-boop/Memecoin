@@ -156,10 +156,22 @@ class AlertThresholds:
     onchain: float = 75.0
     overall: float = 85.0
     momentum: float = 70.0  # momentum score gate for momentum alerts (Part 15, Section 5)
+    # A fresh launch (pump.fun-era) can pass security/on-chain/liquidity
+    # with data but has no CoinGecko community data for days — so it never
+    # hits the "every gate verified" HIGH tier. When such a token clears
+    # THIS raised overall bar with every measurable gate passing, it earns
+    # a HIGH "strong candidate" alert (community explicitly unverified),
+    # so a genuinely strong launch still reaches the operator (Part 2 S4;
+    # Rule 8 — the missing gate is named, never assumed passed).
+    strong_candidate_overall: float = 88.0
 
     def __post_init__(self) -> None:
         for name, value in dataclasses.asdict(self).items():
             _check_range(f"alert threshold '{name}'", value, 0.0, 100.0)
+        if self.strong_candidate_overall < self.overall:
+            raise ConfigurationError(
+                "strong_candidate_overall must be >= overall "
+                f"({self.strong_candidate_overall} < {self.overall})")
 
 
 @dataclass(frozen=True)

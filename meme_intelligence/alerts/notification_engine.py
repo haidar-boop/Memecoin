@@ -33,6 +33,13 @@ from meme_intelligence.core.logging_setup import get_logger
 from meme_intelligence.core.models import TokenIdentity
 from meme_intelligence.workflow.pipeline import PipelineResult
 
+# Gates a fresh launch may legitimately leave unverified and still earn a
+# HIGH "strong candidate" alert: community data comes from CoinGecko,
+# which does not list pump.fun-era tokens for days. Every other gate
+# (overall/security/on-chain/liquidity) must have data and pass — only
+# this one may be missing (Rule 8: the gap is surfaced, not assumed).
+_STRONG_CANDIDATE_ALLOWED_UNVERIFIED = frozenset({"community"})
+
 
 @dataclass(frozen=True)
 class AlertEvent:
@@ -208,6 +215,34 @@ class AutomationRules:
                                "the rare setup the scanner exists to find.",
                 monitoring=("track holder growth and volume quality for continuation",),
             )
+
+        # Strong-candidate tier (Part 2 S4): a fresh launch whose ONLY
+        # unverified gate is community (no CoinGecko listing yet) but which
+        # clears a raised overall bar with every measurable gate passing
+        # still earns a HIGH alert — otherwise a genuinely strong pump.fun-
+        # era launch is permanently capped at MEDIUM and hidden behind a
+        # HIGH delivery filter. The missing gate is named, never assumed
+        # passed (Rule 8), so this stays honest confirmation-with-a-caveat.
+        overall_score = result.master.final_score
+        if (set(unverified) <= _STRONG_CANDIDATE_ALLOWED_UNVERIFIED
+                and overall_score >= self._t.strong_candidate_overall):
+            return AlertEvent(
+                priority=AlertPriority.HIGH,
+                alert_type="strong_candidate",
+                token=result.pair.base_token,
+                title=f"Strong candidate (score {overall_score:.0f}) — "
+                      f"community unverified",
+                reasons=(f"classification: {result.master.classification.value}",
+                         "every measurable gate passed strongly; "
+                         "community data not yet available (Rule 8)"),
+                scores=scores,
+                why_it_matters="A fresh launch clearing security, on-chain and "
+                               "liquidity strongly — the early setup worth watching, "
+                               "pending community confirmation.",
+                monitoring=("confirm community traction before sizing any position",
+                            "watch holder growth and volume quality for continuation"),
+            )
+
         return AlertEvent(
             priority=AlertPriority.MEDIUM,
             alert_type="early_opportunity",

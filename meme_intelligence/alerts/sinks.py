@@ -35,6 +35,7 @@ _PRIORITY_RANK = {
 # types fall through to "reports".
 ALERT_CHANNELS = {
     "high_priority_opportunity": "discoveries",
+    "strong_candidate": "discoveries",
     "early_opportunity": "discoveries",
     "new_token_discovery": "discoveries",
     "smart_money_accumulation": "smart_money",
