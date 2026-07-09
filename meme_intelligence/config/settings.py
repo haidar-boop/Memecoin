@@ -981,6 +981,35 @@ class LearningSettings:
 
 
 @dataclass(frozen=True)
+class LightGBMSettings:
+    """Hyperparameters for the warm-started outcome classifier (Section 4).
+
+    Kept small and configurable (Rule 17). ``full_retrain_rounds`` is the tree
+    budget for a from-scratch train; ``warm_start_rounds`` is how many trees
+    each warm-start adds on top of the prior model (``init_model``) so recent
+    data refines rather than replaces. Defaults are conservative for the small
+    datasets the layer starts with — deeper/greedier settings would overfit a
+    young dataset (Rule 8/21).
+    """
+
+    full_retrain_rounds: int = 120
+    warm_start_rounds: int = 30
+    learning_rate: float = 0.05
+    num_leaves: int = 31
+    min_child_samples: int = 5
+
+    def __post_init__(self) -> None:
+        for name in ("full_retrain_rounds", "warm_start_rounds", "num_leaves",
+                     "min_child_samples"):
+            value = getattr(self, name)
+            if value <= 0:
+                raise ConfigurationError(f"lightgbm setting '{name}' must be positive, got {value}")
+        if not (0.0 < self.learning_rate <= 1.0):
+            raise ConfigurationError(
+                f"lightgbm learning_rate must be in (0, 1], got {self.learning_rate}")
+
+
+@dataclass(frozen=True)
 class RugSignalWeights:
     """Point contributions for each hard rug signal (Section 5a).
 
@@ -1048,6 +1077,7 @@ class Settings:
     ai: AISettings = field(default_factory=AISettings)
     backtest: BacktestSettings = field(default_factory=BacktestSettings)
     learning: LearningSettings = field(default_factory=LearningSettings)
+    lightgbm: LightGBMSettings = field(default_factory=LightGBMSettings)
     rug_signal_weights: RugSignalWeights = field(default_factory=RugSignalWeights)
     log_level: str = "INFO"
     log_dir: str = "logs"
@@ -1104,6 +1134,7 @@ class Settings:
             ai=_load_group(AISettings, "AI", env),
             backtest=_load_group(BacktestSettings, "BACKTEST", env),
             learning=_load_group(LearningSettings, "LEARNING", env),
+            lightgbm=_load_group(LightGBMSettings, "LIGHTGBM", env),
             rug_signal_weights=_load_group(RugSignalWeights, "RUG_SIGNAL_WEIGHTS", env),
             log_level=env.get(f"{_ENV_PREFIX}_LOG_LEVEL", "INFO"),
             log_dir=env.get(f"{_ENV_PREFIX}_LOG_DIR", "logs"),
