@@ -46,7 +46,11 @@ from meme_intelligence.learning.ensemble import (
     AdaptiveEnsemble,
     rug_score_to_distribution,
 )
-from meme_intelligence.learning.features import FingerprintExtractor, StandardScalerBundle
+from meme_intelligence.learning.features import (
+    FEATURE_VERSION,
+    FingerprintExtractor,
+    StandardScalerBundle,
+)
 from meme_intelligence.learning.metrics import PredictionRecord, compute_metrics
 from meme_intelligence.learning.models import (
     CoinRecord,
@@ -115,8 +119,39 @@ class LearningService:
         return os.path.join(self._state_dir, name)
 
     def _load_artifacts(self) -> None:
-        """Restore persisted models so learning compounds across restarts."""
+        """Restore persisted models so learning compounds across restarts.
+
+        Feature-space versioning: model artifacts (scaler, analog index,
+        classifier, archetypes) are only loaded when they were saved under the
+        current :data:`FEATURE_VERSION`. On mismatch they are discarded — they
+        live in a different feature space and would produce garbage distances —
+        and the retrain counters reset so the next ``retrain_if_due`` rebuilds
+        everything from the stored raw snapshots (nothing is lost; the SQLite
+        records are version-independent, Rule 18). The ensemble's accuracy
+        history is feature-space-independent and always loads.
+        """
         try:
+            stored_version = None
+            if os.path.exists(self._path("state.joblib")):
+                import joblib
+
+                state = joblib.load(self._path("state.joblib"))
+                stored_version = state.get("feature_version")
+                self._last_retrain_count = state.get("last_retrain_count", 0)
+                self._scaler_fit_count = state.get("scaler_fit_count", 0)
+            if os.path.exists(self._path("ensemble.joblib")):
+                self._ensemble = AdaptiveEnsemble.load(self._path("ensemble.joblib"))
+
+            if stored_version != FEATURE_VERSION:
+                if os.path.exists(self._path("scaler.joblib")):
+                    self._logger.warning(
+                        "fingerprint feature space changed (v%s -> v%d): discarding "
+                        "trained models; they will rebuild from stored records",
+                        stored_version, FEATURE_VERSION)
+                self._last_retrain_count = 0
+                self._scaler_fit_count = 0
+                return
+
             if os.path.exists(self._path("scaler.joblib")):
                 self._scaler = StandardScalerBundle.load(self._path("scaler.joblib"))
             if os.path.exists(self._path("index.faiss")):
@@ -127,14 +162,6 @@ class LearningService:
                 self._classifier.load_model(self._path("classifier.txt"))
             if os.path.exists(self._path("archetypes.joblib")):
                 self._archetypes = ArchetypeModel.load(self._path("archetypes.joblib"))
-            if os.path.exists(self._path("ensemble.joblib")):
-                self._ensemble = AdaptiveEnsemble.load(self._path("ensemble.joblib"))
-            if os.path.exists(self._path("state.joblib")):
-                import joblib
-
-                state = joblib.load(self._path("state.joblib"))
-                self._last_retrain_count = state.get("last_retrain_count", 0)
-                self._scaler_fit_count = state.get("scaler_fit_count", 0)
         except Exception as exc:  # corrupt artifact must not brick the service
             self._logger.error("failed to load learning artifacts (%s); cold start", exc)
 
@@ -156,7 +183,8 @@ class LearningService:
             import joblib
 
             joblib.dump({"last_retrain_count": self._last_retrain_count,
-                         "scaler_fit_count": self._scaler_fit_count},
+                         "scaler_fit_count": self._scaler_fit_count,
+                         "feature_version": FEATURE_VERSION},
                         self._path("state.joblib"))
         except Exception as exc:
             self._logger.error("failed to persist learning artifacts: %s", exc)

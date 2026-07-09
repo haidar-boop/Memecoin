@@ -229,6 +229,40 @@ def test_resolution_grades_blended_verdict():
     assert service._ensemble.final_accuracy() == 1.0  # predicted rug, was rug
 
 
+def test_feature_version_mismatch_discards_models_and_rebuilds(tmp_path):
+    """Artifacts saved under an older fingerprint definition are discarded on
+    load (they live in a different feature space) and rebuilt from the stored
+    raw snapshots — learning data is never lost (Rule 18)."""
+    import joblib
+
+    env = dict(_ENV)
+    env["MEMEINTEL_LEARNING_STATE_DIR"] = str(tmp_path)
+    settings = Settings.from_env(env=env)
+
+    svc1 = LearningService(settings, now_func=lambda: NOW)
+    _seed(svc1)
+    assert svc1.retrain_if_due() is True
+    svc1.persist()
+    svc1.store.close()
+
+    # Simulate artifacts from an older feature space.
+    state = joblib.load(str(tmp_path / "state.joblib"))
+    state["feature_version"] = 1
+    joblib.dump(state, str(tmp_path / "state.joblib"))
+
+    svc2 = LearningService(settings, now_func=lambda: NOW)
+    # Stale models were discarded...
+    metrics = svc2.get_learning_metrics(persist=False)
+    assert metrics["classifier_ready"] is False
+    assert metrics["analog_memory_size"] == 0
+    # ...but the raw records survived, and one retrain restores everything.
+    assert svc2.store.resolved_count() == 30
+    assert svc2.retrain_if_due() is True
+    metrics = svc2.get_learning_metrics(persist=False)
+    assert metrics["classifier_ready"] is True
+    assert metrics["analog_memory_size"] == 30
+
+
 def test_retrain_not_due_below_threshold():
     service = _service()
     service.record_detection("c1", "solana", detection_price_usd=1.0)

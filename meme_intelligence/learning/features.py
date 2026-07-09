@@ -86,6 +86,25 @@ _BASE_METRICS: tuple[tuple[str, _BaseAccessor], ...] = (
     ("tx_count", _tx_count),
 )
 
+# USD/count metrics are heavy-tailed (a $2M pool vs a $2K pool spans three
+# orders of magnitude), so raw values would make analog distance match coins by
+# SIZE. These metrics are moved to log domain — signed log1p per snapshot value
+# — BEFORE the trajectory summaries, so slope/delta become *relative* growth:
+# a coin doubling 1k->4k and one doubling 1M->4M get identical trajectory
+# features. Resemblance is about shape, not scale (Section 3). Bounded metrics
+# (percentages, ratios) stay raw. Changing this set changes the feature space:
+# bump FEATURE_VERSION.
+_LOG_DOMAIN_METRICS = frozenset({
+    "price", "liquidity", "market_cap", "volume_5m", "volume_1h",
+    "holders", "dev_outflow", "liquidity_event", "tx_count",
+})
+
+# Version of the fingerprint definition. Persisted alongside every trained
+# artifact; a mismatch on load means old models live in a different feature
+# space and must be discarded and rebuilt from the stored raw snapshots
+# (LearningService handles this automatically).
+FEATURE_VERSION = 2
+
 # Scalar context features appended after the per-metric summaries.
 _SCALAR_FEATURES = ("age_hours", "snapshot_count", "price_acceleration")
 
@@ -198,13 +217,17 @@ class FingerprintExtractor:
         features: list[float] = []
         present_metrics = 0
 
-        for _, accessor in _BASE_METRICS:
+        for metric, accessor in _BASE_METRICS:
             pairs = [(age, accessor(s)) for age, s in zip(ages_all, snaps)]
             present = [(age, val) for age, val in pairs if val is not None]
             if present:
                 present_metrics += 1
                 ages = np.array([p[0] for p in present], dtype=float)
                 values = np.array([p[1] for p in present], dtype=float)
+                if metric in _LOG_DOMAIN_METRICS:
+                    # Signed log1p: compresses heavy tails, keeps sign (LP
+                    # removals are negative), identity-like near zero.
+                    values = np.sign(values) * np.log1p(np.abs(values))
                 features.extend(_summarize(ages, values))
             else:
                 features.extend([0.0] * len(_SUMMARY_STATS))

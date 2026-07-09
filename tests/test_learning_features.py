@@ -1,6 +1,7 @@
 """Tests for fingerprint feature engineering (Section 2)."""
 
 import numpy as np
+import pytest
 
 from meme_intelligence.learning.features import (
     FEATURE_DIM,
@@ -50,8 +51,9 @@ def test_rising_price_has_positive_slope():
     fp = extractor.extract(_series([1.0, 2.0, 3.0, 4.0], [1000.0] * 4))
     slope_idx = FEATURE_NAMES.index("price_slope")
     assert fp.vector[slope_idx] > 0.0
+    # Price is a log-domain metric (shape over size), so `last` is log1p(raw).
     last_idx = FEATURE_NAMES.index("price_last")
-    assert fp.vector[last_idx] == 4.0
+    assert fp.vector[last_idx] == pytest.approx(np.log1p(4.0), rel=1e-5)
 
 
 def test_coverage_reflects_missing_metrics():
@@ -84,6 +86,49 @@ def test_no_nan_or_inf_from_zero_denominators():
     ]
     fp = FingerprintExtractor().extract(series)
     assert np.all(np.isfinite(fp.vector))
+
+
+def test_log_domain_shape_not_size():
+    """Two coins with the same relative trajectory at 1000x different scale
+    must produce identical log-domain slope/delta for USD metrics — analogs
+    match by behavior, not by pool size (Section 3)."""
+    extractor = FingerprintExtractor()
+    small = extractor.extract([
+        CoinSnapshot(age_seconds=0, liquidity_usd=1_000.0),
+        CoinSnapshot(age_seconds=3600, liquidity_usd=2_000.0),
+        CoinSnapshot(age_seconds=7200, liquidity_usd=4_000.0),
+    ])
+    big = extractor.extract([
+        CoinSnapshot(age_seconds=0, liquidity_usd=1_000_000.0),
+        CoinSnapshot(age_seconds=3600, liquidity_usd=2_000_000.0),
+        CoinSnapshot(age_seconds=7200, liquidity_usd=4_000_000.0),
+    ])
+    slope = FEATURE_NAMES.index("liquidity_slope")
+    delta = FEATURE_NAMES.index("liquidity_delta")
+    # log1p(2x) - log1p(x) ~= log(2) regardless of x for large x.
+    assert big.vector[slope] == pytest.approx(small.vector[slope], rel=1e-3)
+    assert big.vector[delta] == pytest.approx(small.vector[delta], rel=1e-3)
+
+
+def test_usd_metrics_are_log_compressed():
+    extractor = FingerprintExtractor()
+    fp = extractor.extract([CoinSnapshot(age_seconds=0, liquidity_usd=1_000_000.0)])
+    last = FEATURE_NAMES.index("liquidity_last")
+    assert fp.vector[last] == pytest.approx(np.log1p(1_000_000.0), rel=1e-5)
+
+
+def test_negative_liquidity_event_keeps_sign():
+    extractor = FingerprintExtractor()
+    fp = extractor.extract([CoinSnapshot(age_seconds=0, liquidity_event_usd=-5_000.0)])
+    last = FEATURE_NAMES.index("liquidity_event_last")
+    assert fp.vector[last] == pytest.approx(-np.log1p(5_000.0), rel=1e-5)
+
+
+def test_bounded_metrics_stay_raw():
+    extractor = FingerprintExtractor()
+    fp = extractor.extract([CoinSnapshot(age_seconds=0, top10_holder_percent=40.0)])
+    last = FEATURE_NAMES.index("top10_concentration_last")
+    assert fp.vector[last] == pytest.approx(40.0)
 
 
 def test_scaler_identity_until_fitted_then_standardizes():
