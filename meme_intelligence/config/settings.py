@@ -1010,6 +1010,37 @@ class LightGBMSettings:
 
 
 @dataclass(frozen=True)
+class RugThresholds:
+    """Firing thresholds for the hard rug signals (Section 5a).
+
+    Separate from :class:`RugSignalWeights` (which sets how many points a fired
+    signal contributes): these decide *whether* each signal fires. All
+    configurable (Rule 17). Percentages are 0-100.
+    """
+
+    min_lp_locked_percent: float = 50.0        # below this -> "liquidity not locked"
+    top_holder_percent_max: float = 30.0       # single holder above -> concentration
+    top10_holder_percent_max: float = 70.0     # top 10 above -> concentration
+    liquidity_drop_percent: float = 50.0       # fall from peak -> "liquidity removed"
+    liquidity_removal_usd: float = 1000.0      # single LP-remove event magnitude
+    sell_tax_max_percent: float = 20.0         # sell tax at/above -> "high sell tax"
+    dev_dump_usd: float = 1000.0               # creator outflow at/above -> "dev dumping"
+    fake_volume_per_holder_usd: float = 5000.0  # volume/holder above -> "fake volume"
+    fake_volume_min_volume_usd: float = 1000.0  # only flag fake volume above this volume
+
+    def __post_init__(self) -> None:
+        for name in ("min_lp_locked_percent", "top_holder_percent_max",
+                     "top10_holder_percent_max", "liquidity_drop_percent",
+                     "sell_tax_max_percent"):
+            _check_range(f"rug threshold '{name}'", getattr(self, name), 0.0, 100.0)
+        for name in ("liquidity_removal_usd", "dev_dump_usd",
+                     "fake_volume_per_holder_usd", "fake_volume_min_volume_usd"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value <= 0:
+                raise ConfigurationError(f"rug threshold '{name}' must be positive, got {value}")
+
+
+@dataclass(frozen=True)
 class RugSignalWeights:
     """Point contributions for each hard rug signal (Section 5a).
 
@@ -1078,6 +1109,7 @@ class Settings:
     backtest: BacktestSettings = field(default_factory=BacktestSettings)
     learning: LearningSettings = field(default_factory=LearningSettings)
     lightgbm: LightGBMSettings = field(default_factory=LightGBMSettings)
+    rug_thresholds: RugThresholds = field(default_factory=RugThresholds)
     rug_signal_weights: RugSignalWeights = field(default_factory=RugSignalWeights)
     log_level: str = "INFO"
     log_dir: str = "logs"
@@ -1135,6 +1167,7 @@ class Settings:
             backtest=_load_group(BacktestSettings, "BACKTEST", env),
             learning=_load_group(LearningSettings, "LEARNING", env),
             lightgbm=_load_group(LightGBMSettings, "LIGHTGBM", env),
+            rug_thresholds=_load_group(RugThresholds, "RUG_THRESHOLDS", env),
             rug_signal_weights=_load_group(RugSignalWeights, "RUG_SIGNAL_WEIGHTS", env),
             log_level=env.get(f"{_ENV_PREFIX}_LOG_LEVEL", "INFO"),
             log_dir=env.get(f"{_ENV_PREFIX}_LOG_DIR", "logs"),
