@@ -343,7 +343,9 @@ class LearningService:
         # Update ensemble accuracy from the stored prediction (Section 6).
         prediction = self._store.get_prediction(coin_id)
         if prediction and not prediction.get("scored"):
-            self._ensemble.record_outcome(prediction.get("source_labels", {}), bucket.value)
+            self._ensemble.record_outcome(
+                prediction.get("source_labels", {}), bucket.value,
+                final_label=prediction.get("predicted_label"))
             prediction["scored"] = True
             self._store.update_prediction(coin_id, prediction)
 
@@ -352,27 +354,55 @@ class LearningService:
     # ---- Learning loops (Section 4 / Section 7) ----
 
     def retrain_if_due(self) -> bool:
-        """Warm-start the classifier on a schedule; full-rebuild on scaler drift.
+        """Warm-start the classifier on a schedule; full-rebuild on drift.
 
-        Returns True if a (re)train happened. The classifier trains once enough
-        coins have resolved, then every ``retrain_every_n`` newly-resolved coins.
-        A scaler refit (every ``scaler_refit_every_n`` coins, or the first fit)
-        forces a full rebuild so every model shares one feature space (Rule 21).
+        Returns True if a (re)train happened. Three triggers (Sections 4/7):
+
+        * first train — enough coins have resolved (``min_train_samples``);
+        * cadence — every ``retrain_every_n`` newly-resolved coins;
+        * **drift** — the blended verdict's rolling accuracy fell below
+          ``drift_accuracy_floor`` (measured over at least ``drift_min_samples``
+          graded outcomes). Drift forces the *fuller* path: scaler refit +
+          full classifier retrain + analog-index/archetype rebuild, and resets
+          the drift measurement so it grades the new models, not the old ones.
+
+        A scaler refit (drift, first fit, or every ``scaler_refit_every_n``
+        coins) always forces a full rebuild so every model shares one feature
+        space (Rule 21).
         """
         resolved = self._store.resolved_count()
         due_by_count = (resolved - self._last_retrain_count) >= self._ls.retrain_every_n
         needs_first = (not self._classifier.is_ready) and resolved >= self._ls.min_train_samples
-        if not (due_by_count or needs_first):
+        drift = self._drift_detected()
+        if not (due_by_count or needs_first or drift):
             return False
 
-        needs_scaler = (not self._scaler.is_fitted
+        needs_scaler = (drift
+                        or not self._scaler.is_fitted
                         or (resolved - self._scaler_fit_count) >= self._ls.scaler_refit_every_n)
+        if drift:
+            self._logger.warning(
+                "drift detected: ensemble accuracy %.2f < floor %.2f over %d graded "
+                "outcomes — forcing full rebuild",
+                self._ensemble.final_accuracy() or 0.0,
+                self._ls.drift_accuracy_floor, self._ensemble.final_samples)
         self._rebuild(full=needs_scaler)
         self._last_retrain_count = resolved
         if needs_scaler:
             self._scaler_fit_count = resolved
+        if drift:
+            # Old grades measured the replaced models; keeping them would
+            # re-fire the trigger every cycle until the window rolled over.
+            self._ensemble.reset_final_history()
         self.persist()
         return True
+
+    def _drift_detected(self) -> bool:
+        """Section 7 drift monitor: blended-verdict accuracy below the floor."""
+        accuracy = self._ensemble.final_accuracy()
+        if accuracy is None or self._ensemble.final_samples < self._ls.drift_min_samples:
+            return False
+        return accuracy < self._ls.drift_accuracy_floor
 
     def _rebuild(self, *, full: bool) -> None:
         records = self._store.resolved_records()

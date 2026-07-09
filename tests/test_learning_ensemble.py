@@ -101,6 +101,46 @@ def test_confidence_is_max_probability():
     assert result.confidence == pytest.approx(max(result.distribution.values()))
 
 
+def test_final_history_tracks_blended_verdict():
+    ens = AdaptiveEnsemble(window=10)
+    assert ens.final_accuracy() is None
+    ens.record_outcome({SOURCE_ANALOG: "pump"}, "pump", final_label="pump")  # right
+    ens.record_outcome({}, "rug", final_label="dump")                        # wrong
+    assert ens.final_samples == 2
+    assert ens.final_accuracy() == pytest.approx(0.5)
+    assert ens.accuracy_report()["ensemble_final"]["samples"] == 2
+    ens.reset_final_history()
+    assert ens.final_accuracy() is None
+    assert ens.final_samples == 0
+
+
+def test_no_final_label_leaves_final_history_untouched():
+    ens = AdaptiveEnsemble(window=10)
+    ens.record_outcome({SOURCE_ANALOG: "pump"}, "pump")
+    assert ens.final_samples == 0
+
+
+def test_final_history_survives_save_load(tmp_path):
+    ens = AdaptiveEnsemble(window=10)
+    ens.record_outcome({}, "pump", final_label="pump")
+    path = str(tmp_path / "ens.joblib")
+    ens.save(path)
+    reloaded = AdaptiveEnsemble.load(path)
+    assert reloaded.final_samples == 1
+    assert reloaded.final_accuracy() == pytest.approx(1.0)
+
+
+def test_load_pre_drift_monitor_artifact(tmp_path):
+    """Artifacts saved before the drift monitor existed must still load (Rule 18)."""
+    import joblib
+
+    path = str(tmp_path / "old.joblib")
+    joblib.dump({"window": 10, "history": {SOURCE_ANALOG: [True, False]}}, path)
+    ens = AdaptiveEnsemble.load(path)
+    assert ens.final_samples == 0
+    assert ens.raw_accuracy(SOURCE_ANALOG) == pytest.approx(0.5)
+
+
 def test_save_load_roundtrip(tmp_path):
     ens = AdaptiveEnsemble(window=100)
     for _ in range(15):

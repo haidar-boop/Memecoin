@@ -21,6 +21,7 @@ _ENV = {
     "MEMEINTEL_LEARNING_COLD_START_SAMPLES": "10",
     "MEMEINTEL_LEARNING_ACCURACY_WINDOW": "50",
     "MEMEINTEL_LEARNING_SCALER_REFIT_EVERY_N": "1000",
+    "MEMEINTEL_LEARNING_DRIFT_MIN_SAMPLES": "5",
 }
 
 _EXPECTED_KEYS = {
@@ -187,6 +188,45 @@ def test_persistence_survives_restart(tmp_path):
     assert (max(reloaded["final_probabilities"], key=reloaded["final_probabilities"].get)
             == max(baseline["final_probabilities"], key=baseline["final_probabilities"].get))
     assert reloaded["nearest_analogs"][0]["resolved_as"] == "rug"
+
+
+def test_drift_triggers_full_rebuild_and_resets_measurement():
+    """Section 7: blended-verdict accuracy below the floor forces a rebuild."""
+    service = _service()
+    _seed(service)
+    assert service.retrain_if_due() is True  # first train; counters catch up
+    assert service.retrain_if_due() is False  # nothing due
+
+    # Simulate a stale meta: six graded finals, all wrong (floor is 0.40,
+    # drift_min_samples is 5 in _ENV).
+    for _ in range(6):
+        service._ensemble.record_outcome({}, "pump", final_label="rug")
+    assert service._ensemble.final_accuracy() == 0.0
+
+    assert service.retrain_if_due() is True   # drift fired
+    assert service._ensemble.final_samples == 0  # measurement reset
+    assert service.retrain_if_due() is False  # does not re-fire next cycle
+
+
+def test_drift_needs_min_samples():
+    """A couple of bad calls must not trigger a rebuild (noise guard)."""
+    service = _service()
+    _seed(service)
+    service.retrain_if_due()
+    for _ in range(3):  # below drift_min_samples=5
+        service._ensemble.record_outcome({}, "pump", final_label="rug")
+    assert service.retrain_if_due() is False
+
+
+def test_resolution_grades_blended_verdict():
+    """resolve_outcome feeds the drift monitor via the stored final label."""
+    service = _service()
+    _seed(service)
+    service.retrain_if_due()
+    service.evaluate_coin("g1", "solana", _rug_series())
+    service.resolve_outcome("g1", "solana", 24.0, -95.0, is_rug=True)
+    assert service._ensemble.final_samples == 1
+    assert service._ensemble.final_accuracy() == 1.0  # predicted rug, was rug
 
 
 def test_retrain_not_due_below_threshold():

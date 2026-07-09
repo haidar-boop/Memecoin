@@ -83,6 +83,10 @@ class AdaptiveEnsemble:
         self._window = window
         # Rolling record of correctness (True/False) per source.
         self._history: dict[str, deque] = {s: deque(maxlen=window) for s in SOURCES}
+        # Rolling correctness of the BLENDED verdict itself — the signal the
+        # drift monitor watches (Section 7): sources can be individually fine
+        # while the blend goes stale for the current meta.
+        self._final_history: deque = deque(maxlen=window)
 
     def source_accuracy(self, source: str) -> float:
         """Laplace-smoothed recent accuracy for a source (0.5 with no data)."""
@@ -147,18 +151,43 @@ class AdaptiveEnsemble:
         self,
         predicted_labels: Mapping[str, str | None],
         actual_label: str,
+        *,
+        final_label: str | None = None,
     ) -> None:
         """Update rolling accuracy after a coin resolves (Section 6/7).
 
         ``predicted_labels`` maps each source to the label it argmax-predicted
         for this coin at evaluation time (``None`` if the source abstained /
         was unavailable — such sources are skipped, not counted as wrong).
+        ``final_label`` is the blended verdict's argmax at evaluation time; it
+        feeds the drift monitor's ensemble-level accuracy (Section 7).
         """
         for source in SOURCES:
             predicted = predicted_labels.get(source)
             if predicted is None:
                 continue
             self._history[source].append(predicted == actual_label)
+        if final_label is not None:
+            self._final_history.append(final_label == actual_label)
+
+    def final_accuracy(self) -> float | None:
+        """Rolling accuracy of the blended verdict; None when never graded."""
+        if not self._final_history:
+            return None
+        return sum(1 for c in self._final_history if c) / len(self._final_history)
+
+    @property
+    def final_samples(self) -> int:
+        return len(self._final_history)
+
+    def reset_final_history(self) -> None:
+        """Clear the blended-verdict history after a drift-triggered rebuild.
+
+        Old grades measured models that no longer exist; keeping them would
+        re-fire the drift trigger every cycle until the window rolled over
+        (Section 7 — measure the model you're running, Rule 8).
+        """
+        self._final_history.clear()
 
     def accuracy_report(self) -> dict[str, dict]:
         """Per-source accuracy + sample size, for the metrics dashboard."""
@@ -170,6 +199,10 @@ class AdaptiveEnsemble:
                 "samples": len(hist),
                 "smoothed_weight_basis": self.source_accuracy(source),
             }
+        report["ensemble_final"] = {
+            "accuracy": self.final_accuracy(),
+            "samples": self.final_samples,
+        }
         return report
 
     # ---- Persistence (Section 9) ----
@@ -179,7 +212,8 @@ class AdaptiveEnsemble:
 
         joblib.dump(
             {"window": self._window,
-             "history": {s: list(h) for s, h in self._history.items()}},
+             "history": {s: list(h) for s, h in self._history.items()},
+             "final_history": list(self._final_history)},
             path,
         )
 
@@ -192,4 +226,7 @@ class AdaptiveEnsemble:
         for source, entries in payload["history"].items():
             if source in ensemble._history:
                 ensemble._history[source] = deque(entries, maxlen=payload["window"])
+        # Absent in pre-drift-monitor artifacts (Rule 18 — old files still load).
+        ensemble._final_history = deque(payload.get("final_history", ()),
+                                        maxlen=payload["window"])
         return ensemble

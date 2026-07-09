@@ -920,6 +920,7 @@ class LearningSettings:
 
     # Continuous learning / drift — Section 7
     drift_accuracy_floor: float = 0.40       # ensemble accuracy below -> full retrain
+    drift_min_samples: int = 30              # graded finals needed before drift can fire
     scaler_refit_every_n: int = 500          # re-fit StandardScaler cadence
 
     # Trajectory capture cadence — Section 1 (drives external snapshot callers)
@@ -941,7 +942,8 @@ class LearningSettings:
                 "learning: dump_return_percent must be below pump_return_percent")
         for name in ("knn_neighbors", "min_analog_neighbors",
                      "retrain_every_n", "min_train_samples", "accuracy_window",
-                     "scaler_refit_every_n", "fast_snapshot_seconds", "fast_window_minutes",
+                     "drift_min_samples", "scaler_refit_every_n",
+                     "fast_snapshot_seconds", "fast_window_minutes",
                      "slow_snapshot_minutes", "min_snapshots_for_confidence",
                      "cold_start_samples"):
             value = getattr(self, name)
