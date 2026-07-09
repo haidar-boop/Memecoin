@@ -80,6 +80,17 @@ def test_catalyst_requires_description():
         ViralCatalyst("   ", CatalystLevel.HIGH, CatalystLevel.LOW)
 
 
+def test_catalyst_requires_enum_probability_and_impact():
+    """Bug-hunt: only description was validated at construction; a plain
+    string/int probability or impact passed silently and crashed later
+    inside NarrativeAssessment.summary() reading catalyst.probability.value
+    — the same deferred-crash pattern already fixed once for catalysts."""
+    with pytest.raises(TypeError):
+        ViralCatalyst("elon tweet", "high", CatalystLevel.LOW)
+    with pytest.raises(TypeError):
+        ViralCatalyst("elon tweet", CatalystLevel.HIGH, "low")
+
+
 # ---- Scoring per the Part 19 rubrics ----
 
 def test_full_inputs_score_per_spec():

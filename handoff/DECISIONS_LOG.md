@@ -464,6 +464,64 @@ requirements"), so it shipped as a first-class mode:
 - Mechanically: no new pass/fail logic was invented — verification is
   "re-run the existing gates on AI-enriched scores" (Rule 18/21).
 
+### Full adversarial bug hunt across the whole codebase (2026-07-08/09)
+
+At the user's request, ran a comprehensive multi-agent bug hunt (9
+parallel finders, each with an independent adversarial verifier)
+covering every module, weighted toward the recently-built Pump.fun
+integration and its controller wiring. The spend-limit interruptions
+mid-hunt meant several batches of raw findings never reached automated
+verification; those were triaged and fixed directly rather than
+re-spending on more agent verification passes. In total this fixed:
+
+**Critical:** an out-of-range/NaN/Infinity timestamp from any external
+API (pump.fun frontend, DexScreener, Helius) could raise OverflowError/
+ValueError uncaught by any error hierarchy, killing the whole scanner
+process; HeliusClient's API key was never registered with the redact
+mechanism (Rule 16); NaN silently passed nearly every positivity/weight-
+sum validation check in settings.py (`nan <= 0` and `nan >= X` are
+always False); bool env parsing silently coerced typos to `False`.
+
+**Major (14 fixes):** PumpPortal reconnect backoff reset before proving
+the connection healthy (could hammer the server at 1/sec forever);
+launch-tracking capacity was checked before expiring stale entries;
+READY candidates got expired on the same TTL as PENDING ones,
+contradicting the module's own retry guarantee; `_seen` was marked on
+attempt rather than successful analysis, letting the pump.fun path
+silently drop a candidate the regular pool-discovery path had merely
+tried and failed on; a transient full market-provider outage was
+indistinguishable from a token's pairs genuinely disappearing, so
+outages archived healthy watchlist tokens; `MEMEINTEL_AI_VERIFY_
+OPPORTUNITIES=false` was ignored whenever `enable_in_monitor` was on;
+a persistent gate-passing token got re-verified with a fresh paid
+Claude call on every watchlist recheck forever; `update_watchlist`'s
+separate SELECT-then-INSERT/UPDATE could IntegrityError once two
+processes started sharing the database (WAL mode, added earlier)
+concurrently — replaced with an atomic UPSERT; alert dispatch stamped
+cooldown before delivery was attempted, so a total sink outage
+permanently lost the alert, and one sink raising aborted the rest of
+the batch; `cross_check_liquidity` assumed the pair being verified
+always came from `providers[0]`, so after failover it could ask a
+provider to confirm its own data; the `has_foundation_evidence` guard
+(added in an earlier fix pass) was never mirrored for the parallel
+narrative path, so an all-null AI judgment still fabricated a narrative
+score from the community-creativity fallback alone; `monitor` leaked
+the Telegram/Discord/Anthropic HTTP sessions on shutdown.
+
+**Minor:** `ViralCatalyst` validated only its description, not that
+`probability`/`impact` were actual `CatalystLevel` enum members (same
+deferred-crash class already fixed once for catalysts); AI judgment
+parsing accepted a non-string `narrative_summary`; a Helius
+`get_recent_transfers` failure discarded the "helius" source
+attribution even when the preceding `get_top_holders` call had already
+succeeded; `get_watchlist(include_archived=True)` sorted the tier
+column as raw TEXT, ranking archived tokens ahead of Tier 1;
+`_migrate()`'s `ALTER TABLE` could race between two processes on first
+startup after an upgrade; `PumpPortalClient.close()` could swallow the
+calling task's own cancellation.
+
+444 tests green (33 new, spanning all of the above).
+
 ## Notable implementation choices (Rule 19)
 
 - **Python 3.11 + asyncio** over Node.js (both allowed by spec): the

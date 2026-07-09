@@ -287,14 +287,28 @@ class WalletDataService:
         holder_count = unique_wallets = None
 
         if self._helius is not None:
+            # Two independent calls: a get_recent_transfers failure must
+            # not erase the "helius" source tag (or the already-fetched
+            # holders) earned by a successful get_top_holders — the
+            # combined try previously discarded both on a partial failure,
+            # leaving real Helius holder data returned with no source
+            # attribution (Rule 8: the caller can no longer tell where it
+            # came from).
+            helius_contributed = False
             try:
                 holders = tuple(await self._helius.get_top_holders(
                     token.address, limit=self._holders_limit))
-                transfers = tuple(await self._helius.get_recent_transfers(
-                    token.address, limit=self._trades_limit))
-                sources.append("helius")
+                helius_contributed = True
             except CollectorError:
                 pass
+            try:
+                transfers = tuple(await self._helius.get_recent_transfers(
+                    token.address, limit=self._trades_limit))
+                helius_contributed = True
+            except CollectorError:
+                pass
+            if helius_contributed:
+                sources.append("helius")
         if self._birdeye is not None:
             try:
                 overview = await self._birdeye.get_token_overview(token.address)

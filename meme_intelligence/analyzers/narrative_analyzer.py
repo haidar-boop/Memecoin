@@ -130,6 +130,16 @@ class ViralCatalyst:
     def __post_init__(self) -> None:
         if not self.description.strip():
             raise ValueError("catalyst description must be non-empty")
+        # probability/impact are typed as CatalystLevel but nothing enforced
+        # it — a non-enum value (e.g. a plain string) passed validation
+        # here silently, then crashed later inside summary() when it reads
+        # catalyst.probability.value, far from the actual bad input
+        # (exactly the deferred-crash pattern already fixed once for
+        # catalysts themselves; bug-hunt finding: it recurred one level in).
+        if not isinstance(self.probability, CatalystLevel):
+            raise TypeError(f"catalyst probability must be a CatalystLevel, got {self.probability!r}")
+        if not isinstance(self.impact, CatalystLevel):
+            raise TypeError(f"catalyst impact must be a CatalystLevel, got {self.impact!r}")
 
 
 @dataclass(frozen=True)

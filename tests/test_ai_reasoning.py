@@ -166,6 +166,7 @@ async def test_request_uses_configured_model_and_schema():
     json.dumps({**GOOD_JUDGMENT, "copycat_risk": "yes"}),       # non-boolean flag
     json.dumps({**GOOD_JUDGMENT, "narrative_category": "weather"}),  # bad enum
     json.dumps([1, 2, 3]),                                      # not an object
+    json.dumps({**GOOD_JUDGMENT, "narrative_summary": {"nested": "object"}}),  # non-string
 ])
 async def test_invalid_judgments_are_discarded(payload):
     result = await deterministic_result()

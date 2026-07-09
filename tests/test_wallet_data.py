@@ -177,6 +177,29 @@ async def test_birdeye_unsuccessful_response_raises(monkeypatch):
         await client.get_token_overview(MINT)
 
 
+async def test_helius_partial_failure_still_attributes_the_source():
+    """Bug-hunt: get_top_holders and get_recent_transfers shared one try
+    block, so a transfers failure discarded the "helius" source tag even
+    though get_top_holders had already succeeded — real Helius holder
+    data came back with no attribution of where it came from."""
+    helius = make_helius()
+
+    async def fake_get_json(path, params=None, *, cache_key=None, cache_ttl=None,
+                            headers=None, json_body=None):
+        if json_body is not None:  # RPC call (get_top_holders) succeeds
+            method = json_body["method"]
+            return {"jsonrpc": "2.0", "id": 1, "result": HELIUS_RESPONSES[method]}
+        raise TransientCollectorError("enhanced API down")  # get_recent_transfers fails
+
+    import unittest.mock as _mock
+    with _mock.patch.object(helius, "_get_json", fake_get_json):
+        service = WalletDataService(helius, None)
+        data = await service.gather(TOKEN)
+    assert data.sources == ("helius",)  # attributed despite the partial failure
+    assert len(data.top_holders) == 2
+    assert data.recent_transfers == ()
+
+
 async def test_service_degrades_when_one_source_fails(monkeypatch):
     helius, birdeye = make_helius(), make_birdeye()
     patch_helius(monkeypatch, helius)

@@ -380,11 +380,25 @@ class AIJudgmentService:
                 raise AIJudgmentError(f"'{name}' must be a list, got {type(value).__name__}")
             return [str(item) for item in value]
 
+        def optional_str(name: str) -> str | None:
+            value = data.get(name)
+            if value is None:
+                return None
+            # A dict/int here would silently violate the str|None contract
+            # (`value or None` passes any truthy non-string straight
+            # through) and crash later, far from this parse step, wherever
+            # the summary is used as a string.
+            if not isinstance(value, str):
+                raise AIJudgmentError(f"'{name}' must be a string, got {type(value).__name__}")
+            return value or None
+
         bull_case = string_list("bull_case")
         bear_case = string_list("bear_case")
+        narrative_summary = optional_str("narrative_summary")
+        confidence_reason = optional_str("confidence_reason")
         prose_parts = [
-            str(data.get("narrative_summary") or ""),
-            str(data.get("confidence_reason") or ""),
+            narrative_summary or "",
+            confidence_reason or "",
             *bull_case,
             *bear_case,
         ]
@@ -410,7 +424,7 @@ class AIJudgmentService:
             long_term=score("long_term"),
         )
         narrative = NarrativeInputs(
-            narrative_summary=data.get("narrative_summary") or None,
+            narrative_summary=narrative_summary,
             memorability=score("memorability"),
             shareability=score("shareability"),
             emotional_impact=score("emotional_impact"),
@@ -431,7 +445,7 @@ class AIJudgmentService:
             bull_case=tuple(bull_case),
             bear_case=tuple(bear_case),
             confidence=confidence,
-            confidence_reason=str(data.get("confidence_reason") or ""),
+            confidence_reason=confidence_reason or "",
             mode=mode,
             model=self._s.model,
         )
