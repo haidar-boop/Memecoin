@@ -130,6 +130,37 @@ def test_events_grouped_per_severity():
     assert critical.monitoring  # what to do next is always included
 
 
+def test_live_sell_route_lost_is_critical():
+    prev = dict(baseline(), live_buy_route_found=True, live_sell_route_found=True,
+                live_round_trip_loss_percent=2.0)
+    changes = detect_security_changes(
+        prev, profile(live_buy_route_found=True, live_sell_route_found=False,
+                      live_round_trip_loss_percent=None),
+    )
+    assert changes[0].severity is AlertPriority.CRITICAL
+    assert changes[0].field == "live_sell_route_found"
+    assert "no sell route" in changes[0].message
+
+
+def test_round_trip_loss_hike_is_high():
+    prev = dict(baseline(), live_buy_route_found=True, live_sell_route_found=True,
+                live_round_trip_loss_percent=5.0)
+    changes = detect_security_changes(
+        prev, profile(live_buy_route_found=True, live_sell_route_found=True,
+                      live_round_trip_loss_percent=30.0),
+    )
+    assert changes[0].severity is AlertPriority.HIGH
+    assert changes[0].field == "live_round_trip_loss_percent"
+    assert "5% -> 30%" in changes[0].message
+
+
+def test_live_buy_route_flip_alone_produces_no_change():
+    """buy-route disappearing is persisted for reference but not wired into any danger check."""
+    prev = dict(baseline(), live_buy_route_found=True)
+    changes = detect_security_changes(prev, profile(live_buy_route_found=False))
+    assert changes == []
+
+
 def test_storage_roundtrip():
     with Storage(":memory:") as storage:
         assert storage.latest_security_facts(TOKEN) is None

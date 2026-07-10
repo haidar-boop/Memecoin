@@ -28,6 +28,7 @@ from meme_intelligence.analyzers.security_analyzer import SecurityAnalyzer
 from meme_intelligence.analyzers.wallet_intelligence import sightings_from_assessment
 from meme_intelligence.collectors.market_data import CoinGeckoClient
 from meme_intelligence.collectors.market_service import MarketDataService
+from meme_intelligence.collectors.jupiter_data import JupiterClient
 from meme_intelligence.collectors.wallet_data import (
     BirdeyeClient,
     HeliusClient,
@@ -126,6 +127,18 @@ def build_wallet_service(settings: Settings) -> WalletDataService | None:
         helius, birdeye,
         top_holders_limit=settings.wallet.top_holders_limit,
         recent_trades_limit=settings.wallet.recent_trades_limit,
+    )
+
+
+def build_jupiter(settings: Settings) -> JupiterClient | None:
+    """Live round-trip sell-test client, or None when no key is configured (Project 1)."""
+    if not settings.jupiter_api_key:
+        return None
+    return JupiterClient(
+        settings.jupiter_api_key,
+        base_url=settings.providers.jupiter_base_url,
+        rate_limiter=RateLimiter.per_minute(settings.providers.jupiter_requests_per_minute),
+        **_shared_collector_kwargs(settings),
     )
 
 
@@ -280,6 +293,7 @@ async def _gather_assessments(args, settings):
     """Shared research pass (via the pipeline) used by plan and report commands."""
     regime = MarketRegime(args.regime)
     wallet_service = build_wallet_service(settings)
+    jupiter_client = build_jupiter(settings)
     try:
         async with (
             build_dexscreener(settings) as dex,
@@ -290,11 +304,14 @@ async def _gather_assessments(args, settings):
             pair = await service.get_best_pair(args.address, chain=args.chain)
             if pair is None:
                 return None, f"No trading pairs found for {args.address}."
-            pipeline = ResearchPipeline(settings, goplus, wallet_service=wallet_service)
+            pipeline = ResearchPipeline(settings, goplus, wallet_service=wallet_service,
+                                        jupiter_client=jupiter_client)
             result = await pipeline.analyze_pair(pair, regime=regime)
     finally:
         if wallet_service is not None:
             await wallet_service.close()
+        if jupiter_client is not None:
+            await jupiter_client.close()
 
     if result is None:
         return None, (f"Security data unavailable for {args.address} on {pair.chain} "
@@ -342,21 +359,27 @@ async def _cmd_daily(args, settings) -> int:
             settings, workflow=_dc.replace(settings.workflow, networks=",".join(args.network))
         )
 
-    async with (
-        build_geckoterminal(settings) as gecko,
-        build_goplus(settings) as goplus,
-        build_coingecko(settings) as coingecko,
-        build_dexscreener(settings) as dex,
-    ):
-        with Storage(settings.database.path) as storage:
-            routine = DailyRoutine(
-                settings, storage,
-                gecko_client=gecko, goplus_client=goplus,
-                coingecko_client=coingecko,
-                # Failover-pooled service; exposes the same get_token_pairs API.
-                dexscreener_client=build_market_service(settings, dex, gecko),
-            )
-            report = await routine.run()
+    jupiter_client = build_jupiter(settings)
+    try:
+        async with (
+            build_geckoterminal(settings) as gecko,
+            build_goplus(settings) as goplus,
+            build_coingecko(settings) as coingecko,
+            build_dexscreener(settings) as dex,
+        ):
+            with Storage(settings.database.path) as storage:
+                routine = DailyRoutine(
+                    settings, storage,
+                    gecko_client=gecko, goplus_client=goplus,
+                    jupiter_client=jupiter_client,
+                    coingecko_client=coingecko,
+                    # Failover-pooled service; exposes the same get_token_pairs API.
+                    dexscreener_client=build_market_service(settings, dex, gecko),
+                )
+                report = await routine.run()
+    finally:
+        if jupiter_client is not None:
+            await jupiter_client.close()
     print(report.render())
     return 0
 
@@ -417,23 +440,28 @@ async def _cmd_compare(args, settings) -> int:
 
     results = []
     regime = MarketRegime(args.regime)
-    async with (
-        build_dexscreener(settings) as dex,
-        build_geckoterminal(settings) as gecko,
-        build_goplus(settings) as goplus,
-    ):
-        service = build_market_service(settings, dex, gecko)
-        pipeline = ResearchPipeline(settings, goplus)
-        for address, chain in targets:
-            pair = await service.get_best_pair(address, chain=chain)
-            if pair is None:
-                print(f"skipping {address}: no trading pairs found")
-                continue
-            result = await pipeline.analyze_pair(pair, regime=regime)
-            if result is None:
-                print(f"skipping {address}: security data unavailable")
-                continue
-            results.append(result)
+    jupiter_client = build_jupiter(settings)
+    try:
+        async with (
+            build_dexscreener(settings) as dex,
+            build_geckoterminal(settings) as gecko,
+            build_goplus(settings) as goplus,
+        ):
+            service = build_market_service(settings, dex, gecko)
+            pipeline = ResearchPipeline(settings, goplus, jupiter_client=jupiter_client)
+            for address, chain in targets:
+                pair = await service.get_best_pair(address, chain=chain)
+                if pair is None:
+                    print(f"skipping {address}: no trading pairs found")
+                    continue
+                result = await pipeline.analyze_pair(pair, regime=regime)
+                if result is None:
+                    print(f"skipping {address}: security data unavailable")
+                    continue
+                results.append(result)
+    finally:
+        if jupiter_client is not None:
+            await jupiter_client.close()
 
     if len(results) < 2:
         print("Need at least two analyzable tokens to compare.")
@@ -446,17 +474,22 @@ async def _cmd_watchlist(args, settings) -> int:
     """Watchlist command (Part 16, Section 8): show tracked tokens; --refresh re-scores."""
     with Storage(settings.database.path) as storage:
         if args.refresh:
-            async with (
-                build_dexscreener(settings) as dex,
-                build_geckoterminal(settings) as gecko,
-                build_goplus(settings) as goplus,
-            ):
-                service = build_market_service(settings, dex, gecko)
-                pipeline = ResearchPipeline(settings, goplus)
-                changes = await review_entries(
-                    storage, service, pipeline,
-                    limit=settings.workflow.watchlist_review_limit,
-                )
+            jupiter_client = build_jupiter(settings)
+            try:
+                async with (
+                    build_dexscreener(settings) as dex,
+                    build_geckoterminal(settings) as gecko,
+                    build_goplus(settings) as goplus,
+                ):
+                    service = build_market_service(settings, dex, gecko)
+                    pipeline = ResearchPipeline(settings, goplus, jupiter_client=jupiter_client)
+                    changes = await review_entries(
+                        storage, service, pipeline,
+                        limit=settings.workflow.watchlist_review_limit,
+                    )
+            finally:
+                if jupiter_client is not None:
+                    await jupiter_client.close()
             print(f"Refreshed: {len(changes)} change(s)")
             for change in changes:
                 symbol = change.token.symbol or change.token.address[:8]
@@ -530,24 +563,30 @@ async def _cmd_monitor(args, settings) -> int:
         workflow = _dc.replace(workflow, monitor_interval_seconds=args.interval)
     settings = _dc.replace(settings, workflow=workflow)
 
-    async with (
-        build_geckoterminal(settings) as gecko,
-        build_goplus(settings) as goplus,
-        build_dexscreener(settings) as dex,
-    ):
-        with Storage(settings.database.path) as storage:
-            notifier = NotificationEngine([ConsoleSink()], settings.alert_engine)
-            scanner = ContinuousScanner(
-                settings, storage, notifier,
-                gecko_client=gecko, goplus_client=goplus,
-                market_service=build_market_service(settings, dex, gecko),
-                regime=MarketRegime(args.regime),
-            )
-            try:
-                history = await scanner.run(max_cycles=args.cycles)
-            except KeyboardInterrupt:
-                scanner.request_stop()
-                history = []
+    jupiter_client = build_jupiter(settings)
+    try:
+        async with (
+            build_geckoterminal(settings) as gecko,
+            build_goplus(settings) as goplus,
+            build_dexscreener(settings) as dex,
+        ):
+            with Storage(settings.database.path) as storage:
+                notifier = NotificationEngine([ConsoleSink()], settings.alert_engine)
+                scanner = ContinuousScanner(
+                    settings, storage, notifier,
+                    gecko_client=gecko, goplus_client=goplus,
+                    jupiter_client=jupiter_client,
+                    market_service=build_market_service(settings, dex, gecko),
+                    regime=MarketRegime(args.regime),
+                )
+                try:
+                    history = await scanner.run(max_cycles=args.cycles)
+                except KeyboardInterrupt:
+                    scanner.request_stop()
+                    history = []
+    finally:
+        if jupiter_client is not None:
+            await jupiter_client.close()
 
     analyzed = sum(s.analyzed for s in history)
     alerts = sum(len(s.alerts) for s in history)

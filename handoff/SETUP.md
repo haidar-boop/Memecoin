@@ -31,6 +31,7 @@ committed). The app loads it automatically on startup
 | CoinGecko | ✅ no key needed | — | market-environment check |
 | **Helius** | ✅ **live, verified** | `MEMEINTEL_HELIUS_API_KEY` | Solana wallet/holder data |
 | **Birdeye** | ✅ **live, verified** | `MEMEINTEL_BIRDEYE_API_KEY` | Solana trades/overview |
+| **Jupiter** | ⏳ **free plan, needs a key** | `MEMEINTEL_JUPITER_API_KEY` | live buy/sell round-trip test (Project 1, Solana only) |
 | Anthropic (LLM layer) | ⏳ **not set up** | (not yet defined in settings) | AI-judgment slots (Parts 22/23) |
 | Telegram bot | ⏳ **not set up** | (not yet defined in settings) | alert delivery (Part 29) |
 | Discord webhook | ⏳ **not set up, optional** | (not yet defined in settings) | alert delivery (Part 29) |
@@ -47,11 +48,17 @@ MEMEINTEL_HELIUS_API_KEY=<your helius key>
 Get free keys at:
 - Helius: https://helius.dev (dashboard auto-creates a key)
 - Birdeye: https://bds.birdeye.so/auth/sign-up (Security tab → Generate Key)
+- Jupiter: https://developers.jup.ag/portal (the $0/month "Free" plan still
+  requires signup — Jupiter deprecated its old fully-keyless "Lite" tier;
+  1 request/second, no monthly usage cap). Without this key, the live
+  round-trip sell test (Project 1) silently stays off — everything else
+  keeps working exactly as before, same "no key = feature off" pattern as
+  Helius/Birdeye.
 
 ## Verify the install
 
 ```bash
-python -m pytest              # should print "274 passed"
+python -m pytest              # should print "298 passed"
 ```
 
 ## Full CLI command reference

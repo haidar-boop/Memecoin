@@ -177,6 +177,7 @@ class DailyRoutine:
         *,
         gecko_client,       # GeckoTerminalClient-compatible (get_new_pools)
         goplus_client,      # GoPlusClient-compatible (get_token_security)
+        jupiter_client=None,  # JupiterClient-compatible (check_round_trip_liquidity)
         coingecko_client=None,  # CoinGeckoClient-compatible (get_majors), optional
         dexscreener_client=None,  # for watchlist review refresh, optional
         now_func: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
@@ -191,7 +192,8 @@ class DailyRoutine:
         self._logger = get_logger("workflow.daily")
 
         self._discovery = DiscoveryEngine(settings.discovery, now_func=now_func)
-        self._pipeline = ResearchPipeline(settings, goplus_client, now_func=now_func)
+        self._pipeline = ResearchPipeline(settings, goplus_client, jupiter_client=jupiter_client,
+                                          now_func=now_func)
 
     async def run(self) -> DailyReport:
         report = DailyReport(date=self._now(), environment=await self._market_check())

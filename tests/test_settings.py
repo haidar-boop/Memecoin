@@ -4,8 +4,10 @@ import pytest
 
 from meme_intelligence.config.settings import (
     ClassificationBands,
+    LiquidityProbeSettings,
     ScoringWeights,
     SecuritySubWeights,
+    SecurityThresholds,
     Settings,
 )
 from meme_intelligence.core.errors import ConfigurationError
@@ -89,3 +91,34 @@ def test_load_dotenv(tmp_path, monkeypatch):
     assert loaded == 1
     monkeypatch.delenv("MEMEINTEL_TEST_DOTENV_A")
     assert load_dotenv(str(tmp_path / "missing.env")) == 0
+
+
+# ---- Live Jupiter round-trip sell test (Project 1) ----
+
+def test_liquidity_probe_rejects_non_positive_probe_amount():
+    with pytest.raises(ConfigurationError, match="probe_sol_amount"):
+        LiquidityProbeSettings(probe_sol_amount=0.0)
+    with pytest.raises(ConfigurationError, match="probe_sol_amount"):
+        LiquidityProbeSettings(probe_sol_amount=-0.1)
+
+
+def test_liquidity_probe_rejects_out_of_range_slippage():
+    with pytest.raises(ConfigurationError, match="slippage_bps"):
+        LiquidityProbeSettings(slippage_bps=0)
+    with pytest.raises(ConfigurationError, match="slippage_bps"):
+        LiquidityProbeSettings(slippage_bps=10001)
+
+
+def test_security_thresholds_reject_extreme_below_max_round_trip_loss():
+    with pytest.raises(ConfigurationError, match="extreme_round_trip_loss_percent"):
+        SecurityThresholds(max_round_trip_loss_percent=60.0, extreme_round_trip_loss_percent=50.0)
+
+
+def test_env_picks_up_jupiter_api_key_and_probe_amount():
+    env = {
+        "MEMEINTEL_JUPITER_API_KEY": "test-jupiter-key",
+        "MEMEINTEL_LIQUIDITY_PROBE_PROBE_SOL_AMOUNT": "0.5",
+    }
+    settings = Settings.from_env(env=env)
+    assert settings.jupiter_api_key == "test-jupiter-key"
+    assert settings.liquidity_probe.probe_sol_amount == pytest.approx(0.5)

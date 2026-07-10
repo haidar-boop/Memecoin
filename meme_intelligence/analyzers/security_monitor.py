@@ -5,10 +5,11 @@ scan said so. This module persists the *security facts* observed at each
 analysis and diffs every new analysis against the last known facts:
 
 * CRITICAL changes (honeypot appearing, ownership un-renounced, mint
-  authority appearing, LP unlock) demand an immediate high-priority
-  security review — they are exactly how rugs begin.
-* HIGH changes (new blacklist/pause powers, tax hikes, freeze authority)
-  demand prompt review.
+  authority appearing, LP unlock, the live Jupiter sell route disappearing)
+  demand an immediate high-priority security review — they are exactly how
+  rugs begin.
+* HIGH changes (new blacklist/pause powers, tax hikes, freeze authority,
+  a rising live round-trip sell loss) demand prompt review.
 * MEDIUM changes (concentration creeping up, holders draining) are the
   slow-motion warnings of Section 13.
 
@@ -49,6 +50,7 @@ _TAX_HIKE_HIGH_POINTS = 5.0
 _CONCENTRATION_HIGH_POINTS = 10.0
 _CONCENTRATION_MEDIUM_POINTS = 5.0
 _HOLDER_DROP_MEDIUM_FRACTION = 0.20
+_ROUND_TRIP_LOSS_HIKE_HIGH_POINTS = 20.0
 
 # The facts worth persisting for diffs (superset of the fields above).
 FACT_FIELDS = tuple(_BOOL_DANGER_FIELDS) + (
@@ -60,6 +62,9 @@ FACT_FIELDS = tuple(_BOOL_DANGER_FIELDS) + (
     "top10_holder_percent",
     "creator_percent",
     "holder_count",
+    "live_buy_route_found",
+    "live_sell_route_found",
+    "live_round_trip_loss_percent",
 )
 
 
@@ -119,6 +124,16 @@ def detect_security_changes(previous: dict | None, profile: SecurityProfile) -> 
             True, False,
         ))
 
+    # Live sell test losing its sell route (Project 1) -- a token that could
+    # be sold yesterday and can't today is exactly how a rug begins.
+    if known("live_sell_route_found") and previous["live_sell_route_found"] \
+            and not current["live_sell_route_found"]:
+        changes.append(SecurityChange(
+            "live_sell_route_found", AlertPriority.CRITICAL,
+            "live Jupiter test: token could be sold, now has no sell route",
+            True, False,
+        ))
+
     # LP lock evaporating.
     if known("lp_locked_percent"):
         drop = previous["lp_locked_percent"] - current["lp_locked_percent"]
@@ -140,6 +155,17 @@ def detect_security_changes(previous: dict | None, profile: SecurityProfile) -> 
                 f"{previous[name]:.0f}% -> {current[name]:.0f}%",
                 previous[name], current[name],
             ))
+
+    # Live round-trip sell loss rising (Project 1).
+    if known("live_round_trip_loss_percent") and \
+            current["live_round_trip_loss_percent"] - previous["live_round_trip_loss_percent"] \
+            >= _ROUND_TRIP_LOSS_HIKE_HIGH_POINTS:
+        changes.append(SecurityChange(
+            "live_round_trip_loss_percent", AlertPriority.HIGH,
+            f"live round-trip sell loss rose {previous['live_round_trip_loss_percent']:.0f}% -> "
+            f"{current['live_round_trip_loss_percent']:.0f}%",
+            previous["live_round_trip_loss_percent"], current["live_round_trip_loss_percent"],
+        ))
 
     # Concentration creep (Section 13 medium/high warnings).
     for name in ("top_holder_percent", "top10_holder_percent"):

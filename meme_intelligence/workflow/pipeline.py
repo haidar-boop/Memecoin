@@ -9,6 +9,7 @@ per module; Rule 18: extend, don't duplicate).
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable
@@ -63,10 +64,13 @@ class ResearchPipeline:
         goplus_client,  # GoPlusClient-compatible (get_token_security)
         *,
         wallet_service=None,  # WalletDataService (Solana); costs metered credits
+        jupiter_client=None,  # JupiterClient-compatible (check_round_trip_liquidity)
         now_func: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ) -> None:
         self._goplus = goplus_client
         self._wallet_service = wallet_service
+        self._jupiter = jupiter_client
+        self._liquidity_probe = settings.liquidity_probe
         self._now = now_func
         self._logger = get_logger("workflow.pipeline")
 
@@ -94,6 +98,32 @@ class ResearchPipeline:
             return None
         if profile is None:
             return None
+
+        # Live round-trip sell test (Project 1): Solana-only, needs a Jupiter
+        # API key, gated by the liquidity-probe config flag -- mirrors the
+        # wallet-intelligence gating below (Rule 10). Runs before scoring so
+        # the merged fields participate in the same destructive-override
+        # logic as GoPlus's static honeypot fields (Rule 9 -- multi-source).
+        if (
+            self._jupiter is not None
+            and self._liquidity_probe.enabled
+            and pair.chain in ("solana", "sol")
+        ):
+            try:
+                probe = await self._jupiter.check_round_trip_liquidity(
+                    pair.base_token.address,
+                    probe_sol_amount=self._liquidity_probe.probe_sol_amount,
+                    slippage_bps=self._liquidity_probe.slippage_bps,
+                )
+                profile = dataclasses.replace(
+                    profile,
+                    live_buy_route_found=probe.live_buy_route_found,
+                    live_sell_route_found=probe.live_sell_route_found,
+                    live_round_trip_loss_percent=probe.live_round_trip_loss_percent,
+                )
+            except (CollectorError, ValueError) as exc:
+                self._logger.info("Jupiter liquidity probe unavailable for %s: %s",
+                                  pair.base_token.address, exc)
 
         try:
             security = self._security.assess(profile, pair)

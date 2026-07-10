@@ -94,6 +94,7 @@ class BaseCollector:
         cache_ttl: float | None = None,
         headers: Mapping[str, str] | None = None,
         json_body: Any = None,
+        error_status_as_json: frozenset[int] = frozenset(),
     ) -> Any:
         """GET (or POST when ``json_body`` is given) and return parsed JSON.
 
@@ -101,6 +102,12 @@ class BaseCollector:
         providers split their APIs across hosts). When ``cache_key`` is
         given, a fresh cached response short-circuits the request entirely
         — no rate-limit token is consumed.
+
+        ``error_status_as_json``: non-200 statuses in this set return the
+        parsed JSON error body instead of raising :class:`CollectorError`
+        (still raised if the body isn't parseable JSON). Empty by default,
+        so every existing caller is unaffected — only callers that pass a
+        non-empty set opt into this behavior.
         """
         if cache_key is not None and self._cache is not None:
             cached = await self._cache.get(cache_key)
@@ -129,6 +136,13 @@ class BaseCollector:
                             f"{self.name}: server error {response.status} on {url}"
                         )
                     if response.status != 200:
+                        if response.status in error_status_as_json:
+                            try:
+                                return await response.json(content_type=None)
+                            except (aiohttp.ContentTypeError, ValueError) as exc:
+                                raise CollectorError(
+                                    f"{self.name}: invalid JSON from {url}: {exc}"
+                                ) from exc
                         body = (await response.text())[:_ERROR_BODY_PREVIEW]
                         raise CollectorError(
                             f"{self.name}: unexpected status {response.status} on {url}: {body}"

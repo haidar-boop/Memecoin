@@ -247,6 +247,80 @@ The classification/scoring framework, config system, and logging.
 
 ---
 
+---
+
+## New since the 2026-07-08 snapshot: live Jupiter round-trip sell test (Project 1)
+
+**2026-07-10.** This is not a renumbered spec part — it's the first of a
+separate 5-project roadmap layered on top of the existing Part 4/18/33
+security stack. GoPlus's contract analysis is *static* (what the code says
+the contract could do); this adds a *live* signal: actually ask Jupiter's
+swap router for a quote to buy the token, then a quote to sell it straight
+back, the same "can you actually sell it?" test a trader would do by hand.
+
+- `collectors/jupiter_data.py` (new) — `JupiterClient.check_round_trip_liquidity()`:
+  buys with a configurable SOL amount (default 0.3 SOL, ≈$50 at time of
+  writing), then immediately quotes selling the received tokens back to
+  SOL. Solana only. Requires a free Jupiter Developer Platform API key —
+  Jupiter deprecated its old fully-keyless "Lite" tier; the current
+  $0/month "Free" plan still requires signup (rate-limited to 1 req/s, no
+  monthly cap). Get one at https://developers.jup.ag/portal.
+- `collectors/base.py` — `_get_json()` gained an optional
+  `error_status_as_json` parameter so a collector can treat specific
+  non-200 statuses as a parseable JSON payload instead of an error (used
+  here because Jupiter reports "no route" as a 400/404/422 with a JSON
+  body, not a 200). Fully backward compatible — every other collector
+  passes nothing and is unaffected.
+- `core/models.py` — new `LiquidityProbeResult` (collector output shape)
+  and three new `SecurityProfile` fields: `live_buy_route_found`,
+  `live_sell_route_found`, `live_round_trip_loss_percent`.
+- **Three-state semantics, not a boolean** (Rule 8 — unknown ≠ unsafe): a
+  missing buy route is never treated as suspicious — Jupiter simply may
+  not have indexed a very new but legitimate pool yet. Only two things
+  are dangerous: (a) a buy route exists but no sell route does (a
+  confirmed "can buy, can't sell" rug, full stop, regardless of how clean
+  the static contract looks), and (b) a round trip that completes but
+  loses a catastrophic fraction of value (a live-detected hidden tax /
+  soft rug GoPlus's static tax fields might miss).
+- `analyzers/security_analyzer.py` — `_assess_contract()` flags a missing
+  sell route as **destructive** (forces score to 0, same override class as
+  GoPlus's `is_honeypot`/`cannot_sell_all`), an extreme round-trip loss
+  (≥90% by default) as destructive, and an elevated-but-not-extreme loss
+  (>50% by default) as a serious warning. This is deliberately independent
+  evidence from GoPlus (Rule 9 — multi-source), not a restatement of it.
+- `analyzers/security_monitor.py` — the three new fields are persisted as
+  baseline facts (`FACT_FIELDS`); a sell route disappearing between scans
+  is a new CRITICAL change (exactly how a rug begins), and a round-trip
+  loss jumping ≥20 points is a new HIGH change. A buy route disappearing
+  alone is recorded but intentionally not wired into any alert.
+- `config/settings.py` — new `LiquidityProbeSettings` group
+  (`MEMEINTEL_LIQUIDITY_PROBE_*`: `enabled`, `probe_sol_amount`,
+  `slippage_bps`), two new `SecurityThresholds` fields
+  (`max_round_trip_loss_percent`, `extreme_round_trip_loss_percent`), and
+  `jupiter_api_key` / `providers.jupiter_base_url` /
+  `providers.jupiter_requests_per_minute` alongside the existing
+  Helius/Birdeye settings.
+- `workflow/pipeline.py` — `ResearchPipeline` takes an optional
+  `jupiter_client`; when present, enabled, and the pair is on Solana, the
+  probe runs after GoPlus data is fetched but before security scoring, so
+  the merged fields participate in scoring. A `CollectorError`/`ValueError`
+  from the probe degrades gracefully (logged at INFO, analysis continues)
+  — it can never crash or block the pipeline.
+- **Wired into every command that goes through `ResearchPipeline`/
+  `ContinuousScanner`/`DailyRoutine`**: `plan`, `report`, `quick` (via the
+  shared `_gather_assessments` helper), `compare`, `watchlist --refresh`,
+  `daily`, `monitor`. **Explicitly NOT wired into `security` or `scan`**
+  (Part 2/Part 4's standalone screening commands bypass the shared
+  pipeline by design and were left untouched, per design decision 6 of
+  this change).
+- `__main__.py` — new `build_jupiter()` factory, mirroring
+  `build_wallet_service()`'s "returns `None` when no key is configured"
+  pattern exactly.
+- Tests: `tests/test_jupiter_data.py` (new), plus additions to
+  `test_security_analyzer.py`, `test_security_monitor.py`,
+  `test_settings.py`, and a new minimal `tests/test_pipeline.py`. Full
+  suite: 298 passing (was 274; +24 net across new/extended files).
+
 ## What's NOT built yet
 
 Everything in `next_steps/` — **Parts 19 through 33** (see

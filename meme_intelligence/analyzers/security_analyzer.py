@@ -172,6 +172,28 @@ class SecurityAnalyzer:
         if s.observe("cannot_sell_all", p.cannot_sell_all) and p.cannot_sell_all:
             s.flag_destructive("holders cannot sell their full balance")
 
+        # Live round-trip sell test (Project 1 -- Jupiter quote simulation).
+        # sell_route_found/round_trip_loss are only meaningful once a buy
+        # route was found; they are structurally not-applicable (not
+        # "unknown") otherwise, so they are only observed inside that branch.
+        if s.observe("live_buy_route_found", p.live_buy_route_found) and p.live_buy_route_found:
+            if s.observe("live_sell_route_found", p.live_sell_route_found) and not p.live_sell_route_found:
+                s.flag_destructive(
+                    "live Jupiter round-trip test: a buy route exists but no route to sell "
+                    "the token back was found -- it cannot currently be sold"
+                )
+            if s.observe("live_round_trip_loss_percent", p.live_round_trip_loss_percent):
+                loss = p.live_round_trip_loss_percent
+                if loss >= self._t.extreme_round_trip_loss_percent:
+                    s.flag_destructive(
+                        f"live Jupiter round-trip test: buying then immediately selling back "
+                        f"loses {loss:.0f}% of value"
+                    )
+                elif loss > self._t.max_round_trip_loss_percent:
+                    s.deduct(25, RiskTier.SERIOUS_WARNING,
+                             f"live Jupiter round-trip test shows an elevated {loss:.0f}% "
+                             f"round-trip loss")
+
         if s.observe("is_open_source", p.is_open_source) and not p.is_open_source:
             s.deduct(20, RiskTier.SERIOUS_WARNING, "contract source code is not verified")
         if s.observe("is_proxy", p.is_proxy) and p.is_proxy:

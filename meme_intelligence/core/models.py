@@ -64,11 +64,12 @@ class DexPair:
 class SecurityProfile:
     """Normalized contract-security facts about one token (Spec Parts 4/18/33).
 
-    Collectors (GoPlus today; Token Sniffer and honeypot services later)
-    normalize their provider-specific payloads into this shape so the
-    security analyzer never sees raw API responses (Part 32, Rule 3).
-    ``None`` always means "the source did not report this" — the analyzer
-    treats unknowns as reduced confidence, never as safe (Rule 8).
+    Collectors (GoPlus today; Token Sniffer and honeypot services later;
+    plus the live Jupiter round-trip probe, Project 1) normalize their
+    provider-specific payloads into this shape so the security analyzer
+    never sees raw API responses (Part 32, Rule 3). ``None`` always means
+    "the source did not report this" — the analyzer treats unknowns as
+    reduced confidence, never as safe (Rule 8).
 
     Percentages are expressed 0-100.
     """
@@ -119,6 +120,11 @@ class SecurityProfile:
 
     # Liquidity safety (Part 4 Section 4; USD depth comes from market data)
     lp_locked_percent: float | None = None
+
+    # Live round-trip sell test (Project 1 -- Jupiter quote simulation; Solana only)
+    live_buy_route_found: bool | None = None
+    live_sell_route_found: bool | None = None
+    live_round_trip_loss_percent: float | None = None
 
 
 @dataclass(frozen=True)
@@ -234,6 +240,25 @@ class TokenTransfer:
     to_owner: str | None
     ui_amount: float | None
     timestamp: datetime | None
+
+
+@dataclass(frozen=True)
+class LiquidityProbeResult:
+    """Live buy-then-sell round-trip test via Jupiter's swap router (Project 1).
+
+    Independent of GoPlus's static contract analysis (Rule 9 — multi-source):
+    this asks the router for a real quote rather than reading the contract's
+    stated logic. ``live_sell_route_found`` and ``live_round_trip_loss_percent``
+    are only meaningful once a buy route was found — they stay ``None`` (not
+    applicable, not "unknown") when the buy leg itself found no route, which
+    commonly just means Jupiter hasn't indexed a very new pool yet.
+    """
+
+    token: TokenIdentity
+    source: str
+    live_buy_route_found: bool | None = None
+    live_sell_route_found: bool | None = None
+    live_round_trip_loss_percent: float | None = None
 
 
 @dataclass(frozen=True)

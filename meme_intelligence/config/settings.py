@@ -212,12 +212,14 @@ class ProviderSettings:
     helius_requests_per_minute: float = 120.0         # free tier allows ~10 rps; stay far below
     birdeye_base_url: str = "https://public-api.birdeye.so"
     birdeye_requests_per_minute: float = 20.0         # free tier ~1 rps + monthly CU budget
+    jupiter_base_url: str = "https://api.jup.ag"
+    jupiter_requests_per_minute: float = 50.0         # free tier documented limit: 60/min (1 rps)
     failure_threshold: int = 3      # consecutive failures before a provider cools down
     cooldown_seconds: float = 60.0  # how long an unhealthy provider is skipped
 
     def __post_init__(self) -> None:
         for name in ("dexscreener", "geckoterminal", "goplus", "coingecko",
-                     "helius", "birdeye"):
+                     "helius", "birdeye", "jupiter"):
             if getattr(self, f"{name}_requests_per_minute") <= 0:
                 raise ConfigurationError(f"{name}_requests_per_minute must be positive")
         if self.failure_threshold < 1:
@@ -270,6 +272,8 @@ class SecurityThresholds:
     min_holder_count: int = 50
     warn_creator_percent: float = 5.0
     max_creator_percent: float = 10.0
+    max_round_trip_loss_percent: float = 50.0
+    extreme_round_trip_loss_percent: float = 90.0
 
     def __post_init__(self) -> None:
         for name, value in dataclasses.asdict(self).items():
@@ -277,6 +281,10 @@ class SecurityThresholds:
                 raise ConfigurationError(f"security threshold '{name}' must be positive, got {value}")
         if self.extreme_tax_percent < self.max_tax_percent:
             raise ConfigurationError("extreme_tax_percent must be >= max_tax_percent")
+        if self.extreme_round_trip_loss_percent < self.max_round_trip_loss_percent:
+            raise ConfigurationError(
+                "extreme_round_trip_loss_percent must be >= max_round_trip_loss_percent"
+            )
 
 
 @dataclass(frozen=True)
@@ -451,6 +459,31 @@ class WalletIntelSettings:
 
 
 @dataclass(frozen=True)
+class LiquidityProbeSettings:
+    """Live round-trip sell-test via Jupiter's swap router (Project 1; Solana only).
+
+    Denominated in SOL rather than USD to avoid a live price-conversion
+    dependency in the per-token pipeline; ``probe_sol_amount`` approximates
+    the target USD probe size at typical SOL prices and should be tuned in
+    .env as SOL's price moves.
+    """
+
+    enabled: bool = True
+    probe_sol_amount: float = 0.3   # roughly $50 at time of writing; adjust as SOL price moves
+    slippage_bps: int = 500         # 5%: tolerate normal slippage without false-positiving on it
+
+    def __post_init__(self) -> None:
+        if self.probe_sol_amount <= 0:
+            raise ConfigurationError(
+                f"liquidity probe probe_sol_amount must be positive, got {self.probe_sol_amount}"
+            )
+        if not (0 < self.slippage_bps <= 10000):
+            raise ConfigurationError(
+                f"liquidity probe slippage_bps must be within (0, 10000], got {self.slippage_bps}"
+            )
+
+
+@dataclass(frozen=True)
 class MomentumSubWeights:
     """Sub-weights inside the momentum score (Part 14, Section 5 — 4 x 25)."""
 
@@ -618,12 +651,15 @@ class Settings:
     alert_engine: AlertEngineSettings = field(default_factory=AlertEngineSettings)
     wallet: WalletIntelSettings = field(default_factory=WalletIntelSettings)
     smart_money_weights: SmartMoneySubWeights = field(default_factory=SmartMoneySubWeights)
+    liquidity_probe: LiquidityProbeSettings = field(default_factory=LiquidityProbeSettings)
     log_level: str = "INFO"
     log_dir: str = "logs"
-    # API keys (Rule 16): read from MEMEINTEL_HELIUS_API_KEY / MEMEINTEL_BIRDEYE_API_KEY
-    # (or a local .env). Empty string = the wallet-intelligence layer stays off.
+    # API keys (Rule 16): read from MEMEINTEL_HELIUS_API_KEY / MEMEINTEL_BIRDEYE_API_KEY /
+    # MEMEINTEL_JUPITER_API_KEY (or a local .env). Empty string = the
+    # corresponding live-data layer stays off.
     helius_api_key: str = ""
     birdeye_api_key: str = ""
+    jupiter_api_key: str = ""
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Settings":
@@ -657,10 +693,12 @@ class Settings:
             alert_engine=_load_group(AlertEngineSettings, "ALERT_ENGINE", env),
             wallet=_load_group(WalletIntelSettings, "WALLET", env),
             smart_money_weights=_load_group(SmartMoneySubWeights, "SMART_MONEY_WEIGHTS", env),
+            liquidity_probe=_load_group(LiquidityProbeSettings, "LIQUIDITY_PROBE", env),
             log_level=env.get(f"{_ENV_PREFIX}_LOG_LEVEL", "INFO"),
             log_dir=env.get(f"{_ENV_PREFIX}_LOG_DIR", "logs"),
             helius_api_key=env.get(f"{_ENV_PREFIX}_HELIUS_API_KEY", ""),
             birdeye_api_key=env.get(f"{_ENV_PREFIX}_BIRDEYE_API_KEY", ""),
+            jupiter_api_key=env.get(f"{_ENV_PREFIX}_JUPITER_API_KEY", ""),
         )
 
 

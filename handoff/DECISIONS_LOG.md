@@ -120,6 +120,60 @@ predictions against actual outcomes without needing new instrumentation.
 The join logic, outcome labeling (winner/loser/rug), and weight-tuning
 loop itself are not written.
 
+## 2026-07-10 — Project 1: live Jupiter round-trip sell test
+
+This is the first of a separate 5-project roadmap layered on top of the
+existing Part 4/18/33 security stack, not a renumbered spec part. Three
+decisions worth recording:
+
+### 1. Jupiter's keyless tier is deprecated — a free API key is now required
+
+The original assumption going into this work was that Jupiter's
+"Lite"/free quote API (`lite-api.jup.ag`) needed no API key at all, based
+on older documentation. As of July 2026 that fully-keyless tier has been
+deprecated. The current $0/month "Free" plan (`api.jup.ag`) still requires
+signup and an `x-api-key` header — it just carries no monthly usage cap
+(rate-limited to 1 request/second / 60/minute). **Resolution:** the
+collector is gated exactly like Part 17's wallet intelligence (Helius/
+Birdeye) — `build_jupiter()` returns `None` when `MEMEINTEL_JUPITER_API_KEY`
+is unset, and the probe silently stays off rather than failing loudly.
+Nothing else in the pipeline depends on it being present.
+
+### 2. SOL-denominated probe size instead of a live USD conversion
+
+The natural framing ("probe with about $50") would normally suggest
+converting a USD figure to SOL at query time. That was rejected: it would
+introduce a live SOL/USD price dependency into the *per-token* pipeline,
+where none exists today — CoinGecko is already rate-limited to ~10 req/min
+and is used exactly once per day, for the market-environment check, not
+per-token. Instead, `LiquidityProbeSettings.probe_sol_amount` (default 0.3
+SOL) is a static, operator-tunable value, exactly like every other USD
+threshold in this system (`min_liquidity_usd`, etc., are also static
+figures, not live-priced). The default is documented in `.env.example` as
+approximating $50 "at time of writing" and something to revisit as SOL's
+price moves — a manual tuning knob, deliberately not automated.
+
+### 3. Three-state semantics — a missing buy route is never treated as suspicious
+
+The naive design would score "no buy route found" as a bad sign (can't
+even determine if the token is tradable). That was explicitly rejected
+per **Rule 8** ("unknown does not equal unsafe"): Jupiter routing data
+lags real pool creation, especially for brand-new pump.fun/Raydium
+launches, so "no route yet" is a routine, meaningless-on-its-own outcome
+for perfectly legitimate new tokens, not a red flag. **Resolution:**
+`live_buy_route_found`, `live_sell_route_found`, and
+`live_round_trip_loss_percent` form a three-state model — the latter two
+are structurally *not applicable* (not "unknown") until a buy route is
+actually confirmed, and are only ever observed/scored inside that branch
+(`analyzers/security_analyzer.py::_assess_contract`). The only two
+outcomes that are ever treated as dangerous are (a) a confirmed buy route
+with no sell route (an unambiguous "can buy, can't sell" rug, forced
+destructive regardless of how clean the static GoPlus analysis is), and
+(b) a completed round trip that loses a catastrophic fraction of value.
+This mirrors the same "unknown excluded from scoring, never assumed safe"
+discipline already used everywhere else in this codebase (e.g.
+`SubScore.observe()`).
+
 ## Notable implementation choices (Rule 19)
 
 - **Python 3.11 + asyncio** over Node.js (both allowed by spec): the

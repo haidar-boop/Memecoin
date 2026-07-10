@@ -165,3 +165,58 @@ def test_summary_warns_on_partial_coverage():
     text = make_analyzer().assess(sparse, market=None).summary()
     assert "partial data" in text
     assert "NOT safe" in text
+
+
+# ---- Live Jupiter round-trip sell test (Project 1) ----
+
+def test_live_buy_route_but_no_sell_route_is_destructive():
+    assessment = make_analyzer().assess(
+        clean_profile(live_buy_route_found=True, live_sell_route_found=False), healthy_market()
+    )
+    assert assessment.tier is RiskTier.DESTRUCTIVE
+    assert assessment.is_destructive
+    assert any("no route to sell" in f.message for f in assessment.destructive_findings)
+
+
+def test_extreme_round_trip_loss_is_destructive():
+    assessment = make_analyzer().assess(
+        clean_profile(live_buy_route_found=True, live_sell_route_found=True,
+                      live_round_trip_loss_percent=95.0),
+        healthy_market(),
+    )
+    assert assessment.tier is RiskTier.DESTRUCTIVE
+    assert assessment.is_destructive
+    assert any("loses 95%" in f.message for f in assessment.destructive_findings)
+
+
+def test_elevated_round_trip_loss_is_serious_not_destructive():
+    assessment = make_analyzer().assess(
+        clean_profile(live_buy_route_found=True, live_sell_route_found=True,
+                      live_round_trip_loss_percent=65.0),
+        healthy_market(),
+    )
+    assert not assessment.is_destructive
+    assert assessment.tier is RiskTier.SERIOUS_WARNING
+    assert any("elevated 65%" in f.message for f in assessment.findings)
+
+
+def test_live_buy_route_none_never_tested_does_not_crash_or_flag():
+    assessment = make_analyzer().assess(
+        clean_profile(live_buy_route_found=None), healthy_market()
+    )
+    assert not assessment.is_destructive
+    assert not any(f.severity is RiskTier.SERIOUS_WARNING and "Jupiter" in f.message
+                   for f in assessment.findings)
+    assert "live_buy_route_found" in assessment.unknown_fields
+    # sell/loss are structurally not-applicable, not separately "unknown", when buy was never tested.
+    assert "live_sell_route_found" not in assessment.unknown_fields
+    assert "live_round_trip_loss_percent" not in assessment.unknown_fields
+
+
+def test_live_buy_route_confirmed_false_is_not_a_risk_finding():
+    """Jupiter confirming no buy route exists is recorded, never flagged (design decision 3)."""
+    assessment = make_analyzer().assess(
+        clean_profile(live_buy_route_found=False), healthy_market()
+    )
+    assert not assessment.is_destructive
+    assert not any("Jupiter" in f.message for f in assessment.findings)
