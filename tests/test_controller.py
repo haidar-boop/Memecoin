@@ -608,9 +608,11 @@ async def test_persistent_gate_passer_verified_only_once():
 
 
 async def test_dead_watchlist_token_archived_with_postmortem():
-    """Part 29 S1: a tracked token whose pool collapsed gets ONE MEDIUM
-    post-mortem and is archived — not re-tiered on its pump-window score
-    and re-warned at HIGH every recheck."""
+    """Part 29 S1: a tracked token whose pool collapsed gets ONE post-mortem
+    and is archived — not re-tiered on its pump-window score and re-warned
+    at HIGH every recheck. This token never earned an opportunity alert, so
+    the interest gate delivers the post-mortem at LOW (recorded for grading,
+    silent on the phone)."""
     dying = TokenIdentity(chain="solana", address="TokenDying", symbol="DIE")
     dead_pair = _dc.replace(make_pair(address="TokenDying", symbol="DIE"),
                             liquidity_usd=25.0)
@@ -632,6 +634,33 @@ async def test_dead_watchlist_token_archived_with_postmortem():
         assert "token_death" in types
         assert "risk_warning" not in types
         assert "score_drop_review" not in types
+        death = next(e for e in sink.sent if e.alert_type == "token_death")
+        assert death.priority is AlertPriority.LOW  # interest gate: never recommended
+
+
+async def test_recommended_token_keeps_full_priority_postmortem():
+    """The interest gate must NOT silence tokens the operator was pointed
+    at: with a prior HIGH opportunity alert on record, the death post-mortem
+    arrives at its full MEDIUM priority."""
+    from meme_intelligence.alerts.notification_engine import AlertEvent
+    from meme_intelligence.core.enums import AlertPriority as _AP
+
+    dying = TokenIdentity(chain="solana", address="TokenDying", symbol="DIE")
+    dead_pair = _dc.replace(make_pair(address="TokenDying", symbol="DIE"),
+                            liquidity_usd=25.0)
+    sink = RecordingSink()
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        storage.update_watchlist(dying, WatchlistTier.TIER_1_HIGH_PRIORITY, score=85.0)
+        storage.record_alert(  # the scanner recommended this token earlier
+            AlertEvent(_AP.HIGH, "strong_candidate", dying, "was strong", ()),
+            source="test")
+        market = FakeMarketService({"TokenDying": dead_pair})
+        scanner = make_scanner_with_market(
+            storage, [], {"TokenDying": clean_profile(dying)},
+            market, settings=fast_recheck_settings(), sink=sink,
+        )
+        await scanner.run(max_cycles=1)
+
         death = next(e for e in sink.sent if e.alert_type == "token_death")
         assert death.priority is AlertPriority.MEDIUM
 

@@ -28,10 +28,12 @@ from datetime import datetime, timezone
 from typing import Awaitable, Callable
 
 from meme_intelligence.alerts.notification_engine import (
+    INTEREST_ALERT_TYPES,
     AlertEvent,
     AutomationRules,
     NotificationEngine,
     events_from_security_changes,
+    gate_events_by_interest,
 )
 from meme_intelligence.analyzers.security_monitor import (
     detect_security_changes,
@@ -513,17 +515,28 @@ class ContinuousScanner:
                 )
                 self._storage.archive(token, reason)
 
+        interest = self._operator_interest(token)
         events = self._rules.evaluate(result, previous_score=previous_score,
                                       ai_verification_inconclusive=ai_inconclusive,
-                                      deterministic_risk_veto=deterministic_veto)
+                                      deterministic_risk_veto=deterministic_veto,
+                                      operator_interest=interest)
         if result.ai_judgment is not None:
             events = [self._annotate_with_ai(event, result.ai_judgment)
                       for event in events]
         events = await self._verify_events(events, result)
         # Security-change events rest on contract facts, not market data, so
         # they bypass market cross-verification and are appended directly.
-        events.extend(events_from_security_changes(
-            token, changes, master_score=result.master.final_score))
+        # They pass the same interest gate as the rule-generated events —
+        # a HIGH opportunity firing in THIS batch counts as interest, so
+        # contradictory signals on a just-recommended token both arrive.
+        batch_interest = interest or any(
+            e.alert_type in INTEREST_ALERT_TYPES
+            and e.priority is AlertPriority.HIGH for e in events)
+        events.extend(gate_events_by_interest(
+            events_from_security_changes(
+                token, changes, master_score=result.master.final_score),
+            operator_interest=batch_interest,
+            enabled=self._settings.alert_engine.risk_alerts_require_interest))
         delivered = await self._notifier.dispatch(events)
         stats.alerts.extend(delivered)
         for event in delivered:
@@ -535,6 +548,24 @@ class ContinuousScanner:
             )
 
         self._feed_learning(result, stats, creator=creator)
+
+    def _operator_interest(self, token) -> bool:
+        """Was the operator ever POINTED at this token? (interest gate)
+
+        True when a HIGH opportunity alert (high_priority_opportunity /
+        strong_candidate) was previously delivered for it — the only way the
+        operator learns about a token, hence the only way a protective alert
+        can be guarding a real decision. Fails OPEN: if history cannot be
+        read, alerts keep their full priority rather than being silently
+        demoted (Rule 6 — an error must not suppress a warning).
+        """
+        try:
+            history = self._storage.alert_history(token, limit=100)
+        except Exception as exc:  # noqa: BLE001 — advisory lookup, fail open
+            self._logger.warning("interest lookup failed for %s (alerts keep "
+                                 "full priority): %s", token.address, exc)
+            return True
+        return any(row["alert_type"] in INTEREST_ALERT_TYPES for row in history)
 
     # Alert types that mean "this token is already flagged risky" — a paid AI
     # opinion on it is wasted money, not information.

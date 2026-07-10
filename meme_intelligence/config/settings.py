@@ -735,9 +735,20 @@ class AlertEngineSettings:
     # Section 1 — alerts exist to protect decisions, and there is no
     # decision left to protect on a completed rug).
     dead_liquidity_usd: float = 500.0
+    # Interest gate (Part 29 Section 1 — alerts exist to protect DECISIONS).
+    # The scanner never trades and the operator only learns about tokens
+    # through HIGH opportunity alerts, so a risk warning / score drop /
+    # emergency on a token that never earned one protects no decision: it is
+    # background telemetry about garbage dying, not actionable intelligence.
+    # When enabled, protective alerts on such tokens are demoted to LOW
+    # priority — still logged and recorded in alert history, but below every
+    # external sink's minimum priority, so the phone stays quiet.
+    risk_alerts_require_interest: bool = True
 
     def __post_init__(self) -> None:
         for name, value in dataclasses.asdict(self).items():
+            if isinstance(value, bool):
+                continue  # switches are not magnitudes — positivity is meaningless
             if not math.isfinite(value) or value <= 0:
                 raise ConfigurationError(f"alert setting '{name}' must be positive, got {value}")
 

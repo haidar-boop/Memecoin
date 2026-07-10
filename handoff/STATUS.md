@@ -1,6 +1,6 @@
 # Build Status — Parts 1 through 33 (built or verified-satisfied)
 
-**457 tests passing.** ~13,900 lines of source, ~7,300 lines of tests.
+**620 tests passing.** ~14,000 lines of source, ~8,000 lines of tests.
 Parts 20-33 completed a verification pass (see `next_steps/INDEX.md`);
 the only unbuilt items are the web dashboard and creator-history
 intelligence (data-source-blocked).
@@ -361,6 +361,14 @@ The classification/scoring framework, config system, and logging.
   delivery check through every configured sink).
 - §§4-6 (filtering, confirmation, cooldown) were already built in Parts
   13/15; §9's daily summary is Part 11's `DailyReport`.
+- **Interest gate (live-feedback tuning, 2026-07-10):** protective
+  alerts (risk_warning, score_drop_review, emergency_review, whale_exit,
+  insider_risk, community_fake, security_change, token_death) demote to
+  LOW on tokens that never earned a HIGH opportunity alert — the
+  operator was never pointed at them, so the warnings protect no
+  decision (§1). Still logged and recorded for grading; silent on the
+  phone. Config `MEMEINTEL_ALERT_ENGINE_RISK_ALERTS_REQUIRE_INTEREST`
+  (default true). See DECISIONS_LOG.md for the full rationale.
 - **Gap (why 🟡):** no Telegram bot token / Discord webhook configured
   yet — sinks are built, tested against mocks, and activate the moment
   `MEMEINTEL_TELEGRAM_BOT_TOKEN` + `MEMEINTEL_TELEGRAM_CHAT_ID` (or

@@ -275,12 +275,106 @@ async def test_unknown_liquidity_is_not_death():
 
 async def test_sinking_but_alive_token_keeps_high_risk_warning():
     """Below the $5k minimum but above the dead floor is still a live,
-    decision-relevant deterioration — the HIGH warning stays."""
+    decision-relevant deterioration — the HIGH warning stays (for a token
+    the operator was pointed at; see the interest-gate tests below)."""
     result = await pipeline_result(pair=make_pair(liquidity_usd=3_000.0))
     events = make_rules().evaluate(result)
     warnings = [e for e in events if e.alert_type == "risk_warning"]
     assert warnings and warnings[0].priority is AlertPriority.HIGH
     assert not any(e.alert_type == "token_death" for e in events)
+
+
+# ---- Interest gate (Part 29 Section 1: alerts protect decisions) ----
+# The operator only learns about tokens through HIGH opportunity alerts, so
+# protective alerts on a token that never earned one guard no possible
+# decision — they demote to LOW (logged, recorded, but below every external
+# sink's minimum priority). This is what stops dying pump.fun garbage from
+# re-warning the phone every recheck.
+
+
+async def test_interest_gate_demotes_risk_alerts_on_unrecommended_tokens():
+    """A junk token the operator was never pointed at: HIGH risk_warning and
+    HIGH score_drop_review both demote to LOW with the reason named."""
+    result = await pipeline_result(pair=make_pair(liquidity_usd=3_000.0))
+    events = make_rules().evaluate(result, previous_score=result.master.final_score + 20,
+                                   operator_interest=False)
+    by_type = {e.alert_type: e for e in events}
+    assert by_type["risk_warning"].priority is AlertPriority.LOW
+    assert by_type["score_drop_review"].priority is AlertPriority.LOW
+    assert any("interest gate" in r for r in by_type["risk_warning"].reasons)
+
+
+async def test_interest_keeps_protective_alerts_at_full_priority():
+    """The same junk token WITH prior operator interest keeps the HIGH pair —
+    a token the operator may be holding still gets its warnings."""
+    result = await pipeline_result(pair=make_pair(liquidity_usd=3_000.0))
+    events = make_rules().evaluate(result, previous_score=result.master.final_score + 20,
+                                   operator_interest=True)
+    by_type = {e.alert_type: e for e in events}
+    assert by_type["risk_warning"].priority is AlertPriority.HIGH
+    assert by_type["score_drop_review"].priority is AlertPriority.HIGH
+
+
+async def test_interest_gate_demotes_critical_emergency_on_unrecommended_tokens():
+    """Even a CRITICAL honeypot finding is informational on a token the
+    operator was never told about — he cannot be holding it."""
+    result = await pipeline_result(honeypot=True)
+    events = make_rules().evaluate(result, operator_interest=False)
+    emergency = next(e for e in events if e.alert_type == "emergency_review")
+    assert emergency.priority is AlertPriority.LOW
+
+
+async def test_interest_gate_demotes_death_postmortem_on_unrecommended_tokens():
+    result = await pipeline_result(pair=make_pair(liquidity_usd=30.0))
+    events = make_rules().evaluate(result, previous_score=90.0, operator_interest=False)
+    death = next(e for e in events if e.alert_type == "token_death")
+    assert death.priority is AlertPriority.LOW
+
+
+async def test_same_batch_opportunity_grants_interest():
+    """A HIGH opportunity firing in the SAME batch counts as interest:
+    contradictory signals on a just-recommended token must both arrive at
+    full priority."""
+    result = await pipeline_result()  # fires HIGH strong_candidate
+    events = make_rules().evaluate(result, previous_score=result.master.final_score + 20,
+                                   operator_interest=False)
+    by_type = {e.alert_type: e for e in events}
+    assert by_type["strong_candidate"].priority is AlertPriority.HIGH
+    assert by_type["score_drop_review"].priority is AlertPriority.HIGH  # not demoted
+
+
+async def test_interest_gate_never_touches_opportunity_or_momentum_alerts():
+    """Only protective alert types demote — opportunity/momentum signals on a
+    new token ARE the operator's introduction to it."""
+    hot_pair = make_pair(volume_1h=20_000.0, buys_1h=60, sells_1h=10,
+                         price_change_24h=25.0, price_change_6h=12.0, price_change_1h=5.0)
+    result = await pipeline_result(pair=hot_pair)
+    events = make_rules().evaluate(result, operator_interest=False)
+    momentum = next(e for e in events if e.alert_type == "momentum")
+    assert momentum.priority is AlertPriority.MEDIUM  # unchanged
+
+
+async def test_interest_gate_configurable_off():
+    """Rule 17: the gate is a setting, not a hardcode — disabling it restores
+    full-priority protective alerts on every token."""
+    rules = AutomationRules(AlertThresholds(),
+                            AlertEngineSettings(risk_alerts_require_interest=False))
+    result = await pipeline_result(pair=make_pair(liquidity_usd=3_000.0))
+    events = rules.evaluate(result, operator_interest=False)
+    warnings = [e for e in events if e.alert_type == "risk_warning"]
+    assert warnings and warnings[0].priority is AlertPriority.HIGH
+
+
+def test_gate_events_by_interest_covers_security_changes_and_is_idempotent():
+    from meme_intelligence.alerts.notification_engine import gate_events_by_interest
+
+    change = AlertEvent(AlertPriority.CRITICAL, "security_change", TOKEN,
+                        "became honeypot", ("honeypot: False -> True",))
+    gated = gate_events_by_interest([change], operator_interest=False)
+    assert gated[0].priority is AlertPriority.LOW
+    # Idempotent: a second pass adds no duplicate note.
+    again = gate_events_by_interest(gated, operator_interest=False)
+    assert again[0].reasons == gated[0].reasons
 
 
 class RecordingSink:

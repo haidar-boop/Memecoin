@@ -565,6 +565,53 @@ cross-verification, the Part 32.5 §8 AI-verification trigger, and the
 "discoveries" delivery channel. Threshold is config (Rule 17), so the
 operator can raise it for fewer/stronger alerts.
 
+### Interest gate: protective alerts demote to LOW on never-recommended tokens (2026-07-10)
+
+Third round of live-operation feedback: even with the token-death floor
+and the strong-candidate tier in place, the operator's phone kept
+receiving HIGH `risk_warning` and HIGH `score_drop_review` alerts on
+dying pump.fun garbage (liquidity $2,700–$9,600, one wallet holding
+65–97%, top-10 holding ~99.9%) — tokens above the $500 dead floor but
+walking dead, and tokens the operator had never been told about, let
+alone bought. Verbatim complaint: "It's still finding and sending me
+bullshit… it's also giving me rug pulls."
+
+Root insight (Part 29 S1 — alerts exist to protect decisions): this
+system never trades, and the operator only *learns about* a token when
+it earns a HIGH opportunity alert (`high_priority_opportunity` /
+`strong_candidate`). A protective alert — risk warning, score drop,
+emergency, whale exit, insider risk, fake community, security change,
+death post-mortem — on any other token guards no decision the operator
+could possibly have made. It is internal research telemetry, not
+actionable intelligence.
+
+Change (`alerts/notification_engine.py` + `workflow/controller.py`):
+
+- `gate_events_by_interest()` demotes the protective alert types above
+  to LOW priority when the token has no *operator interest*. LOW is
+  below every external sink's minimum priority, so the phone stays
+  silent; the console still prints them and alert history still records
+  them (Rule 13, Part 24 grading unaffected).
+- Interest = a HIGH opportunity alert was previously delivered for the
+  token (checked against alert history, fail-OPEN on storage errors so
+  an error can never silently suppress a warning — Rule 6), OR a HIGH
+  opportunity alert fires in the same batch (contradictory signals on a
+  just-recommended token both arrive at full priority).
+- MEDIUM `early_opportunity` deliberately does NOT grant interest: it
+  is a provisional research note, invisible on the operator's
+  HIGH-filtered phone, and most of the dying garbage passed through it
+  on the way down — counting it would defeat the gate.
+- Config: `MEMEINTEL_ALERT_ENGINE_RISK_ALERTS_REQUIRE_INTEREST`
+  (default true; Rule 17). Disabling restores full-priority warnings on
+  every token. Opportunity/momentum/accumulation alerts are never
+  touched — they ARE the operator's introduction to a token.
+
+Trade-off accepted explicitly: a CRITICAL honeypot finding on a
+never-recommended token is also demoted. Correct here because the
+operator cannot hold what he was never pointed at, and the finding is
+still recorded; revisit if the system ever monitors externally-acquired
+holdings.
+
 ### Watchlist opportunity ranking (Part 28 §5/§6) — second, separate axis
 
 Part 28 §5 specifies an upside-tilted "Opportunity Ranking" (Growth 30 /

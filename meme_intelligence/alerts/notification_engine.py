@@ -40,6 +40,63 @@ from meme_intelligence.workflow.pipeline import PipelineResult
 # this one may be missing (Rule 8: the gap is surfaced, not assumed).
 _STRONG_CANDIDATE_ALLOWED_UNVERIFIED = frozenset({"community"})
 
+# ---- Interest gate (Part 29 Section 1: alerts protect decisions) ----
+#
+# The system never trades, and the operator only hears about a token when it
+# earns a HIGH opportunity alert. Every other tracked token is internal
+# research state — so a HIGH risk warning / score drop / emergency on one of
+# those protects no decision the operator could possibly have made. Live
+# failure mode this closes: dying pump.fun garbage (liquidity a few $k, one
+# wallet holding 65–97%) sat above the token-death floor and re-warned the
+# phone every recheck as HIGH "RISK WARNING" / "SCORE DROP REVIEW" spam.
+#
+# Alert types that RECOMMEND a token to the operator — receiving one means
+# the operator may have acted, so protective alerts stay at full priority
+# afterwards. MEDIUM early_opportunity is deliberately excluded: it is a
+# provisional research note, not a recommendation, and most dying garbage
+# passed through it on the way down.
+INTEREST_ALERT_TYPES = frozenset({"high_priority_opportunity", "strong_candidate"})
+
+# Alert types that exist to PROTECT a holder/decision rather than surface a
+# new opportunity. On a token with no operator interest they demote to LOW:
+# still printed by the console and recorded in history (Rule 13), but below
+# the external sinks' minimum priority, so the phone never buzzes for them.
+_PROTECTIVE_ALERT_TYPES = frozenset({
+    "emergency_review", "risk_warning", "score_drop_review", "token_death",
+    "whale_exit", "insider_risk", "community_fake", "security_change",
+})
+
+_NO_INTEREST_NOTE = ("informational only: this token never earned an "
+                     "opportunity alert, so no operator decision is exposed "
+                     "to it (interest gate)")
+
+
+def gate_events_by_interest(
+    events: list["AlertEvent"], *, operator_interest: bool, enabled: bool = True,
+) -> list["AlertEvent"]:
+    """Demote protective alerts to LOW when the operator was never pointed
+    at this token (see the interest-gate rationale above).
+
+    A HIGH opportunity alert in the SAME batch grants interest immediately —
+    contradictory signals on a token being recommended right now must both
+    arrive at full priority. Idempotent: already-LOW events pass untouched.
+    """
+    if not enabled or operator_interest:
+        return events
+    if any(e.alert_type in INTEREST_ALERT_TYPES
+           and e.priority is AlertPriority.HIGH for e in events):
+        return events
+    gated: list[AlertEvent] = []
+    for event in events:
+        if (event.alert_type in _PROTECTIVE_ALERT_TYPES
+                and event.priority is not AlertPriority.LOW):
+            gated.append(dataclasses.replace(
+                event, priority=AlertPriority.LOW,
+                reasons=event.reasons + (_NO_INTEREST_NOTE,)))
+        else:
+            gated.append(event)
+    return gated
+
 
 @dataclass(frozen=True)
 class AlertEvent:
@@ -89,6 +146,7 @@ class AutomationRules:
         previous_score: float | None = None,
         ai_verification_inconclusive: bool = False,
         deterministic_risk_veto: str | None = None,
+        operator_interest: bool = True,
     ) -> list[AlertEvent]:
         """``ai_verification_inconclusive`` — the caller ran AI verification
         but no usable judgment came back (discarded below the confidence
@@ -101,7 +159,13 @@ class AutomationRules:
         alerts already firing) vetoed this token before any paid call. It
         downgrades BOTH HIGH opportunity tiers (bug-hunt finding: the
         fully-verified tier used to bypass every veto — a blacklisted
-        deployer with community data still fired HIGH, unchecked)."""
+        deployer with community data still fired HIGH, unchecked).
+
+        ``operator_interest`` — whether the operator was ever POINTED at this
+        token (a HIGH opportunity alert was delivered for it). When False,
+        protective alerts demote to LOW via the interest gate (see
+        :func:`gate_events_by_interest`); the default True preserves full
+        priority for every caller that does not track alert history."""
         # A dead token is a closed case (Part 29 Section 1 — alerts protect
         # decisions, and no entry/exit decision remains once liquidity has
         # collapsed): one MEDIUM post-mortem replaces the warning/drop pair,
@@ -113,7 +177,9 @@ class AutomationRules:
             events = [event for event in self._emergency_rule(result)
                       if event.priority is AlertPriority.CRITICAL]
             events.append(death)
-            return events
+            return gate_events_by_interest(
+                events, operator_interest=operator_interest,
+                enabled=self._s.risk_alerts_require_interest)
 
         events: list[AlertEvent] = []
         events.extend(self._emergency_rule(result))
@@ -132,7 +198,9 @@ class AutomationRules:
         drop = self._score_drop_rule(result, previous_score)
         if drop is not None:
             events.append(drop)
-        return events
+        return gate_events_by_interest(
+            events, operator_interest=operator_interest,
+            enabled=self._s.risk_alerts_require_interest)
 
     # IF liquidity has collapsed below the dead floor THEN the failure is a
     # completed event, not a warning — emit one post-mortem (Part 29 S1).
