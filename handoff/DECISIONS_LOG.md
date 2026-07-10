@@ -612,6 +612,53 @@ operator cannot hold what he was never pointed at, and the finding is
 still recorded; revisit if the system ever monitors externally-acquired
 holdings.
 
+### Opportunity quality: rug screen decoupled from AI + copycat veto (2026-07-10)
+
+Same feedback round, other half of the complaint: the *recommendations*
+themselves were junk — "stupid coins that are either rug pulls or
+duplicates of another good coin", observed while the operator had the
+Anthropic API key turned off. Two distinct root causes:
+
+1. **The rug-engine screen was reachable only through the AI gate.**
+   `_ai_spend_veto` was designed as a credit-conservation check, so the
+   whole block sat behind `if self._ai_verifier is not None`. With the
+   API key off, `_ai_verifier` is None and the deterministic screen —
+   rug engine, deployer blacklist, risk-alerts-already-firing — never
+   ran: gate-passing tokens fired HIGH completely unscreened. Fix:
+   renamed to `_deterministic_risk_veto` and hoisted out of the AI
+   conditional. The free screen now runs whenever a HIGH opportunity is
+   about to fire, AI or no AI (a rug is a rug with the key on or off);
+   when AI *is* configured, the paid call still runs only after the
+   screen is clean, so credit conservation is unchanged. Side benefit:
+   the screen now also re-runs on rechecks of already-AI-verified
+   tokens (it used to be skipped once verified), so risk appearing
+   later still vetoes.
+
+2. **Nothing checked for copycats at all.** A fresh token wearing the
+   symbol/name of an established coin (the classic pump.fun knock-off
+   pattern) passed every gate on its own numbers. Fix: a second free
+   screen, `_copycat_veto` — one provider search
+   (`MarketDataService.search_pairs`, DexScreener-backed with provider
+   failover) per gate-passing candidate, verdict cached per token
+   (names never change; Rule 10/11). The pure rule
+   (`_find_established_duplicate`): a *different* token, any chain,
+   whose pool holds ≥ `copycat_min_liquidity_usd` (default $100k) AND ≥
+   `copycat_liquidity_ratio` × (default 10×) the candidate's liquidity,
+   with a normalized-equal symbol or name → veto, downgrading both HIGH
+   tiers to MEDIUM with the original named. The size gap is the
+   evidence — two small coins sharing a ticker is a coincidence
+   (symbols collide constantly), so no veto fires without it (Rule 8).
+   Pair age is deliberately not required: aggregated search results
+   often omit it, and the liquidity gap alone identifies which token
+   owns the name. Unknown/missing search capability (test doubles, a
+   provider outage) means no veto, and outages are never cached as
+   "clear". Config: `MEMEINTEL_ALERTS_COPYCAT_*` (Rule 17).
+
+Both screens are zero-API-cost to the paid AI budget and downgrade
+rather than suppress — the token still appears as a MEDIUM
+`early_opportunity` with the veto reason named, invisible on the
+operator's HIGH-filtered phone but auditable in history.
+
 ### Watchlist opportunity ranking (Part 28 §5/§6) — second, separate axis
 
 Part 28 §5 specifies an upside-tilted "Opportunity Ranking" (Growth 30 /

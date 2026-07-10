@@ -1,6 +1,6 @@
 # Build Status — Parts 1 through 33 (built or verified-satisfied)
 
-**620 tests passing.** ~14,000 lines of source, ~8,000 lines of tests.
+**626 tests passing.** ~14,000 lines of source, ~8,000 lines of tests.
 Parts 20-33 completed a verification pass (see `next_steps/INDEX.md`);
 the only unbuilt items are the web dashboard and creator-history
 intelligence (data-source-blocked).
@@ -369,6 +369,16 @@ The classification/scoring framework, config system, and logging.
   decision (§1). Still logged and recorded for grading; silent on the
   phone. Config `MEMEINTEL_ALERT_ENGINE_RISK_ALERTS_REQUIRE_INTEREST`
   (default true). See DECISIONS_LOG.md for the full rationale.
+- **Opportunity screens (live-feedback tuning, 2026-07-10):** every
+  HIGH opportunity alert must now clear two FREE deterministic screens
+  regardless of whether an Anthropic key is configured: the rug-engine
+  screen (previously reachable only through the AI-verification gate —
+  turning the key off silently unscreened HIGH alerts) and a new
+  copycat veto (`MarketDataService.search_pairs` + the
+  `_find_established_duplicate` rule: same symbol/name as a coin with
+  ≥$100k and ≥10× the candidate's liquidity → downgrade with the
+  original named). Config `MEMEINTEL_ALERTS_COPYCAT_*`. See
+  DECISIONS_LOG.md.
 - **Gap (why 🟡):** no Telegram bot token / Discord webhook configured
   yet — sinks are built, tested against mocks, and activate the moment
   `MEMEINTEL_TELEGRAM_BOT_TOKEN` + `MEMEINTEL_TELEGRAM_CHAT_ID` (or

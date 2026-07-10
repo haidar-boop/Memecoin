@@ -81,6 +81,25 @@ class MarketDataService:
             return None
         return max(pairs, key=lambda p: p.liquidity_usd or 0.0)
 
+    async def search_pairs(self, query: str) -> list[DexPair]:
+        """Search pairs by token name/symbol via the first provider that
+        supports it (currently DexScreener; GeckoTerminal has no search
+        endpoint). Providers without a ``search_pairs`` method are skipped,
+        and a failing provider falls through to the next — an empty result
+        means "nothing found or nobody could look", which callers must treat
+        as no evidence, never as confirmation of uniqueness (Rule 8)."""
+        for provider in self._providers:
+            search = getattr(provider, "search_pairs", None)
+            if search is None:
+                continue
+            name = getattr(provider, "name", type(provider).__name__)
+            try:
+                return await search(query)
+            except Exception as exc:  # provider-specific failure: try the next one
+                self._logger.debug("search provider %s unavailable: %s", name, exc)
+                continue
+        return []
+
     async def cross_check_liquidity(self, pair: DexPair) -> tuple[bool | None, str]:
         """Confirm a pair's liquidity against a second source (Part 15, Section 10).
 

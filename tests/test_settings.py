@@ -169,3 +169,19 @@ def test_bool_env_still_accepts_common_spellings():
     for value in ("0", "false", "no", "off"):
         settings = Settings.from_env(env={"MEMEINTEL_AI_ENABLE_IN_MONITOR": value})
         assert settings.ai.enable_in_monitor is False
+
+
+def test_copycat_veto_settings_validate_and_load():
+    """The copycat screen is configurable (Rule 17): thresholds must be
+    positive, and the enable switch parses as a real boolean."""
+    from meme_intelligence.config.settings import Settings
+
+    with pytest.raises(ConfigurationError, match="copycat_liquidity_ratio"):
+        Settings.from_env(env={"MEMEINTEL_ALERTS_COPYCAT_LIQUIDITY_RATIO": "-1"})
+    with pytest.raises(ConfigurationError, match="copycat_min_liquidity_usd"):
+        Settings.from_env(env={"MEMEINTEL_ALERTS_COPYCAT_MIN_LIQUIDITY_USD": "0"})
+
+    defaults = Settings.from_env(env={})
+    assert defaults.alerts.copycat_veto_enabled is True
+    off = Settings.from_env(env={"MEMEINTEL_ALERTS_COPYCAT_VETO_ENABLED": "false"})
+    assert off.alerts.copycat_veto_enabled is False

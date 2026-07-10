@@ -124,3 +124,40 @@ async def test_all_providers_failing_raises():
     service = MarketDataService([FakeProvider("a", fail=True), FakeProvider("b", fail=True)])
     with pytest.raises(AllProvidersFailedError):
         await service.get_token_pairs("TokenAddr1", chain="solana")
+
+
+# ---- Name/symbol search (copycat screen support) ----
+
+
+class SearchingProvider(FakeProvider):
+    def __init__(self, name, results=None, search_fail=False):
+        super().__init__(name)
+        self.results = results if results is not None else []
+        self.search_fail = search_fail
+        self.search_calls = 0
+
+    async def search_pairs(self, query):
+        self.search_calls += 1
+        if self.search_fail:
+            raise TransientCollectorError(f"{self.name} search is down")
+        return self.results
+
+
+async def test_search_skips_providers_without_search_support():
+    """GeckoTerminal has no search endpoint — the service must skip it and
+    use the first provider that CAN search, not crash on the missing method."""
+    no_search = FakeProvider("geckoterminal")
+    searcher = SearchingProvider("dexscreener", [make_pair()])
+    service = MarketDataService([no_search, searcher])
+    results = await service.search_pairs("MEME")
+    assert results and searcher.search_calls == 1
+
+
+async def test_search_fails_over_and_degrades_to_empty():
+    """A failing search provider falls through to the next; nobody able to
+    search returns [] (no evidence — Rule 8), never an exception."""
+    broken = SearchingProvider("a", search_fail=True)
+    working = SearchingProvider("b", [make_pair()])
+    assert await MarketDataService([broken, working]).search_pairs("MEME")
+    assert await MarketDataService([broken]).search_pairs("MEME") == []
+    assert await MarketDataService([FakeProvider("no-search")]).search_pairs("MEME") == []

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import math
 import signal
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -66,6 +67,63 @@ _VERIFIABLE_ALERT_TYPES = {"high_priority_opportunity", "strong_candidate",
 
 _ERROR_BACKOFF_START = 5.0
 _ERROR_BACKOFF_MAX = 300.0
+
+# Cache-miss sentinel for the copycat-verdict cache: a cached None means
+# "checked, no duplicate found" and must not look like a miss.
+_UNSET = object()
+
+
+def _norm_identity(value: str | None) -> str:
+    """Normalize a token symbol/name for duplicate comparison: lowercase,
+    whitespace collapsed. Empty/unknown normalizes to "" (never matches —
+    an unknown name is not evidence of duplication, Rule 8)."""
+    if not value:
+        return ""
+    return " ".join(value.lower().split())
+
+
+def _find_established_duplicate(
+    candidate, matches, *, liquidity_ratio: float, min_liquidity_usd: float,
+) -> str | None:
+    """The copycat rule, pure and testable: does an ESTABLISHED token with
+    the same symbol or name already exist?
+
+    "Established" = a different token (any chain — Solana clones of
+    Ethereum majors are the classic knock-off) whose deepest known pool
+    holds at least ``min_liquidity_usd`` AND at least ``liquidity_ratio``
+    times the candidate's liquidity. The size gap is the evidence: two
+    small coins sharing a symbol is a coincidence (symbols collide
+    constantly), but a fresh token wearing the name of a coin 10x+ its
+    size is farming that coin's demand. Pair age is deliberately NOT
+    required — aggregated search results often omit it, and the liquidity
+    gap alone identifies which token owns the name (Rule 8: only
+    positive evidence fires).
+    """
+    candidate_liquidity = candidate.liquidity_usd
+    if candidate_liquidity is None or not math.isfinite(candidate_liquidity):
+        candidate_liquidity = 0.0
+    established_floor = max(min_liquidity_usd, liquidity_ratio * candidate_liquidity)
+    candidate_symbol = _norm_identity(candidate.base_token.symbol)
+    candidate_name = _norm_identity(candidate.base_token.name)
+    candidate_address = candidate.base_token.address.lower()
+
+    for pair in matches:
+        if pair.base_token.address.lower() == candidate_address:
+            continue  # the same token listed elsewhere is not a duplicate
+        liquidity = pair.liquidity_usd
+        if liquidity is None or not math.isfinite(liquidity) or liquidity < established_floor:
+            continue
+        same_symbol = bool(candidate_symbol) and _norm_identity(
+            pair.base_token.symbol) == candidate_symbol
+        same_name = bool(candidate_name) and _norm_identity(
+            pair.base_token.name) == candidate_name
+        if not (same_symbol or same_name):
+            continue
+        label = pair.base_token.symbol or pair.base_token.name or pair.base_token.address[:8]
+        return (f"duplicates established token {label} on {pair.chain} "
+                f"(${liquidity:,.0f} liquidity vs ${candidate_liquidity:,.0f}) "
+                f"— likely a knock-off riding that name")
+    return None
 
 
 def _creator_outflow_usd(wallet_assessment, creator: str | None) -> float | None:
@@ -229,6 +287,10 @@ class ContinuousScanner:
         # strong-candidate veto holds on later rechecks too — otherwise a
         # token whose judgment was thrown away fired HIGH one cycle later.
         self._ai_verified = _BoundedKeySet(settings.workflow.max_tracked_keys)
+        # Copycat verdicts are cached per token (a token's symbol/name never
+        # changes) so a persistent gate-passer costs ONE provider search,
+        # not one per recheck (Rule 10/11). Bounded like every other cache.
+        self._copycat_verdicts = _BoundedKeySet(settings.workflow.max_tracked_keys)
         # Self-learning mind layer (Section 10): additive and off by default.
         # Like the metered layers, the settings flag is authoritative — a
         # wired service with the flag off stays out of the loop (Rule 10/11).
@@ -430,35 +492,43 @@ class ContinuousScanner:
         previous = self._storage.score_history(token, limit=1)
         previous_score = previous[0]["final_score"] if previous else None
 
-        # AI verification of gate-passing opportunities (Part 32.5 Section 8:
-        # deep analysis only after initial requirements). One judgment,
-        # re-scored through the locked weighting, then the SAME gates run
-        # again on the enriched result — if the judgment holds the score up,
-        # the alert fires annotated; if it knocks the score below a gate,
-        # the high-priority alert simply never fires (Rule 13 logs why).
+        # Free deterministic screens + AI verification of gate-passing
+        # opportunities (Part 32.5 Section 8: deep analysis only after
+        # initial requirements). The free screens (rug engine, risk alerts
+        # already firing, copycat lookup) run whenever a HIGH opportunity is
+        # about to fire — they used to be reachable ONLY through the
+        # AI-verification gate, so removing the API key silently removed
+        # the rug-engine check from HIGH alerts and rug pulls got
+        # recommended unscreened (live finding, 2026-07-10). A screen veto
+        # downgrades BOTH HIGH tiers via deterministic_risk_veto.
         verify_key = (token.chain, token.address.lower())
         ai_inconclusive = self._ai_verified.get(verify_key, False)
         deterministic_veto: str | None = None
-        if (self._ai_verifier is not None and not result.security.is_destructive
-                and verify_key not in self._ai_verified):
+        if not result.security.is_destructive:
             provisional = self._rules.evaluate(result, previous_score=previous_score)
             if any(e.alert_type in ("high_priority_opportunity", "strong_candidate")
                    for e in provisional):
-                # Credit conservation: a paid call is the LAST check, never
-                # the first. Every free deterministic signal must be clean
-                # before the API is asked for an opinion (Rule 10/11). A
-                # vetoed token is NOT cached as verified — if its risk clears
-                # on a later recheck, verification can still run then. The
-                # veto downgrades BOTH HIGH tiers via deterministic_risk_veto
-                # (bug-hunt finding: it used to ride the inconclusive flag,
-                # which the fully-verified tier ignored).
-                veto = self._ai_spend_veto(result, provisional, creator)
-                if veto is not None:
+                deterministic_veto = self._deterministic_risk_veto(
+                    result, provisional, creator)
+                if deterministic_veto is None:
+                    deterministic_veto = await self._copycat_veto(result)
+                if deterministic_veto is not None:
                     self._logger.info(
-                        "AI verification skipped for %s: %s — credits saved; "
-                        "alert downgraded", token.address, veto)
-                    deterministic_veto = veto
-                else:
+                        "HIGH opportunity for %s vetoed by free screen: %s — "
+                        "alert downgraded", token.address, deterministic_veto)
+                elif (self._ai_verifier is not None
+                      and verify_key not in self._ai_verified):
+                    # Credit conservation: a paid call is the LAST check,
+                    # never the first — every free screen above was clean
+                    # before the API is asked for an opinion (Rule 10/11).
+                    # A vetoed token is NOT cached as verified — if its risk
+                    # clears on a later recheck, verification can still run
+                    # then. One judgment, re-scored through the locked
+                    # weighting, then the SAME gates run again on the
+                    # enriched result — if the judgment holds the score up,
+                    # the alert fires annotated; if it knocks the score
+                    # below a gate, the high-priority alert simply never
+                    # fires (Rule 13 logs why).
                     self._logger.info("gate-passing candidate %s: running AI verification",
                                       token.address)
                     enriched = await self._pipeline.enrich_with_ai(
@@ -571,15 +641,18 @@ class ContinuousScanner:
     # opinion on it is wasted money, not information.
     _RISK_ALERT_TYPES = frozenset({"emergency_review", "risk_warning"})
 
-    def _ai_spend_veto(self, result: PipelineResult, provisional: list,
-                       creator: str | None) -> str | None:
-        """Free deterministic checks that gate every paid AI verification.
+    def _deterministic_risk_veto(self, result: PipelineResult, provisional: list,
+                                 creator: str | None) -> str | None:
+        """Free deterministic screen every HIGH opportunity must clear.
 
-        Returns the reason to skip (credits saved), or None when everything
-        checks out and the AI's opinion is genuinely the missing piece.
-        Checks: risk alerts already firing on this token, and the mind
-        layer's rug engine (contract facts + deployer blacklist + observed
-        dev outflow) — all zero-API-cost.
+        Returns the veto reason (the alert downgrades to MEDIUM), or None
+        when everything checks out. Checks: risk alerts already firing on
+        this token, and the mind layer's rug engine (contract facts +
+        deployer blacklist + observed dev outflow) — all zero-API-cost.
+        Doubles as the credit gate: when AI verification is configured, a
+        paid call runs only after this screen is clean — but the screen
+        itself runs whether or not an API key exists (a rug is a rug with
+        the AI on or off).
         """
         risky = sorted({e.alert_type for e in provisional
                         if e.alert_type in self._RISK_ALERT_TYPES})
@@ -614,6 +687,48 @@ class ContinuousScanner:
                     f"{self._settings.ai.verify_skip_rug_score:.0f} "
                     f"(signals: {', '.join(rug.fired_names)})")
         return None
+
+    async def _copycat_veto(self, result: PipelineResult) -> str | None:
+        """Free screen #2: is this a knock-off of an established token?
+
+        Copycats ride a trending name — a fresh token reusing the symbol/name
+        of a coin that already has a deep, established pool is overwhelmingly
+        a knock-off farming that coin's demand, and it kept reaching the
+        operator as a HIGH opportunity (live finding, 2026-07-10). One
+        provider search per gate-passing candidate (Rule 10/11 — HIGH
+        candidates are rare, and the verdict is cached per token since a
+        token's name never changes). No market service, a provider without
+        search support, or a search outage means NO veto — absence of
+        evidence is not evidence (Rule 8) — but an outage is never cached,
+        so the check retries on the next qualifying pass.
+        """
+        thresholds = self._settings.alerts
+        if not thresholds.copycat_veto_enabled or self._market is None:
+            return None
+        search = getattr(self._market, "search_pairs", None)
+        if search is None:
+            return None
+        token = result.pair.base_token
+        cache_key = (token.chain, token.address.lower())
+        cached = self._copycat_verdicts.get(cache_key, _UNSET)
+        if cached is not _UNSET:
+            return cached
+        query = (token.symbol or token.name or "").strip()
+        if not query:
+            self._copycat_verdicts.add(cache_key, None)
+            return None
+        try:
+            matches = await search(query)
+        except Exception as exc:  # noqa: BLE001 — advisory screen, never blocks
+            self._logger.warning("copycat search unavailable for %s: %s",
+                                 token.address, exc)
+            return None
+        verdict = _find_established_duplicate(
+            result.pair, matches,
+            liquidity_ratio=thresholds.copycat_liquidity_ratio,
+            min_liquidity_usd=thresholds.copycat_min_liquidity_usd)
+        self._copycat_verdicts.add(cache_key, verdict)
+        return verdict
 
     def _feed_learning(self, result: PipelineResult, stats: CycleStats,
                        *, creator: str | None = None) -> None:

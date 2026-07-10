@@ -181,6 +181,16 @@ class AlertThresholds:
     # below this) downgrades the alert instead of riding along as a footnote.
     # No AI configured -> no veto (Rule 9 — degrade gracefully).
     strong_candidate_min_ai_confidence: float = 40.0
+    # Copycat veto (free screen before any HIGH opportunity alert): a fresh
+    # token whose symbol/name duplicates an ESTABLISHED token — one with at
+    # least ``copycat_min_liquidity_usd`` of liquidity AND at least
+    # ``copycat_liquidity_ratio`` times the candidate's — is likely a
+    # knock-off farming that name, and the alert downgrades to MEDIUM with
+    # the duplicate named. Two small coins sharing a symbol never fire this
+    # (symbols collide constantly); only a large size gap is evidence.
+    copycat_veto_enabled: bool = True
+    copycat_liquidity_ratio: float = 10.0
+    copycat_min_liquidity_usd: float = 100000.0
 
     def __post_init__(self) -> None:
         for name in ("security", "community", "liquidity", "onchain", "overall",
@@ -191,11 +201,12 @@ class AlertThresholds:
             raise ConfigurationError(
                 "strong_candidate_overall must be >= overall "
                 f"({self.strong_candidate_overall} < {self.overall})")
-        if (not math.isfinite(self.strong_candidate_min_liquidity_usd)
-                or self.strong_candidate_min_liquidity_usd <= 0):
-            raise ConfigurationError(
-                "alert threshold 'strong_candidate_min_liquidity_usd' must be "
-                f"positive, got {self.strong_candidate_min_liquidity_usd}")
+        for name in ("strong_candidate_min_liquidity_usd",
+                     "copycat_liquidity_ratio", "copycat_min_liquidity_usd"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value <= 0:
+                raise ConfigurationError(
+                    f"alert threshold '{name}' must be positive, got {value}")
 
 
 @dataclass(frozen=True)

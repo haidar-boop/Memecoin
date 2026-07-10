@@ -505,6 +505,144 @@ async def test_ai_spend_vetoed_for_blacklisted_deployer():
     assert ai.judge_calls == 0  # credits saved: rug engine vetoed the call
 
 
+async def test_rug_screen_vetoes_high_alert_even_without_ai():
+    """Live finding (2026-07-10): the rug-engine screen was reachable only
+    through the AI-verification gate, so turning the API key off silently
+    removed it — a blacklisted deployer's token fired HIGH, unscreened.
+    The free screen now runs whether or not AI is configured."""
+    import dataclasses as _dc
+    from meme_intelligence.learning.service import LearningService
+    from meme_intelligence.learning.store import LearningStore
+
+    settings = Settings.from_env(env={
+        "MEMEINTEL_LEARNING_ENABLE_IN_MONITOR": "true",
+        "MEMEINTEL_LEARNING_STATE_DIR": ":memory:",
+    })
+    learning = LearningService(
+        settings, store=LearningStore(":memory:", now_func=lambda: NOW),
+        now_func=lambda: NOW)
+    learning.store.blacklist_deployer("devBad", "solana")
+
+    sink = RecordingSink()
+    pair = make_pair()
+    profile = _dc.replace(clean_profile(pair.base_token), creator_address="devBad")
+
+    async def fake_sleep(seconds):
+        pass
+
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        notifier = NotificationEngine([sink], AlertEngineSettings(), time_func=lambda: 0.0)
+        scanner = ContinuousScanner(
+            settings, storage, notifier,
+            gecko_client=FakeGecko([pair]),
+            goplus_client=FakeGoPlus({pair.base_token.address: profile}),
+            market_service=FakeMarketService(verdict=(True, "liquidity confirmed")),
+            community_client=FakeCommunity(),
+            ai_service=None,  # the operator turned the API key off
+            learning_service=learning,
+            now_func=lambda: NOW, sleep_func=fake_sleep,
+        )
+        await scanner.run(max_cycles=1)
+
+    assert not any(e.alert_type in ("high_priority_opportunity", "strong_candidate")
+                   for e in sink.sent)
+    downgraded = [e for e in sink.sent if e.alert_type == "early_opportunity"]
+    assert downgraded
+    assert any("deterministic risk veto" in r for r in downgraded[0].reasons)
+
+
+class SearchingMarketService(FakeMarketService):
+    """FakeMarketService + provider search, for the copycat screen."""
+
+    def __init__(self, search_results, **kwargs):
+        super().__init__(**kwargs)
+        self.search_results = search_results
+        self.search_calls = 0
+
+    async def search_pairs(self, query):
+        self.search_calls += 1
+        return self.search_results
+
+
+async def test_copycat_of_established_token_never_fires_high():
+    """Live finding (2026-07-10): fresh knock-offs wearing the symbol of an
+    established coin reached the operator as HIGH opportunities. The free
+    copycat screen downgrades them with the duplicate named — no AI needed."""
+    pair = make_pair()  # symbol MEMA, liquidity 90k
+    original_token = TokenIdentity(chain="solana", address="TheRealMema", symbol="MEMA")
+    original = _dc.replace(make_pair(address="TheRealMema"), liquidity_usd=2_000_000.0,
+                           base_token=original_token,
+                           pair_address="PoolTheRealMema")
+    market = SearchingMarketService([original], verdict=(True, "liquidity confirmed"))
+    sink = RecordingSink()
+
+    async def fake_sleep(seconds):
+        pass
+
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        notifier = NotificationEngine([sink], AlertEngineSettings(), time_func=lambda: 0.0)
+        scanner = ContinuousScanner(
+            SETTINGS, storage, notifier,
+            gecko_client=FakeGecko([pair]),
+            goplus_client=FakeGoPlus({pair.base_token.address: clean_profile(pair.base_token)}),
+            market_service=market,
+            community_client=FakeCommunity(),
+            ai_service=None,
+            now_func=lambda: NOW, sleep_func=fake_sleep,
+        )
+        await scanner.run(max_cycles=1)
+
+    assert market.search_calls == 1
+    assert not any(e.alert_type in ("high_priority_opportunity", "strong_candidate")
+                   for e in sink.sent)
+    downgraded = [e for e in sink.sent if e.alert_type == "early_opportunity"]
+    assert downgraded
+    assert any("duplicates established token" in r for r in downgraded[0].reasons)
+
+
+def test_copycat_rule_requires_a_real_size_gap():
+    """Unit tests for the pure copycat rule: only an established (deep,
+    much larger) pool wearing the same symbol/name is evidence."""
+    from meme_intelligence.workflow.controller import _find_established_duplicate
+
+    candidate = make_pair()  # MEMA, 90k liquidity
+    kwargs = dict(liquidity_ratio=10.0, min_liquidity_usd=100_000.0)
+
+    def rival(address="OtherAddr", symbol="MEMA", name=None, liquidity=2_000_000.0):
+        token = TokenIdentity(chain="solana", address=address, symbol=symbol, name=name)
+        return _dc.replace(make_pair(address=address), base_token=token,
+                           pair_address=f"Pool{address}", liquidity_usd=liquidity)
+
+    # Same symbol + 20x the liquidity -> veto, with the original named.
+    veto = _find_established_duplicate(candidate, [rival()], **kwargs)
+    assert veto is not None and "MEMA" in veto
+
+    # A small same-symbol coin is a coincidence, not an original (900k floor
+    # here = 10x the candidate's 90k) — and same symbol below the absolute
+    # floor never fires either.
+    assert _find_established_duplicate(candidate, [rival(liquidity=500_000.0)],
+                                       **kwargs) is None
+
+    # The candidate token itself listed on another venue is not a duplicate.
+    same = rival(address=candidate.base_token.address)
+    assert _find_established_duplicate(candidate, [same], **kwargs) is None
+
+    # Different symbol and name: no match, regardless of size.
+    assert _find_established_duplicate(candidate, [rival(symbol="OTHER")],
+                                       **kwargs) is None
+
+    # Name-level match fires even when tickers differ (renamed knock-off).
+    named_candidate = _dc.replace(
+        candidate, base_token=_dc.replace(candidate.base_token, name="Meme Coin"))
+    named_rival = rival(symbol="MEMA2", name="  meme   COIN ")  # normalized match
+    assert _find_established_duplicate(named_candidate, [named_rival],
+                                       **kwargs) is not None
+
+    # Unknown liquidity on the match is not evidence (Rule 8).
+    assert _find_established_duplicate(candidate, [rival(liquidity=None)],
+                                       **kwargs) is None
+
+
 async def test_ai_confirmation_annotates_the_alert():
     judgment = weak_narrative_judgment()
     # strong narrative instead: same judgment but high slots
