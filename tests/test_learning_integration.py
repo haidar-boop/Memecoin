@@ -92,6 +92,12 @@ async def test_scanner_feeds_mind_layer_when_enabled():
     assert coin_id is not None
     assert len(learning.store.snapshots_for(coin_id)) >= 1
     assert history[0].learned == 1
+    # A verdict was stored too, so resolution can grade it (Sections 6/8):
+    # without this the report-card metrics and adaptive ensemble weights
+    # never updated in monitor-only operation.
+    assert learning.store.get_prediction(coin_id) is not None
+    learning.resolve_outcome(pair.base_token.address, "solana", 24.0, 10.0)
+    assert learning._ensemble.final_samples == 1  # graded on resolution
 
 
 async def test_scanner_skips_mind_layer_when_flag_off():

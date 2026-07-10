@@ -576,6 +576,13 @@ class ContinuousScanner:
                 token.address, token.chain, detection_price_usd=pair.price_usd,
                 symbol=token.symbol, name=token.name, creator=creator)
             self._learning.capture_snapshot(token.address, token.chain, snapshot)
+            # Also record a verdict (insert-once, first sighting wins) so the
+            # coin can be GRADED when it resolves — without a stored
+            # prediction, the adaptive ensemble weights and the Section 8
+            # report card never update in monitor-only operation. All local
+            # models; zero API cost.
+            self._learning.evaluate_coin(token.address, token.chain, [snapshot],
+                                         security=profile, creator=creator)
             stats.learned += 1
         except Exception as exc:  # noqa: BLE001 — additive; must not kill the cycle
             self._logger.warning("learning hook failed for %s: %s",

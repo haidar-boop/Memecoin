@@ -742,7 +742,9 @@ async def _cmd_mind(args, settings) -> int:
         metrics = service.get_learning_metrics(persist=False)
         rug = metrics["rug"]
         print("Mind-layer self-evaluation metrics")
-        print(f"  Resolved samples:      {metrics['resolved_count']}")
+        print(f"  Resolved coins:        "
+              f"{metrics.get('resolved_coins_total', metrics['resolved_count'])}")
+        print(f"  Graded predictions:    {metrics['resolved_count']}")
         print(f"  Overall accuracy:      {_fmt_opt(metrics['overall_accuracy'])}")
         print(f"  Directional hit-rate:  {_fmt_opt(metrics['directional']['hit_rate'])} "
               f"(n={metrics['directional']['samples']})")

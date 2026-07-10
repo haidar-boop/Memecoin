@@ -538,6 +538,10 @@ class LearningService:
         metrics["ensemble_accuracy"] = self._ensemble.accuracy_report()
         metrics["analog_memory_size"] = self._analog.size
         metrics["classifier_ready"] = self._classifier.is_ready
+        # Total resolved coins regardless of whether a verdict was stored —
+        # distinct from resolved_count (graded predictions only), so "449
+        # coins learned, 0 graded yet" reads as what it is, not a bug.
+        metrics["resolved_coins_total"] = self._store.resolved_count()
         if persist and self._state_dir != ":memory:":
             self._store.record_metrics("all", metrics)
         return metrics
