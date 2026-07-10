@@ -118,6 +118,24 @@ address** button. The `[Buy (dry run)]` button appears only when
 the intent — there is no live trade executor, deliberately (DECISIONS_LOG
 2026-07-10).
 
+## Mind-layer P(rug) veto (Project 3 — enable only when EARNED)
+
+The learning layer can block HIGH opportunity alerts with its learned
+P(rug), but only once its measured rug precision has earned the vote. The
+flag ships OFF. The procedure:
+
+1. Send `/mind` to the bot and read the last lines. While it says
+   `authority: not earned yet — …` leave the flag off; the layer keeps
+   learning and being graded either way.
+2. When it says `authority: EARNED — rug precision X over N graded rug
+   calls`, add `MEMEINTEL_LEARNING_VETO_ENABLED=true` to `.env` and
+   restart the service.
+3. Vetoed alerts arrive downgraded to MEDIUM with the reason spelled out:
+   `mind layer: p(rug) 90% >= 85% (authority earned: rug precision 0.80
+   over 12 graded rug calls)`. If it ever misfires repeatedly, flip the
+   flag back off and report — thresholds are tunable
+   (`MEMEINTEL_LEARNING_VETO_MIN_*`).
+
 ## Troubleshooting
 
 | Symptom | Likely cause / fix |

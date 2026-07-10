@@ -1021,6 +1021,17 @@ class LearningSettings:
     min_snapshots_for_confidence: int = 3    # fewer snapshots -> low confidence
     cold_start_samples: int = 100            # resolved coins below this = cold start
 
+    # Alert veto (Project 3, ROADMAP #3): the mind layer's P(rug) blocks
+    # HIGH opportunities ONLY once its measured rug precision has earned it
+    # (Rule 8 — authority is proven, never assumed). Off by default; the
+    # standing plan is to read the /mind report card with the operator
+    # before flipping veto_enabled.
+    veto_enabled: bool = False
+    veto_min_p_rug: float = 0.85         # ensemble P(rug) at/above this vetoes
+    veto_min_accuracy: float = 0.70      # measured rug PRECISION floor to earn authority
+    veto_min_samples: int = 10           # graded rug calls needed before any authority
+    veto_metrics_ttl_seconds: float = 1800.0  # how long the earned-authority check is cached
+
     # Persistence — Section 9 (db + FAISS index + models live together)
     state_dir: str = "learning_state"
 
@@ -1050,6 +1061,15 @@ class LearningSettings:
         _check_range("learning drift_accuracy_floor", self.drift_accuracy_floor, 0.0, 1.0)
         _check_range("learning novelty_percentile", self.novelty_percentile, 0.0, 100.0)
         _check_range("learning min_ensemble_confidence", self.min_ensemble_confidence, 0.0, 1.0)
+        _check_range("learning veto_min_p_rug", self.veto_min_p_rug, 0.0, 1.0)
+        _check_range("learning veto_min_accuracy", self.veto_min_accuracy, 0.0, 1.0)
+        if self.veto_min_samples <= 0:
+            raise ConfigurationError(
+                f"learning veto_min_samples must be positive, got {self.veto_min_samples}")
+        if not math.isfinite(self.veto_metrics_ttl_seconds) or self.veto_metrics_ttl_seconds <= 0:
+            raise ConfigurationError(
+                "learning veto_metrics_ttl_seconds must be positive, got "
+                f"{self.veto_metrics_ttl_seconds}")
         if not self.horizon_hours():
             raise ConfigurationError("learning: horizons_hours must list at least one horizon")
 

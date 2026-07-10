@@ -420,8 +420,8 @@ class TelegramCommandListener(BaseCollector):
 
         lines.append(
             f"layers: wallet intel {onoff('wallet_intel')} | AI {onoff('ai')} | "
-            f"learning {onoff('learning')} | pump.fun {onoff('pumpfun')} | "
-            f"jupiter probe {onoff('jupiter_probe')} | "
+            f"learning {onoff('learning')} | mind veto {onoff('learning_veto')} | "
+            f"pump.fun {onoff('pumpfun')} | jupiter probe {onoff('jupiter_probe')} | "
             f"buy button {'DRY-RUN' if layers.get('buy_button') else 'off'}")
         db = snap.get("db") or {}
         lines.append(
@@ -663,9 +663,29 @@ class TelegramCommandListener(BaseCollector):
         if weights:
             lines.append("ensemble: " + " | ".join(weights))
         lines.append(f"classifier ready: {metrics.get('classifier_ready', False)}")
+        lines.append(self._veto_status_line(metrics))
         lines.append(f"operator feedback: {feedback['up']} up / {feedback['down']} down "
                      "(advisory only — never a training label)")
         return "\n".join(lines)
+
+    def _veto_status_line(self, metrics: dict) -> str:
+        """One line on whether the P(rug) veto (Project 3) has earned its
+        authority — the report-card conversation, on the phone."""
+        from meme_intelligence.learning.metrics import veto_gate
+
+        ls = self._ctx.settings.learning
+        rug = metrics.get("rug") or {}
+        graded = int(rug.get("true_positives") or 0) + int(rug.get("false_positives") or 0)
+        gate = veto_gate(metrics, min_accuracy=ls.veto_min_accuracy,
+                         min_samples=ls.veto_min_samples)
+        if gate is None:
+            earned = (f"not earned yet — rug precision {_opt(rug.get('precision'))} "
+                      f"over {graded} graded rug calls "
+                      f"(needs >= {ls.veto_min_accuracy:.2f} over >= {ls.veto_min_samples})")
+        else:
+            earned = f"EARNED — rug precision {gate[0]:.2f} over {gate[1]} graded rug calls"
+        state = "ON" if ls.veto_enabled else "off (MEMEINTEL_LEARNING_VETO_ENABLED)"
+        return f"p(rug) veto: {state} | authority: {earned}"
 
     async def _cmd_mute(self, args: list[str]) -> str:
         address, error = self._validated_address(args, "/mute <address>")

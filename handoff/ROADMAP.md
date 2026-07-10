@@ -87,7 +87,17 @@ by a Telegram outage (task isolation test).
 
 ---
 
-## 3. Mind-layer P(rug) as a live alert veto — FREE, unlocks the learning
+## 3. Mind-layer P(rug) as a live alert veto — FREE, unlocks the learning — ✅ BUILT 2026-07-10 (flag off)
+
+> Status: built as specified — screen #3 in `_deterministic_risk_veto`,
+> gated on measured rug PRECISION (the veto's cost is false positives)
+> over a minimum number of graded rug calls, computed via
+> `learning/metrics.py::veto_gate` and cached. Abstains on cold start /
+> unproven accuracy / any error. Ships with
+> `MEMEINTEL_LEARNING_VETO_ENABLED=false`; the `/mind` Telegram command now
+> shows the authority line ("EARNED" / "not earned yet") — per the
+> standing plan, read that report card with the operator, then flip the
+> flag when it's earned.
 
 **What:** The learning layer currently *watches* (evaluate_coin verdicts are
 recorded, accuracy is tracked) but has no vote. Once its measured accuracy

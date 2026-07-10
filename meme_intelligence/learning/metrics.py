@@ -156,3 +156,22 @@ def compute_metrics(records: Sequence[PredictionRecord]) -> dict:
         "per_archetype": _per_archetype(records),
         "novelty": _novelty_hit_rate(records),
     }
+
+
+def veto_gate(metrics: dict, *, min_accuracy: float, min_samples: int) -> tuple[float, int] | None:
+    """Has the mind layer EARNED alert-veto authority? (ROADMAP #3, Rule 8)
+
+    The veto's cost is false positives — a wrongly-blocked HIGH alert is an
+    opportunity the operator never sees — so the bar is measured rug
+    PRECISION (of everything the layer called RUG, how many actually
+    rugged), over at least ``min_samples`` graded rug calls. Returns
+    ``(precision, graded_rug_calls)`` when the bar is cleared, ``None``
+    when the layer must abstain (cold start, too few graded calls, or
+    precision below the floor — authority is earned, never assumed).
+    """
+    rug = metrics.get("rug") or {}
+    precision = rug.get("precision")
+    samples = int(rug.get("true_positives") or 0) + int(rug.get("false_positives") or 0)
+    if precision is None or samples < min_samples or precision < min_accuracy:
+        return None
+    return float(precision), samples

@@ -436,3 +436,41 @@ async def test_start_and_stop_lifecycle():
         assert listener._task is task
         await listener.stop()
         assert listener._task is None
+
+
+# ---- Project 3: /mind shows the veto report card line ----
+
+async def test_mind_shows_veto_authority_not_earned():
+    class ColdLearning:
+        def get_learning_metrics(self, *, persist=True):
+            return {"analog_memory_size": 5, "resolved_count": 2,
+                    "directional": {"hit_rate": None, "samples": 2},
+                    "rug": {"precision": None, "true_positives": 0,
+                            "false_positives": 0},
+                    "classifier_ready": False}
+
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage, learning=ColdLearning())
+        await listener._handle_update(message_update("/mind"))
+    text = sent_messages(calls)[0]["text"]
+    assert "p(rug) veto: off" in text
+    assert "not earned yet" in text
+
+
+async def test_mind_shows_veto_authority_earned_and_flag_state():
+    class ProvenLearning:
+        def get_learning_metrics(self, *, persist=True):
+            return {"analog_memory_size": 500, "resolved_count": 60,
+                    "directional": {"hit_rate": 0.7, "samples": 60},
+                    "rug": {"precision": 0.82, "true_positives": 14,
+                            "false_positives": 3},
+                    "classifier_ready": True}
+
+    settings = make_settings(MEMEINTEL_LEARNING_VETO_ENABLED="true")
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage, settings=settings,
+                                        learning=ProvenLearning())
+        await listener._handle_update(message_update("/mind"))
+    text = sent_messages(calls)[0]["text"]
+    assert "p(rug) veto: ON" in text
+    assert "EARNED — rug precision 0.82 over 17 graded rug calls" in text

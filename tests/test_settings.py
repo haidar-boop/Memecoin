@@ -255,3 +255,31 @@ def test_project2_env_overrides_load():
     assert settings.telegram_commands.poll_timeout_seconds == 30.0
     assert settings.execution.buy_button_enabled is True
     assert settings.execution.max_buy_sol == 0.25
+
+
+# ---- Project 3: mind-layer veto settings ----
+
+def test_learning_veto_defaults_off_and_validates():
+    from meme_intelligence.config.settings import LearningSettings
+
+    defaults = LearningSettings()
+    assert defaults.veto_enabled is False   # authority is earned, then opted into
+    with pytest.raises(ConfigurationError, match="veto_min_p_rug"):
+        LearningSettings(veto_min_p_rug=1.5)
+    with pytest.raises(ConfigurationError, match="veto_min_samples"):
+        LearningSettings(veto_min_samples=0)
+    with pytest.raises(ConfigurationError, match="veto_metrics_ttl_seconds"):
+        LearningSettings(veto_metrics_ttl_seconds=0.0)
+
+
+def test_learning_veto_env_overrides():
+    settings = Settings.from_env(env={
+        "MEMEINTEL_LEARNING_VETO_ENABLED": "true",
+        "MEMEINTEL_LEARNING_VETO_MIN_P_RUG": "0.9",
+        "MEMEINTEL_LEARNING_VETO_MIN_ACCURACY": "0.8",
+        "MEMEINTEL_LEARNING_VETO_MIN_SAMPLES": "25",
+    })
+    assert settings.learning.veto_enabled is True
+    assert settings.learning.veto_min_p_rug == 0.9
+    assert settings.learning.veto_min_accuracy == 0.8
+    assert settings.learning.veto_min_samples == 25

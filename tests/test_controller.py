@@ -1106,3 +1106,137 @@ async def test_broken_telegram_listener_never_blocks_the_scan():
         scanner.set_telegram_listener(ExplodingListener())
         history = await scanner.run(max_cycles=1)   # must not raise
     assert len(history) == 1 and history[0].analyzed == 1
+
+
+# ---- Project 3: mind-layer P(rug) veto (earned authority only) ----
+
+def make_learning_settings_env(**extra):
+    env = {"MEMEINTEL_LEARNING_VETO_ENABLED": "true"}
+    env.update(extra)
+    return Settings.from_env(env=env)
+
+
+class FakeMind:
+    """Learning-service stand-in: configurable metrics + verdict."""
+
+    def __init__(self, p_rug=0.9, precision=0.8, tp=8, fp=2, raise_on_eval=False):
+        self.p_rug = p_rug
+        self.metrics_calls = 0
+        self.eval_calls = 0
+        self._raise = raise_on_eval
+        self._metrics = {"rug": {"precision": precision,
+                                 "true_positives": tp, "false_positives": fp}}
+
+    def get_learning_metrics(self, *, persist=True):
+        self.metrics_calls += 1
+        return self._metrics
+
+    def evaluate_coin(self, address, chain, snapshots, *, security=None, creator=None):
+        self.eval_calls += 1
+        if self._raise:
+            raise RuntimeError("model exploded")
+        return {"final_probabilities": {"rug": self.p_rug}, "model_confidence": 0.9,
+                "sample_size": 40}
+
+    # controller._feed_learning compatibility (not used in these tests)
+    def record_detection(self, *a, **k): ...
+    def capture_snapshot(self, *a, **k): ...
+
+
+def make_veto_scanner(storage, mind, settings):
+    notifier = NotificationEngine([RecordingSink()], AlertEngineSettings(),
+                                  time_func=lambda: 0.0)
+
+    async def fake_sleep(seconds): ...
+
+    return ContinuousScanner(
+        settings, storage, notifier,
+        gecko_client=FakeGecko([]), goplus_client=FakeGoPlus({}),
+        learning_service=mind,
+        now_func=lambda: NOW, sleep_func=fake_sleep,
+    )
+
+
+def fake_veto_input(pair):
+    from types import SimpleNamespace
+    return SimpleNamespace(security_profile=clean_profile(pair.base_token),
+                           pair=pair, wallet=None)
+
+
+def test_mind_veto_fires_with_earned_authority_and_names_evidence():
+    pair = make_pair()
+    settings = make_learning_settings_env(MEMEINTEL_LEARNING_ENABLE_IN_MONITOR="true")
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        mind = FakeMind(p_rug=0.9, precision=0.8, tp=8, fp=2)
+        scanner = make_veto_scanner(storage, mind, settings)
+        reason = scanner._deterministic_risk_veto(fake_veto_input(pair), [], None)
+    assert reason is not None
+    assert "p(rug) 90%" in reason and "precision 0.80" in reason and "10 graded" in reason
+
+
+def test_mind_veto_abstains_below_p_rug_threshold():
+    pair = make_pair()
+    settings = make_learning_settings_env(MEMEINTEL_LEARNING_ENABLE_IN_MONITOR="true")
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        mind = FakeMind(p_rug=0.5, precision=0.8)
+        scanner = make_veto_scanner(storage, mind, settings)
+        assert scanner._deterministic_risk_veto(fake_veto_input(pair), [], None) is None
+
+
+def test_mind_veto_abstains_without_earned_authority():
+    pair = make_pair()
+    settings = make_learning_settings_env(MEMEINTEL_LEARNING_ENABLE_IN_MONITOR="true")
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        # High p_rug but unproven: precision below floor.
+        weak = FakeMind(p_rug=0.99, precision=0.4)
+        scanner = make_veto_scanner(storage, weak, settings)
+        assert scanner._deterministic_risk_veto(fake_veto_input(pair), [], None) is None
+        assert weak.eval_calls == 0            # never even evaluated
+
+        # High p_rug but too few graded rug calls.
+        cold = FakeMind(p_rug=0.99, precision=1.0, tp=3, fp=0)
+        scanner = make_veto_scanner(storage, cold, settings)
+        assert scanner._deterministic_risk_veto(fake_veto_input(pair), [], None) is None
+        assert cold.eval_calls == 0
+
+
+def test_mind_veto_off_by_default_even_with_perfect_metrics():
+    pair = make_pair()
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        mind = FakeMind(p_rug=0.99, precision=1.0, tp=50, fp=0)
+        scanner = make_veto_scanner(storage, mind, SETTINGS)  # veto_enabled default False
+        assert scanner._deterministic_risk_veto(fake_veto_input(pair), [], None) is None
+        assert mind.metrics_calls == 0 and mind.eval_calls == 0
+
+
+def test_mind_veto_evaluation_error_fails_open():
+    pair = make_pair()
+    settings = make_learning_settings_env(MEMEINTEL_LEARNING_ENABLE_IN_MONITOR="true")
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        mind = FakeMind(p_rug=0.99, precision=0.9, raise_on_eval=True)
+        scanner = make_veto_scanner(storage, mind, settings)
+        assert scanner._deterministic_risk_veto(fake_veto_input(pair), [], None) is None
+
+
+def test_mind_veto_authority_check_is_cached():
+    pair = make_pair()
+    settings = make_learning_settings_env(MEMEINTEL_LEARNING_ENABLE_IN_MONITOR="true")
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        mind = FakeMind(p_rug=0.2, precision=0.8)   # gate passes; p_rug never vetoes
+        scanner = make_veto_scanner(storage, mind, settings)
+        scanner._deterministic_risk_veto(fake_veto_input(pair), [], None)
+        scanner._deterministic_risk_veto(fake_veto_input(pair), [], None)
+        scanner._deterministic_risk_veto(fake_veto_input(pair), [], None)
+    assert mind.metrics_calls == 1     # cached within the TTL
+    assert mind.eval_calls == 3        # live P(rug) is per-candidate
+
+
+def test_veto_gate_function_edges():
+    from meme_intelligence.learning.metrics import veto_gate
+
+    good = {"rug": {"precision": 0.75, "true_positives": 9, "false_positives": 3}}
+    assert veto_gate(good, min_accuracy=0.7, min_samples=10) == (0.75, 12)
+    assert veto_gate(good, min_accuracy=0.8, min_samples=10) is None      # below floor
+    assert veto_gate(good, min_accuracy=0.7, min_samples=13) is None      # too few
+    assert veto_gate({"rug": {}}, min_accuracy=0.7, min_samples=1) is None  # no data
+    assert veto_gate({}, min_accuracy=0.7, min_samples=1) is None

@@ -786,6 +786,35 @@ The override is only ever True or None, never False: a successful $50
 probe must not erase GoPlus honeypot flags (Rule 9 — one source never
 overrides another's red flag).
 
+## 2026-07-10 — Project 3: mind-layer P(rug) veto
+
+### Precision, not overall accuracy, is the authority bar
+
+The ROADMAP said "measured rug-verdict accuracy"; the implementation gates
+on measured rug **precision** (of everything the layer called RUG, how
+many actually rugged), over a minimum count of graded rug calls. Reason:
+the veto's only failure cost is the false positive — a wrongly blocked
+HIGH alert is an opportunity the operator never sees. Recall failures
+(missed rugs) are already covered by every other screen; a veto earns
+authority by NOT crying wolf. Sample count is the number of graded rug
+calls (TP+FP), the honest denominator behind that precision figure.
+
+### Abstention is the default in every direction
+
+Flag off (ships off), learning layer absent, too few graded calls,
+precision below the floor, metrics unavailable, or evaluate_coin raising —
+all abstain and change nothing (Rule 8: an unproven or absent opinion
+never blocks an alert). The earned-authority verdict is cached for 30
+minutes (configurable) so the metrics sweep never runs per candidate;
+the live P(rug) evaluation does run per gate-passing candidate (they are
+rare by design).
+
+### Operator 👍/👎 feedback stays out of the veto
+
+Project 2's feedback remains advisory display only. The veto's authority
+comes exclusively from measured market outcomes (graded predictions),
+never from opinion — same Rule 8 line drawn in the Project 2 entry.
+
 ## Notable implementation choices (Rule 19)
 
 - **Python 3.11 + asyncio** over Node.js (both allowed by spec): the

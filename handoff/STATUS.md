@@ -654,6 +654,41 @@ a one-tap copy-address button).
 
 ---
 
+## New (2026-07-10, Project 3 of the 5-project roadmap): mind-layer P(rug) alert veto
+
+The learning layer gets a vote — once it has EARNED it (ROADMAP item 3).
+
+- `learning/metrics.py::veto_gate()` — the earned-authority test: measured
+  rug **precision** (the veto's cost is false positives — a wrongly
+  blocked HIGH alert is an opportunity never seen) must clear
+  `veto_min_accuracy` over at least `veto_min_samples` graded rug calls.
+- `workflow/controller.py::_mind_layer_veto()` — screen #3 in
+  `_deterministic_risk_veto` (after the risk-alert and rug-engine
+  screens): when the flag is on, the layer is wired, AND authority is
+  earned, the live ensemble P(rug) at/above `veto_min_p_rug` vetoes the
+  HIGH alert with the probability and the earned precision named in the
+  reason. Every other state abstains and changes nothing (Rule 8) —
+  flag off (default), layer absent, cold start, unproven precision, or
+  any evaluation error (fails open). The authority check is cached
+  (`veto_metrics_ttl_seconds`, default 30 min) so the metrics sweep never
+  runs per-candidate; the P(rug) evaluation itself is live per candidate.
+- `_learning_snapshot()` — the trajectory-snapshot builder extracted from
+  `_feed_learning` so the feed and the veto see identical features.
+- `/mind` (Telegram) now ends with the authority line: `p(rug) veto:
+  off|ON | authority: EARNED …` / `not earned yet — …needs >= X over >= N`,
+  and `/status` shows `mind veto ON/off`. The standing plan: read this
+  report card with the operator before flipping
+  `MEMEINTEL_LEARNING_VETO_ENABLED=true`.
+- Config: `MEMEINTEL_LEARNING_VETO_ENABLED` (default false),
+  `_VETO_MIN_P_RUG` (0.85), `_VETO_MIN_ACCURACY` (0.70),
+  `_VETO_MIN_SAMPLES` (10), `_VETO_METRICS_TTL_SECONDS` (1800).
+- Tests: veto fires with evidence named; abstains below threshold /
+  without authority / on error / by default; authority caching;
+  `veto_gate` edges; `/mind` authority-line rendering; settings
+  validation.
+
+---
+
 ## What's NOT built yet
 
 The **web/monitoring dashboard** (Part 21 §10 / 22 / 27 §12 / 28 §11) and

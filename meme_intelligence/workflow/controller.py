@@ -308,12 +308,16 @@ class ContinuousScanner:
                 "the mind layer stays out of the scan loop")
             learning_service = None
         self._learning = learning_service
+        # Mind-layer veto (Project 3): cached earned-authority verdict
+        # (timestamp, gate) — see _mind_veto_authority().
+        self._mind_gate_cache: tuple[datetime, tuple[float, int] | None] | None = None
         # Which optional layers actually made it into the loop (post-gating),
         # surfaced by /status on Telegram (Project 2).
         self._layers = {
             "wallet_intel": wallet_service is not None,
             "ai": ai_service is not None or self._ai_verifier is not None,
             "learning": learning_service is not None,
+            "learning_veto": learning_service is not None and settings.learning.veto_enabled,
             "pumpfun": self._launch_monitor is not None,
             "jupiter_probe": jupiter_client is not None and settings.liquidity_probe.enabled,
             "buy_button": settings.execution.buy_button_enabled,
@@ -806,7 +810,77 @@ class ContinuousScanner:
             return (f"rug engine score {rug.score:.0f} >= "
                     f"{self._settings.ai.verify_skip_rug_score:.0f} "
                     f"(signals: {', '.join(rug.fired_names)})")
+
+        # Screen #3 (Project 3, ROADMAP item 3): the mind layer's learned
+        # P(rug) — but ONLY once its measured accuracy has earned the vote.
+        return self._mind_layer_veto(result, creator)
+
+    def _mind_layer_veto(self, result: PipelineResult, creator: str | None) -> str | None:
+        """The learning layer's P(rug) veto on a HIGH opportunity (Project 3).
+
+        Fires only when ALL of: the flag is on, the layer is wired, its
+        measured rug precision has cleared the earned-authority bar
+        (:func:`~meme_intelligence.learning.metrics.veto_gate`), and the
+        live ensemble P(rug) is at/above the threshold. Every other state —
+        flag off, layer absent, cold start, unproven accuracy, evaluation
+        error — abstains and changes NOTHING (Rule 8: an unproven or absent
+        opinion never blocks an alert; errors fail open like the other
+        advisory lookups).
+        """
+        ls = self._settings.learning
+        if self._learning is None or not ls.veto_enabled:
+            return None
+        try:
+            gate = self._mind_veto_authority()
+            if gate is None:
+                return None
+            precision, graded = gate
+            snapshot = self._learning_snapshot(result, creator)
+            token = result.pair.base_token
+            verdict = self._learning.evaluate_coin(
+                token.address, token.chain, [snapshot],
+                security=result.security_profile, creator=creator)
+            p_rug = float((verdict.get("final_probabilities") or {}).get("rug", 0.0))
+            if p_rug >= ls.veto_min_p_rug:
+                return (f"mind layer: p(rug) {p_rug:.0%} >= {ls.veto_min_p_rug:.0%} "
+                        f"(authority earned: rug precision {precision:.2f} "
+                        f"over {graded} graded rug calls)")
+        except Exception as exc:  # noqa: BLE001 — advisory screen, never blocks on error
+            self._logger.warning("mind-layer veto unavailable for %s (no veto): %s",
+                                 result.pair.base_token.address, exc)
         return None
+
+    def _mind_veto_authority(self) -> tuple[float, int] | None:
+        """Cached earned-authority check: (precision, graded calls) or None.
+
+        Recomputing the full metrics sweep for every gate-passing candidate
+        would rescan all resolved predictions each time; the verdict about
+        PAST accuracy moves slowly, so it is cached for
+        ``veto_metrics_ttl_seconds`` (Rule 12).
+        """
+        ls = self._settings.learning
+        now = self._now()
+        cached = self._mind_gate_cache
+        if cached is not None and (now - cached[0]).total_seconds() < ls.veto_metrics_ttl_seconds:
+            return cached[1]
+        from meme_intelligence.learning.metrics import veto_gate
+
+        metrics = self._learning.get_learning_metrics(persist=False)
+        gate = veto_gate(metrics, min_accuracy=ls.veto_min_accuracy,
+                         min_samples=ls.veto_min_samples)
+        if gate is None:
+            rug = metrics.get("rug") or {}
+            graded = int(rug.get("true_positives") or 0) + int(rug.get("false_positives") or 0)
+            self._logger.info(
+                "mind-layer veto abstains: authority not earned yet "
+                "(rug precision %s over %d graded rug calls; need >= %.2f over >= %d)",
+                rug.get("precision"), graded, ls.veto_min_accuracy, ls.veto_min_samples)
+        else:
+            self._logger.info(
+                "mind-layer veto ARMED: rug precision %.2f over %d graded rug calls",
+                gate[0], gate[1])
+        self._mind_gate_cache = (now, gate)
+        return gate
 
     async def _copycat_veto(self, result: PipelineResult) -> str | None:
         """Free screen #2: is this a knock-off of an established token?
@@ -850,6 +924,31 @@ class ContinuousScanner:
         self._copycat_verdicts.add(cache_key, verdict)
         return verdict
 
+    def _learning_snapshot(self, result: PipelineResult, creator: str | None) -> dict:
+        """One trajectory snapshot for the mind layer, built entirely from
+        data already collected (zero extra API calls). Shared by the learning
+        feed AND the mind-layer veto so both see identical features."""
+        pair = result.pair
+        profile = result.security_profile
+        age_seconds = 0.0
+        if pair.pair_created_at is not None:
+            age_seconds = max(0.0, (self._now() - pair.pair_created_at).total_seconds())
+        return {
+            "age_seconds": age_seconds,
+            "price_usd": pair.price_usd,
+            "liquidity_usd": pair.liquidity_usd,
+            "market_cap_usd": pair.market_cap,
+            "volume_1h_usd": pair.volume_1h,
+            "holder_count": profile.holder_count if profile is not None else None,
+            "buys": pair.buys_1h,
+            "sells": pair.sells_1h,
+            "top10_holder_percent":
+                profile.top10_holder_percent if profile is not None else None,
+            # Dev-dumping evidence from the wallet analyzer's net flows
+            # (Part 17) — None when wallet data / creator are unknown.
+            "dev_outflow_usd": _creator_outflow_usd(result.wallet, creator),
+        }
+
     def _feed_learning(self, result: PipelineResult, stats: CycleStats,
                        *, creator: str | None = None) -> None:
         """Feed one analyzed coin into the mind layer (Section 10).
@@ -871,24 +970,7 @@ class ContinuousScanner:
             # covers tokens discovered without a launch event.
             if creator is None and profile is not None:
                 creator = profile.creator_address
-            age_seconds = 0.0
-            if pair.pair_created_at is not None:
-                age_seconds = max(0.0, (self._now() - pair.pair_created_at).total_seconds())
-            snapshot = {
-                "age_seconds": age_seconds,
-                "price_usd": pair.price_usd,
-                "liquidity_usd": pair.liquidity_usd,
-                "market_cap_usd": pair.market_cap,
-                "volume_1h_usd": pair.volume_1h,
-                "holder_count": profile.holder_count if profile is not None else None,
-                "buys": pair.buys_1h,
-                "sells": pair.sells_1h,
-                "top10_holder_percent":
-                    profile.top10_holder_percent if profile is not None else None,
-                # Dev-dumping evidence from the wallet analyzer's net flows
-                # (Part 17) — None when wallet data / creator are unknown.
-                "dev_outflow_usd": _creator_outflow_usd(result.wallet, creator),
-            }
+            snapshot = self._learning_snapshot(result, creator)
             self._learning.record_detection(
                 token.address, token.chain, detection_price_usd=pair.price_usd,
                 symbol=token.symbol, name=token.name, creator=creator)
