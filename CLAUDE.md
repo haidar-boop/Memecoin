@@ -39,19 +39,27 @@ The summaries above are for orientation only — the verbatim text in
 
 ## Where everything lives
 
+- **Start here every session:** `handoff/README.md` — the index of the
+  complete handoff folder (refreshed 2026-07-10) with the read order:
+  `PROJECT_RULES.md` (verbatim rules copy) → `OPERATOR.md` (who runs this,
+  his hard constraints) → `SESSION_HANDOFF.md` (current state + first
+  moves) → `ARCHITECTURE.md` (mental model, alert pipeline, invariants) →
+  `OPERATIONS.md` (live-droplet runbook) → `ROADMAP.md` (**the agreed plan:
+  5 major upgrades, in order**).
 - **Specification (source of truth):** `handoff/FULL_PROJECT_HANDOFF.md` —
   the 21 rules plus the complete original spec, Parts 1–32.5, verbatim.
-  Individual unbuilt parts are also split out under `handoff/next_steps/`
-  (see `handoff/next_steps/INDEX.md` for the build order).
+  Individual parts are also split out under `handoff/next_steps/` (most are
+  now built — `handoff/STATUS.md` is the ground truth).
 - **Implementation:** `meme_intelligence/` (modular packages: `ai`,
-  `alerts`, `analyzers`, `collectors`, `config`, `core`, `database`,
-  `scanners`, `trading`, `workflow`).
+  `alerts`, `analyzers`, `analytics`, `collectors`, `config`, `core`,
+  `database`, `learning`, `scanners`, `trading`, `workflow`).
 - **Tests:** `tests/` — run with `python -m pytest tests/ -q`. All existing
   tests must stay green (Rule 3, Rule 14).
 - **Build status and prior decisions:** `handoff/STATUS.md` and
   `handoff/DECISIONS_LOG.md`. When you implement a new part or resolve a
-  spec ambiguity, record it in `DECISIONS_LOG.md` and update `STATUS.md`
-  (Rule 15, Rule 19).
+  spec ambiguity, record it in `DECISIONS_LOG.md`, update `STATUS.md`, and
+  refresh `handoff/SESSION_HANDOFF.md` at the end of any state-changing
+  session (Rule 15, Rule 19).
 
 ## Working conventions
 
