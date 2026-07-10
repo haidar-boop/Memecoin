@@ -41,7 +41,16 @@ behavior; suite green.
 
 ---
 
-## 2. Two-way Telegram control — FREE, biggest usability win
+## 2. Two-way Telegram control — FREE, biggest usability win — ✅ BUILT 2026-07-10
+
+> Status: built as specified (see STATUS.md "Project 2"), plus two
+> operator-requested additions: `/check <address>` on-demand intelligence
+> and a one-tap copy-address button on alerts and command replies. A
+> dry-run-only buy-button scaffold also shipped, hidden behind
+> `MEMEINTEL_EXECUTION_BUY_BUTTON_ENABLED=false` (no live executor exists
+> — see DECISIONS_LOG 2026-07-10). Enable the commands with
+> `MEMEINTEL_TELEGRAM_COMMANDS_ENABLED=true` + restart. The item-1 note
+> below about the rug engine's `unsellable_override` seam is now wired.
 
 **What:** The bot already *sends* to Telegram; make it *listen*. Commands
 (only from the configured `chat_id` — reject everyone else):

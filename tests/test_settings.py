@@ -218,3 +218,40 @@ def test_copycat_veto_settings_validate_and_load():
     assert defaults.alerts.copycat_veto_enabled is True
     off = Settings.from_env(env={"MEMEINTEL_ALERTS_COPYCAT_VETO_ENABLED": "false"})
     assert off.alerts.copycat_veto_enabled is False
+
+
+# ---- Project 2: Telegram commands + execution scaffold groups ----
+
+def test_telegram_command_settings_validation():
+    from meme_intelligence.config.settings import TelegramCommandSettings
+
+    assert TelegramCommandSettings().enabled is False   # opt-in (ROADMAP #2)
+    with pytest.raises(ConfigurationError, match="poll_timeout_seconds"):
+        TelegramCommandSettings(poll_timeout_seconds=0.0)
+    with pytest.raises(ConfigurationError, match="poll_timeout_seconds"):
+        TelegramCommandSettings(poll_timeout_seconds=51.0)
+    with pytest.raises(ConfigurationError, match="idle_delay_seconds"):
+        TelegramCommandSettings(idle_delay_seconds=0.0)
+
+
+def test_execution_settings_validation_and_defaults():
+    from meme_intelligence.config.settings import ExecutionSettings
+
+    defaults = ExecutionSettings()
+    assert defaults.buy_button_enabled is False   # scaffold ships hidden
+    assert defaults.dry_run is True
+    with pytest.raises(ConfigurationError, match="max_buy_sol"):
+        ExecutionSettings(max_buy_sol=0.0)
+
+
+def test_project2_env_overrides_load():
+    settings = Settings.from_env(env={
+        "MEMEINTEL_TELEGRAM_COMMANDS_ENABLED": "true",
+        "MEMEINTEL_TELEGRAM_COMMANDS_POLL_TIMEOUT_SECONDS": "30",
+        "MEMEINTEL_EXECUTION_BUY_BUTTON_ENABLED": "true",
+        "MEMEINTEL_EXECUTION_MAX_BUY_SOL": "0.25",
+    })
+    assert settings.telegram_commands.enabled is True
+    assert settings.telegram_commands.poll_timeout_seconds == 30.0
+    assert settings.execution.buy_button_enabled is True
+    assert settings.execution.max_buy_sol == 0.25

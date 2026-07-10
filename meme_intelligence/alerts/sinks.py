@@ -88,6 +88,53 @@ def _sanitize_identity(value: str | None, *, max_len: int = 64) -> str:
     return (cleaned[:max_len] + "…") if len(cleaned) > max_len else (cleaned or "unknown")
 
 
+# Telegram's hard limit on inline-button callback_data is 64 BYTES; the
+# feedback prefixes (fb:1: / fb:0: / buy:) leave room for the longest
+# on-chain address format in use (Solana base58, 44 chars). An address
+# that somehow exceeds the limit simply gets no buttons — never truncated
+# (a truncated address would route feedback to the wrong token).
+_CALLBACK_DATA_MAX_BYTES = 64
+
+
+# Telegram's copy_text inline button (Bot API 7.11+) puts a value on the
+# phone's clipboard in one tap; its text is capped at 256 chars.
+_COPY_TEXT_MAX_CHARS = 256
+
+
+def copy_address_button(address: str) -> dict | None:
+    """One-tap [Copy address] button (operator request: paste the contract
+    address straight into a wallet/DEX without long-pressing the message)."""
+    if not address or len(address) > _COPY_TEXT_MAX_CHARS:
+        return None
+    return {"text": "📋 Copy address", "copy_text": {"text": address}}
+
+
+def copy_keyboard(address: str) -> dict | None:
+    """A reply_markup containing only the copy-address button, for command
+    replies (/check, /why) that mention a token."""
+    button = copy_address_button(address)
+    return {"inline_keyboard": [[button]]} if button else None
+
+
+def feedback_keyboard(address: str, *, include_buy: bool = False) -> dict | None:
+    """Inline 👍/👎 feedback buttons for one alert (Project 2), plus a
+    one-tap copy-address button, plus the optional [Buy (dry run)] button
+    when the execution scaffold's flag is on. Returns ``None`` when no
+    valid keyboard can be built."""
+    if not address or len(f"fb:1:{address}".encode()) > _CALLBACK_DATA_MAX_BYTES:
+        return None
+    keyboard = [[
+        {"text": "👍", "callback_data": f"fb:1:{address}"},
+        {"text": "👎", "callback_data": f"fb:0:{address}"},
+    ]]
+    copy_button = copy_address_button(address)
+    if copy_button is not None:
+        keyboard.append([copy_button])
+    if include_buy and len(f"buy:{address}".encode()) <= _CALLBACK_DATA_MAX_BYTES:
+        keyboard.append([{"text": "Buy (dry run)", "callback_data": f"buy:{address}"}])
+    return {"inline_keyboard": keyboard}
+
+
 def format_alert(event: AlertEvent) -> str:
     """Render the full Part 29 Section 7 message format."""
     lines = [
@@ -138,6 +185,7 @@ class TelegramSink(BaseCollector):
         *,
         routes: dict[str, str] | None = None,
         min_priority: AlertPriority = AlertPriority.MEDIUM,
+        buy_button_enabled: bool = False,  # Project 2 dry-run scaffold; off by default
         **kwargs,
     ) -> None:
         kwargs.setdefault("name", "telegram")
@@ -148,6 +196,7 @@ class TelegramSink(BaseCollector):
         self._chat_id = chat_id
         self._routes = routes or {}
         self._min_rank = _PRIORITY_RANK[min_priority]
+        self._buy_button_enabled = buy_button_enabled
 
     async def send(self, event: AlertEvent) -> bool | None:
         """True = delivered, False = FAILED, None = filtered by min-priority.
@@ -160,14 +209,23 @@ class TelegramSink(BaseCollector):
         if _PRIORITY_RANK[event.priority] > self._min_rank:
             return None
         chat_id = self._routes.get(channel_for(event), self._chat_id)
+        json_body = {
+            "chat_id": chat_id,
+            "text": format_alert(event)[:4000],  # Telegram hard limit 4096
+            "disable_web_page_preview": True,
+        }
+        # Project 2 feedback loop: every alert carries 👍/👎 buttons (and the
+        # buy button only when the operator flipped the execution flag). The
+        # sink and the command listener are separate objects — feedback flows
+        # back through the listener and lands in storage; no shared state.
+        markup = feedback_keyboard(event.token.address,
+                                   include_buy=self._buy_button_enabled)
+        if markup is not None:
+            json_body["reply_markup"] = markup
         try:
             payload = await self._get_json(
                 f"bot{self._token}/sendMessage",
-                json_body={
-                    "chat_id": chat_id,
-                    "text": format_alert(event)[:4000],  # Telegram hard limit 4096
-                    "disable_web_page_preview": True,
-                },
+                json_body=json_body,
             )
             if not (isinstance(payload, dict) and payload.get("ok")):
                 raise CollectorError(f"telegram: unexpected response {payload!r}")

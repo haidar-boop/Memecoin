@@ -734,6 +734,58 @@ discipline already used everywhere else in this codebase (e.g.
 `SubScore.observe()`).
 
 
+## 2026-07-10 — Project 2: two-way Telegram control
+
+Four decisions worth recording:
+
+### 1. 👍/👎 feedback is advisory-only, by design
+
+Operator thumbs land in their own `operator_feedback` table and are
+surfaced in `/mind` — they are deliberately NOT written into
+`alerts.outcome` (that column is for measured market outcomes, Part 24)
+and NOT fed into the learning layer's ground-truth labels. Rule 8:
+operator opinion is an opinion, not a measured outcome. Project 3 can
+evaluate the feedback signal explicitly before giving it any weight.
+
+### 2. Auth is a chat-id allowlist with silent drop
+
+Only updates whose chat id string-equals `MEMEINTEL_TELEGRAM_CHAT_ID` are
+processed. Strangers get no reply at all (not even an error) — replying
+would confirm a live bot worth probing. Their message text is never
+logged (only the chat id), inbound text is never echoed unsanitized,
+addresses must pass a strict base58/hex charset check before any use, and
+replies are plain text (no parse_mode) so nothing inbound can become live
+markdown.
+
+### 3. Buy-from-Telegram: scaffold shipped, execution deliberately unbuilt
+
+The owner asked for a buy button on alerts, set up but not launched.
+Decision: `trading/execution.py` contains ONLY a `DryRunExecutor` that
+journals the intent and says so; no wallet keys, no transaction building,
+no signing, no live code path exist anywhere (even
+`MEMEINTEL_EXECUTION_DRY_RUN=false` changes nothing, and the reply says
+so). The button itself ships hidden behind
+`MEMEINTEL_EXECUTION_BUY_BUTTON_ENABLED=false`. Doctrine note: the system
+remains never-AUTO-trading — a button pressed by the operator is a manual
+decision — but real execution requires a hot wallet key on the droplet,
+which is a key-custody security decision the owner must make explicitly
+in a dedicated conversation before any live executor is written.
+
+### 4. Mute filtering sits in the controller and fails open
+
+`/mute` suppresses delivery at the single dispatch point in
+`ContinuousScanner._process_result` — analysis, fact recording, snapshots,
+and learning all still run (a muted coin keeps building history). An
+`is_muted` lookup error counts as NOT muted: an infrastructure hiccup must
+never silently swallow a protective alert (Rule 6).
+
+Also closed in this build: ROADMAP item 1's leftover seam — the live
+Jupiter probe's confirmed cannot-sell now feeds
+`RugEngine.assess(unsellable_override=...)` in the deterministic veto.
+The override is only ever True or None, never False: a successful $50
+probe must not erase GoPlus honeypot flags (Rule 9 — one source never
+overrides another's red flag).
+
 ## Notable implementation choices (Rule 19)
 
 - **Python 3.11 + asyncio** over Node.js (both allowed by spec): the

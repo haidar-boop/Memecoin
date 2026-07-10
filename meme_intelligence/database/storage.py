@@ -133,6 +133,38 @@ CREATE TABLE IF NOT EXISTS outcomes (
     UNIQUE (snapshot_id, window_hours)
 );
 CREATE INDEX IF NOT EXISTS idx_outcomes_token ON outcomes(token_id, window_hours);
+
+-- Operator holdings (Project 2, ROADMAP #2): coins the operator ACTUALLY
+-- bought, marked via /holding on Telegram. A held coin is permanent
+-- operator interest: protective alerts keep full priority for it.
+CREATE TABLE IF NOT EXISTS holdings (
+    id INTEGER PRIMARY KEY,
+    token_id INTEGER NOT NULL REFERENCES tokens(id),
+    acquired_at TEXT NOT NULL,
+    released_at TEXT,
+    active INTEGER NOT NULL DEFAULT 1,
+    note TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_holdings_token ON holdings(token_id, active);
+
+-- Muted tokens (Project 2): /mute suppresses ALL alert delivery for a
+-- token; analysis continues normally, only delivery is silenced.
+CREATE TABLE IF NOT EXISTS muted_tokens (
+    token_id INTEGER PRIMARY KEY REFERENCES tokens(id),
+    muted_at TEXT NOT NULL
+);
+
+-- Operator feedback (Project 2): thumbs up/down pressed on alert messages.
+-- ADVISORY ONLY (Rule 8): operator opinion is not a measured outcome, so
+-- this never touches alerts.outcome or the learning ground-truth labels.
+CREATE TABLE IF NOT EXISTS operator_feedback (
+    id INTEGER PRIMARY KEY,
+    token_id INTEGER NOT NULL REFERENCES tokens(id),
+    alert_id INTEGER,
+    verdict TEXT NOT NULL CHECK (verdict IN ('up', 'down')),
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_feedback_token ON operator_feedback(token_id);
 """
 
 # Columns added to existing tables after their first release; applied by
@@ -249,6 +281,39 @@ class Storage:
             (token.chain, token.address),
         ).fetchone()
         return int(row["id"])
+
+    def find_token(self, address: str) -> TokenIdentity | None:
+        """Look up a known token by address alone (Project 2: phone commands
+        carry no chain). Exact match first (Solana base58 is case-sensitive);
+        EVM 0x addresses also match case-insensitively. Newest row wins when
+        the same address somehow exists on several chains."""
+        row = self._conn.execute(
+            "SELECT chain, address, symbol, name FROM tokens WHERE address = ? "
+            "ORDER BY id DESC LIMIT 1",
+            (address,),
+        ).fetchone()
+        if row is None and address.lower().startswith("0x"):
+            row = self._conn.execute(
+                "SELECT chain, address, symbol, name FROM tokens "
+                "WHERE lower(address) = lower(?) ORDER BY id DESC LIMIT 1",
+                (address,),
+            ).fetchone()
+        if row is None:
+            return None
+        return TokenIdentity(chain=row["chain"], address=row["address"],
+                             symbol=row["symbol"], name=row["name"])
+
+    def table_counts(self) -> dict:
+        """Cheap DB totals for the /status command (Project 2)."""
+        def count(sql: str) -> int:
+            return int(self._conn.execute(sql).fetchone()[0])
+
+        return {
+            "tokens": count("SELECT COUNT(*) FROM tokens"),
+            "alerts": count("SELECT COUNT(*) FROM alerts"),
+            "watchlist": count("SELECT COUNT(*) FROM watchlist WHERE tier != 'archived'"),
+            "holdings": count("SELECT COUNT(*) FROM holdings WHERE active = 1"),
+        }
 
     # ---- Assessment snapshots (feeds Part 24 backtesting) ----
 
@@ -548,11 +613,17 @@ class Storage:
         return int(cursor.lastrowid)
 
     def alert_history(self, token: TokenIdentity | None = None, limit: int = 50) -> list[dict]:
-        """Recent alerts, newest first (Part 29, Section 11)."""
+        """Recent alerts, newest first (Part 29, Section 11).
+
+        Each row includes the recorded evidence ``reasons`` (parsed from
+        JSON; veto/downgrade reasons live there), added for the /why
+        Telegram command (Project 2) — purely additive for older callers.
+        """
         if token is None:
             rows = self._conn.execute(
                 """SELECT a.id, a.created_at, a.priority, a.alert_type, a.title,
-                          a.score_at_alert, a.outcome, t.chain, t.address, t.symbol
+                          a.reasons, a.score_at_alert, a.outcome,
+                          t.chain, t.address, t.symbol
                    FROM alerts a JOIN tokens t ON t.id = a.token_id
                    ORDER BY a.id DESC LIMIT ?""",
                 (limit,),
@@ -560,12 +631,160 @@ class Storage:
         else:
             rows = self._conn.execute(
                 """SELECT a.id, a.created_at, a.priority, a.alert_type, a.title,
-                          a.score_at_alert, a.outcome, t.chain, t.address, t.symbol
+                          a.reasons, a.score_at_alert, a.outcome,
+                          t.chain, t.address, t.symbol
                    FROM alerts a JOIN tokens t ON t.id = a.token_id
                    WHERE t.chain = ? AND t.address = ?
                    ORDER BY a.id DESC LIMIT ?""",
                 (token.chain, token.address, limit),
             ).fetchall()
+        history = []
+        for row in rows:
+            entry = dict(row)
+            try:
+                entry["reasons"] = list(json.loads(entry.get("reasons") or "[]"))
+            except (TypeError, ValueError):
+                entry["reasons"] = []
+            history.append(entry)
+        return history
+
+    # ---- Operator holdings (Project 2, ROADMAP #2) ----
+
+    def set_holding(self, token: TokenIdentity, note: str | None = None) -> bool:
+        """Mark a coin the operator actually bought. Returns True when newly
+        added, False when an active holding already exists (idempotent)."""
+        token_id = self.upsert_token(token)
+        existing = self._conn.execute(
+            "SELECT id FROM holdings WHERE token_id = ? AND active = 1", (token_id,)
+        ).fetchone()
+        if existing is not None:
+            return False
+        self._conn.execute(
+            "INSERT INTO holdings (token_id, acquired_at, active, note) VALUES (?, ?, 1, ?)",
+            (token_id, self._now().isoformat(), note),
+        )
+        self._conn.commit()
+        self._logger.info("holding recorded: %s (%s)", token.symbol or token.address,
+                          token.chain)
+        return True
+
+    def release_holding(self, token: TokenIdentity) -> bool:
+        """Unmark a holding (/unhold). Returns True when an active holding
+        was found and released, False when there was nothing to release."""
+        token_id = self.upsert_token(token)
+        cursor = self._conn.execute(
+            "UPDATE holdings SET active = 0, released_at = ? "
+            "WHERE token_id = ? AND active = 1",
+            (self._now().isoformat(), token_id),
+        )
+        self._conn.commit()
+        released = cursor.rowcount > 0
+        if released:
+            self._logger.info("holding released: %s (%s)",
+                              token.symbol or token.address, token.chain)
+        return released
+
+    def get_holdings(self, active_only: bool = True) -> list[dict]:
+        """Holdings joined with token identity + latest known master score."""
+        where = "WHERE h.active = 1" if active_only else ""
+        rows = self._conn.execute(
+            f"""SELECT t.chain, t.address, t.symbol, t.name,
+                       h.acquired_at, h.released_at, h.active, h.note,
+                       (SELECT s.final_score FROM snapshots s
+                        WHERE s.token_id = h.token_id
+                        ORDER BY s.created_at DESC LIMIT 1) AS last_score
+                FROM holdings h JOIN tokens t ON t.id = h.token_id
+                {where}
+                ORDER BY h.acquired_at DESC""",
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def is_holding(self, token: TokenIdentity) -> bool:
+        row = self._conn.execute(
+            """SELECT 1 FROM holdings h JOIN tokens t ON t.id = h.token_id
+               WHERE t.chain = ? AND t.address = ? AND h.active = 1 LIMIT 1""",
+            (token.chain, token.address),
+        ).fetchone()
+        return row is not None
+
+    # ---- Muted tokens (Project 2) ----
+
+    def mute_token(self, token: TokenIdentity) -> bool:
+        """Suppress all alert delivery for a token. True when newly muted."""
+        token_id = self.upsert_token(token)
+        cursor = self._conn.execute(
+            "INSERT OR IGNORE INTO muted_tokens (token_id, muted_at) VALUES (?, ?)",
+            (token_id, self._now().isoformat()),
+        )
+        self._conn.commit()
+        muted = cursor.rowcount > 0
+        if muted:
+            self._logger.info("token muted: %s (%s)",
+                              token.symbol or token.address, token.chain)
+        return muted
+
+    def unmute_token(self, token: TokenIdentity) -> bool:
+        """Restore alert delivery. True when the token was actually muted."""
+        token_id = self.upsert_token(token)
+        cursor = self._conn.execute(
+            "DELETE FROM muted_tokens WHERE token_id = ?", (token_id,))
+        self._conn.commit()
+        unmuted = cursor.rowcount > 0
+        if unmuted:
+            self._logger.info("token unmuted: %s (%s)",
+                              token.symbol or token.address, token.chain)
+        return unmuted
+
+    def is_muted(self, token: TokenIdentity) -> bool:
+        row = self._conn.execute(
+            """SELECT 1 FROM muted_tokens m JOIN tokens t ON t.id = m.token_id
+               WHERE t.chain = ? AND t.address = ? LIMIT 1""",
+            (token.chain, token.address),
+        ).fetchone()
+        return row is not None
+
+    def muted_list(self) -> list[dict]:
+        rows = self._conn.execute(
+            """SELECT t.chain, t.address, t.symbol, m.muted_at
+               FROM muted_tokens m JOIN tokens t ON t.id = m.token_id
+               ORDER BY m.muted_at DESC""",
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    # ---- Operator feedback (Project 2; advisory only, Rule 8) ----
+
+    def record_feedback(self, token: TokenIdentity, verdict: str,
+                        alert_id: int | None = None) -> int:
+        """Store one thumbs up/down. ADVISORY ONLY — never written into
+        alerts.outcome and never fed into learning ground-truth labels
+        (operator opinion is not a measured outcome, Rule 8)."""
+        if verdict not in ("up", "down"):
+            raise ValueError(f"feedback verdict must be 'up' or 'down', got {verdict!r}")
+        token_id = self.upsert_token(token)
+        cursor = self._conn.execute(
+            """INSERT INTO operator_feedback (token_id, alert_id, verdict, created_at)
+               VALUES (?, ?, ?, ?)""",
+            (token_id, alert_id, verdict, self._now().isoformat()),
+        )
+        self._conn.commit()
+        return int(cursor.lastrowid)
+
+    def feedback_summary(self) -> dict:
+        """Total thumbs up/down counts, for the /mind report card."""
+        summary = {"up": 0, "down": 0}
+        for row in self._conn.execute(
+                "SELECT verdict, COUNT(*) AS n FROM operator_feedback GROUP BY verdict"):
+            summary[row["verdict"]] = int(row["n"])
+        return summary
+
+    def feedback_for_token(self, token: TokenIdentity) -> list[dict]:
+        rows = self._conn.execute(
+            """SELECT f.verdict, f.created_at, f.alert_id
+               FROM operator_feedback f JOIN tokens t ON t.id = f.token_id
+               WHERE t.chain = ? AND t.address = ?
+               ORDER BY f.id DESC""",
+            (token.chain, token.address),
+        ).fetchall()
         return [dict(row) for row in rows]
 
     # ---- Prediction outcomes (Part 24, Sections 2-3) ----

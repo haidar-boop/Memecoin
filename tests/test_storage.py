@@ -224,3 +224,63 @@ def test_migrate_reraises_unrelated_operational_errors(storage, monkeypatch):
         storage._conn, _sqlite3.OperationalError("database is locked")))
     with pytest.raises(_sqlite3.OperationalError, match="database is locked"):
         storage._migrate()
+
+
+# ---- Project 2: holdings, mute, operator feedback ----
+
+HOLD_TOKEN = TokenIdentity(chain="solana", address="HoldMe111111111111111111111111111111111111",
+                           symbol="HODL")
+
+
+def test_holdings_lifecycle(storage):
+    assert not storage.is_holding(HOLD_TOKEN)
+    assert storage.set_holding(HOLD_TOKEN) is True
+    assert storage.set_holding(HOLD_TOKEN) is False   # idempotent
+    assert storage.is_holding(HOLD_TOKEN)
+    rows = storage.get_holdings(active_only=True)
+    assert len(rows) == 1 and rows[0]["symbol"] == "HODL"
+    assert storage.release_holding(HOLD_TOKEN) is True
+    assert storage.release_holding(HOLD_TOKEN) is False
+    assert not storage.is_holding(HOLD_TOKEN)
+    assert storage.get_holdings(active_only=True) == []
+    assert len(storage.get_holdings(active_only=False)) == 1  # history retained
+
+
+def test_mute_idempotency(storage):
+    assert storage.mute_token(HOLD_TOKEN) is True
+    assert storage.mute_token(HOLD_TOKEN) is False
+    assert storage.is_muted(HOLD_TOKEN)
+    assert len(storage.muted_list()) == 1
+    assert storage.unmute_token(HOLD_TOKEN) is True
+    assert storage.unmute_token(HOLD_TOKEN) is False
+    assert not storage.is_muted(HOLD_TOKEN)
+
+
+def test_feedback_summary_and_validation(storage):
+    storage.record_feedback(HOLD_TOKEN, "up")
+    storage.record_feedback(HOLD_TOKEN, "up", alert_id=None)
+    storage.record_feedback(HOLD_TOKEN, "down")
+    assert storage.feedback_summary() == {"up": 2, "down": 1}
+    rows = storage.feedback_for_token(HOLD_TOKEN)
+    assert len(rows) == 3 and rows[0]["verdict"] == "down"
+    with pytest.raises(ValueError):
+        storage.record_feedback(HOLD_TOKEN, "sideways")
+
+
+def test_find_token_matches_exact_then_case_insensitive_evm(storage):
+    sol = TokenIdentity(chain="solana", address="CaseSensitive11111111111111111111111111111",
+                        symbol="CS")
+    evm = TokenIdentity(chain="ethereum", address="0x" + "AB" * 20, symbol="EV")
+    storage.upsert_token(sol)
+    storage.upsert_token(evm)
+    assert storage.find_token(sol.address).symbol == "CS"
+    assert storage.find_token(sol.address.lower()) is None     # base58 is case-sensitive
+    assert storage.find_token(("0x" + "ab" * 20)).symbol == "EV"  # EVM is not
+    assert storage.find_token("Unknown11111111111111111111111111111111111") is None
+
+
+def test_table_counts_includes_new_tables(storage):
+    storage.set_holding(HOLD_TOKEN)
+    counts = storage.table_counts()
+    assert counts["holdings"] == 1
+    assert set(counts) >= {"tokens", "alerts", "watchlist", "holdings"}

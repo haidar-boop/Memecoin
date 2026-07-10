@@ -926,3 +926,183 @@ async def test_security_change_triggers_critical_alert_on_recheck():
         changes = [e for e in sink.sent if e.alert_type == "security_change"]
         assert changes and changes[0].priority is AlertPriority.CRITICAL
         assert any("honeypot" in r for r in changes[0].reasons)
+
+
+# ---- Project 2: holdings-first interest, mute filtering, rug-seam wiring ----
+
+async def test_held_token_is_operator_interest_without_alert_history():
+    pair = make_pair()
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner, _ = make_scanner(storage, [], {})
+        assert scanner._operator_interest(pair.base_token) is False
+        storage.set_holding(pair.base_token)
+        assert scanner._operator_interest(pair.base_token) is True
+
+
+async def test_muted_token_delivery_suppressed_but_analysis_recorded():
+    pair = make_pair()
+    profiles = {pair.base_token.address: clean_profile(pair.base_token)}
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        storage.mute_token(pair.base_token)
+        sink = RecordingSink()
+        scanner, _ = make_scanner(storage, [pair], profiles, sink=sink)
+
+        from meme_intelligence.alerts.notification_engine import AlertEvent
+        from meme_intelligence.core.enums import AlertPriority
+
+        class AlwaysAlert:
+            def evaluate(self, result, **kwargs):
+                return [AlertEvent(priority=AlertPriority.HIGH,
+                                   alert_type="high_priority_opportunity",
+                                   token=result.pair.base_token,
+                                   title="forced", reasons=("forced",))]
+
+        scanner._rules = AlwaysAlert()
+        await scanner.run(max_cycles=1)
+
+        assert sink.sent == []                                     # delivery muted
+        assert storage.latest_security_facts(pair.base_token)      # analysis ran
+        assert storage.score_history(pair.base_token, limit=1)     # snapshot recorded
+
+
+async def test_unmuted_token_still_delivers():
+    pair = make_pair()
+    profiles = {pair.base_token.address: clean_profile(pair.base_token)}
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        sink = RecordingSink()
+        scanner, _ = make_scanner(storage, [pair], profiles, sink=sink)
+
+        from meme_intelligence.alerts.notification_engine import AlertEvent
+        from meme_intelligence.core.enums import AlertPriority
+
+        class AlwaysAlert:
+            def evaluate(self, result, **kwargs):
+                return [AlertEvent(priority=AlertPriority.HIGH,
+                                   alert_type="high_priority_opportunity",
+                                   token=result.pair.base_token,
+                                   title="forced", reasons=("forced",))]
+
+        scanner._rules = AlwaysAlert()
+        await scanner.run(max_cycles=1)
+        assert len(sink.sent) >= 1
+
+
+async def test_rug_seam_receives_unsellable_override(monkeypatch):
+    """Project 1's live probe feeds the rug engine: True only for a confirmed
+    buy-route-without-sell-route; NEVER False (a good probe must not erase
+    GoPlus honeypot flags); None when the probe did not run."""
+    import dataclasses as _dc
+    from types import SimpleNamespace
+
+    from meme_intelligence.learning import rug_engine as rug_module
+
+    captured = []
+    original_assess = rug_module.RugEngine.assess
+
+    def spy_assess(self, **kwargs):
+        captured.append(kwargs.get("unsellable_override"))
+        return original_assess(self, **kwargs)
+
+    monkeypatch.setattr(rug_module.RugEngine, "assess", spy_assess)
+
+    pair = make_pair()
+    base = clean_profile(pair.base_token)
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner, _ = make_scanner(storage, [], {})
+
+        def fake_result(profile):
+            return SimpleNamespace(security_profile=profile, pair=pair, wallet=None)
+
+        # Confirmed cannot-sell -> override True
+        cannot_sell = _dc.replace(base, live_buy_route_found=True,
+                                  live_sell_route_found=False)
+        scanner._deterministic_risk_veto(fake_result(cannot_sell), [], None)
+        # Healthy round trip -> None (NOT False)
+        healthy = _dc.replace(base, live_buy_route_found=True,
+                              live_sell_route_found=True,
+                              live_round_trip_loss_percent=1.0)
+        scanner._deterministic_risk_veto(fake_result(healthy), [], None)
+        # Probe never ran -> None
+        scanner._deterministic_risk_veto(fake_result(base), [], None)
+
+    assert captured == [True, None, None]
+
+
+async def test_status_snapshot_reports_layers_and_counts():
+    pair = make_pair()
+    profiles = {pair.base_token.address: clean_profile(pair.base_token)}
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner, _ = make_scanner(storage, [pair], profiles)
+        await scanner.run(max_cycles=1)
+        snap = scanner.status_snapshot()
+    assert snap["cycles"] == 1
+    assert snap["last_cycle"]["analyzed"] == 1
+    assert snap["layers"]["buy_button"] is False
+    assert snap["db"]["tokens"] >= 1
+    assert snap["uptime_seconds"] is not None
+
+
+async def test_check_token_uses_market_service_and_pipeline():
+    pair = make_pair()
+    profiles = {pair.base_token.address: clean_profile(pair.base_token)}
+
+    class FakeMarket:
+        async def get_best_pair(self, address, chain=None):
+            return pair if address == pair.base_token.address else None
+
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        sleeps = []
+
+        async def fake_sleep(seconds):
+            sleeps.append(seconds)
+
+        notifier = NotificationEngine([RecordingSink()], AlertEngineSettings(),
+                                      time_func=lambda: 0.0)
+        scanner = ContinuousScanner(
+            SETTINGS, storage, notifier,
+            gecko_client=FakeGecko([]), goplus_client=FakeGoPlus(profiles),
+            market_service=FakeMarket(),
+            now_func=lambda: NOW, sleep_func=fake_sleep,
+        )
+        result = await scanner.check_token(pair.base_token.address)
+        assert result is not None and result.master is not None
+        assert await scanner.check_token("Unknown11111111111111111111111111111111111") is None
+
+
+async def test_scanner_starts_and_stops_attached_telegram_listener():
+    class FakeListener:
+        def __init__(self):
+            self.started = 0
+            self.stopped = 0
+
+        async def start(self):
+            self.started += 1
+
+        async def stop(self):
+            self.stopped += 1
+
+    pair = make_pair()
+    profiles = {pair.base_token.address: clean_profile(pair.base_token)}
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner, _ = make_scanner(storage, [pair], profiles)
+        listener = FakeListener()
+        scanner.set_telegram_listener(listener)
+        await scanner.run(max_cycles=1)
+    assert listener.started == 1 and listener.stopped == 1
+
+
+async def test_broken_telegram_listener_never_blocks_the_scan():
+    class ExplodingListener:
+        async def start(self):
+            raise RuntimeError("cannot start")
+
+        async def stop(self):
+            raise RuntimeError("cannot stop")
+
+    pair = make_pair()
+    profiles = {pair.base_token.address: clean_profile(pair.base_token)}
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner, _ = make_scanner(storage, [pair], profiles)
+        scanner.set_telegram_listener(ExplodingListener())
+        history = await scanner.run(max_cycles=1)   # must not raise
+    assert len(history) == 1 and history[0].analyzed == 1

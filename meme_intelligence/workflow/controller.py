@@ -227,6 +227,13 @@ class ContinuousScanner:
         self._now = now_func
         self._sleep = sleep_func
         self._logger = get_logger("workflow.controller")
+        # Two-way Telegram control (Project 2): attached after construction
+        # via set_telegram_listener() — the listener's command context needs
+        # this scanner's public methods, so it is built second.
+        self._telegram = None
+        self._started_at: datetime | None = None
+        self._cycles_run = 0
+        self._last_cycle_stats: CycleStats | None = None
 
         self._discovery = DiscoveryEngine(settings.discovery, now_func=now_func)
         # Pump.fun launch funnel (Part 32.5 Section 3): needs the stream,
@@ -301,6 +308,16 @@ class ContinuousScanner:
                 "the mind layer stays out of the scan loop")
             learning_service = None
         self._learning = learning_service
+        # Which optional layers actually made it into the loop (post-gating),
+        # surfaced by /status on Telegram (Project 2).
+        self._layers = {
+            "wallet_intel": wallet_service is not None,
+            "ai": ai_service is not None or self._ai_verifier is not None,
+            "learning": learning_service is not None,
+            "pumpfun": self._launch_monitor is not None,
+            "jupiter_probe": jupiter_client is not None and settings.liquidity_probe.enabled,
+            "buy_button": settings.execution.buy_button_enabled,
+        }
         self._pipeline = ResearchPipeline(settings, goplus_client,
                                           community_client=community_client,
                                           wallet_service=wallet_service,
@@ -325,11 +342,75 @@ class ContinuousScanner:
             # still raises KeyboardInterrupt in run().
             pass
 
+    def set_telegram_listener(self, listener) -> None:
+        """Attach the two-way Telegram command listener (Project 2).
+
+        Called after construction because the listener's command context is
+        built around this scanner's public methods (status_snapshot,
+        check_token). run() starts it; shutdown stops it.
+        """
+        self._telegram = listener
+
+    def status_snapshot(self) -> dict:
+        """Cheap health snapshot for the /status Telegram command (Project 2)."""
+        uptime = None
+        if self._started_at is not None:
+            uptime = max(0.0, (self._now() - self._started_at).total_seconds())
+        last = None
+        if self._last_cycle_stats is not None:
+            stats = self._last_cycle_stats
+            last = {
+                "pools_seen": stats.pools_seen,
+                "candidates": stats.candidates,
+                "analyzed": stats.analyzed,
+                "launches_tracked": stats.launches_tracked,
+                "learned": stats.learned,
+                "alerts": len(stats.alerts),
+            }
+        try:
+            db = self._storage.table_counts()
+        except Exception as exc:  # noqa: BLE001 — status must degrade, not fail
+            self._logger.warning("table counts unavailable for status: %s", exc)
+            db = {}
+        return {
+            "uptime_seconds": uptime,
+            "cycles": self._cycles_run,
+            "last_cycle": last,
+            "networks": list(self._settings.workflow.network_list),
+            "layers": dict(self._layers),
+            "db": db,
+        }
+
+    async def check_token(self, address: str, chain: str = "solana") -> PipelineResult | None:
+        """On-demand analysis of one token for the /check Telegram command.
+
+        Resolves the deepest pair via the failover market service, then runs
+        the same shared pipeline as every scanned candidate — identical
+        scoring everywhere (Part 13). ``None`` when the token has no pairs
+        on the chain, no security data yet, or no market service is wired.
+        """
+        if self._market is None:
+            return None
+        pair = await self._market.get_best_pair(address, chain=chain)
+        if pair is None:
+            return None
+        return await self._pipeline.analyze_pair(pair, regime=self._regime)
+
     async def run(self, max_cycles: int | None = None) -> list[CycleStats]:
         """Run scan cycles until stopped or ``max_cycles`` is reached."""
         self._install_signal_handlers()
+        self._started_at = self._now()
         if self._launch_monitor is not None:
             await self._pumpportal.start()  # idempotent background listener
+        if self._telegram is not None:
+            # Isolated task (Rule 7): a listener that cannot even start must
+            # not stop the scanner — commands are a convenience, scanning is
+            # the job.
+            try:
+                await self._telegram.start()
+            except Exception as exc:  # noqa: BLE001
+                self._logger.error("telegram command listener failed to start "
+                                   "(scanning continues): %s", exc)
         self._logger.info(
             "continuous scanner started: networks=%s interval=%.0fs cycles=%s",
             self._settings.workflow.network_list,
@@ -345,6 +426,8 @@ class ContinuousScanner:
             try:
                 stats = await self._run_cycle(cycle)
                 history.append(stats)
+                self._cycles_run = cycle
+                self._last_cycle_stats = stats
                 backoff = _ERROR_BACKOFF_START  # healthy cycle resets the backoff
                 self._logger.info(
                     "cycle %d: %d pools, %d candidates, %d analyzed, "
@@ -362,6 +445,11 @@ class ContinuousScanner:
                 break
             await self._sleep(self._settings.workflow.monitor_interval_seconds)
 
+        if self._telegram is not None:
+            try:
+                await self._telegram.stop()
+            except Exception as exc:  # noqa: BLE001 — shutdown must not hang on the listener
+                self._logger.warning("telegram command listener stop failed: %s", exc)
         self._logger.info("continuous scanner stopped after %d cycle(s)", cycle)
         return history
 
@@ -609,6 +697,20 @@ class ContinuousScanner:
                 token, changes, master_score=result.master.final_score),
             operator_interest=batch_interest,
             enabled=self._settings.alert_engine.risk_alerts_require_interest))
+        # Operator mute (Project 2, /mute): delivery is suppressed, analysis
+        # is not — facts, snapshots, and learning above all still ran. Fails
+        # OPEN (an is_muted error must never silently drop alerts — Rule 6).
+        if events:
+            try:
+                muted = self._storage.is_muted(token)
+            except Exception as exc:  # noqa: BLE001
+                self._logger.warning("mute lookup failed for %s (alerts kept): %s",
+                                     token.address, exc)
+                muted = False
+            if muted:
+                self._logger.info("suppressing %d alert(s) for muted token %s",
+                                  len(events), token.address)
+                events = []
         delivered = await self._notifier.dispatch(events)
         stats.alerts.extend(delivered)
         for event in delivered:
@@ -632,6 +734,12 @@ class ContinuousScanner:
         demoted (Rule 6 — an error must not suppress a warning).
         """
         try:
+            # A coin the operator MARKED AS BOUGHT (/holding, Project 2) is
+            # permanent operator interest — checked before alert history:
+            # protective alerts on his actual positions keep full priority
+            # even if the original recommendation predates the database.
+            if self._storage.is_holding(token):
+                return True
             history = self._storage.alert_history(token, limit=100)
         except Exception as exc:  # noqa: BLE001 — advisory lookup, fail open
             self._logger.warning("interest lookup failed for %s (alerts keep "
@@ -680,10 +788,20 @@ class ContinuousScanner:
             "holder_count": profile.holder_count if profile is not None else None,
             "dev_outflow_usd": _creator_outflow_usd(result.wallet, creator),
         })
+        # Live Jupiter round-trip result (Project 1) feeds the rug engine's
+        # active-simulation seam. Only ever True or None — NEVER False: a
+        # successful $50 probe must not erase GoPlus honeypot flags (Rule 9,
+        # one source never overrides another's red flag), and a missing buy
+        # route is not evidence of anything (Rule 8).
+        unsellable = None
+        if (profile is not None and profile.live_buy_route_found is True
+                and profile.live_sell_route_found is False):
+            unsellable = True
         rug = RugEngine(self._settings.rug_signal_weights,
                         self._settings.rug_thresholds).assess(
             security=profile, snapshots=(snapshot,),
-            deployer_rug_count=deployer_rugs)
+            deployer_rug_count=deployer_rugs,
+            unsellable_override=unsellable)
         if rug.score >= self._settings.ai.verify_skip_rug_score:
             return (f"rug engine score {rug.score:.0f} >= "
                     f"{self._settings.ai.verify_skip_rug_score:.0f} "

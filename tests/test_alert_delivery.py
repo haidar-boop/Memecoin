@@ -442,3 +442,72 @@ def test_fake_community_fires_high_alert():
     assert event.alert_type == "community_fake"
     assert event.priority is AlertPriority.HIGH
     assert channel_for(event) == "security"
+
+
+# ---- Project 2: inline keyboards (feedback / copy / buy scaffold) ----
+
+def test_feedback_keyboard_has_thumbs_and_copy_but_no_buy_by_default():
+    from meme_intelligence.alerts.sinks import feedback_keyboard
+
+    addr = "So1MemeToken111111111111111111111111111111"
+    markup = feedback_keyboard(addr)
+    rows = markup["inline_keyboard"]
+    assert rows[0][0]["callback_data"] == f"fb:1:{addr}"
+    assert rows[0][1]["callback_data"] == f"fb:0:{addr}"
+    assert rows[1][0]["copy_text"]["text"] == addr    # one-tap copy (operator request)
+    assert all("buy:" not in str(row) for row in rows)
+
+
+def test_feedback_keyboard_adds_buy_only_when_asked():
+    from meme_intelligence.alerts.sinks import feedback_keyboard
+
+    addr = "So1MemeToken111111111111111111111111111111"
+    rows = feedback_keyboard(addr, include_buy=True)["inline_keyboard"]
+    assert rows[-1][0]["callback_data"] == f"buy:{addr}"
+    assert rows[-1][0]["text"] == "Buy (dry run)"
+
+
+def test_feedback_keyboard_refuses_oversized_address():
+    from meme_intelligence.alerts.sinks import feedback_keyboard
+
+    assert feedback_keyboard("x" * 80) is None   # would exceed 64-byte callback_data
+    assert feedback_keyboard("") is None
+
+
+def test_copy_keyboard_shape():
+    from meme_intelligence.alerts.sinks import copy_keyboard
+
+    addr = "So1MemeToken111111111111111111111111111111"
+    markup = copy_keyboard(addr)
+    assert markup["inline_keyboard"][0][0]["copy_text"]["text"] == addr
+    assert copy_keyboard("") is None
+
+
+async def test_telegram_alert_carries_feedback_keyboard(monkeypatch):
+    sink = make_telegram()
+    calls = []
+
+    async def fake_get_json(path, params=None, *, cache_key=None, cache_ttl=None,
+                            headers=None, json_body=None):
+        calls.append(json_body)
+        return {"ok": True}
+
+    monkeypatch.setattr(sink, "_get_json", fake_get_json)
+    await sink.send(make_event())
+    markup = calls[0]["reply_markup"]
+    data = str(markup)
+    assert "fb:1:" in data and "copy_text" in data and "buy:" not in data
+
+
+async def test_telegram_alert_buy_button_requires_flag(monkeypatch):
+    sink = make_telegram(buy_button_enabled=True)
+    calls = []
+
+    async def fake_get_json(path, params=None, *, cache_key=None, cache_ttl=None,
+                            headers=None, json_body=None):
+        calls.append(json_body)
+        return {"ok": True}
+
+    monkeypatch.setattr(sink, "_get_json", fake_get_json)
+    await sink.send(make_event())
+    assert "buy:" in str(calls[0]["reply_markup"])

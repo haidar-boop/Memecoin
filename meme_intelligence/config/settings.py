@@ -1105,6 +1105,60 @@ class LightGBMSettings:
 
 
 @dataclass(frozen=True)
+class TelegramCommandSettings:
+    """Two-way Telegram control (Project 2, ROADMAP item 2).
+
+    When ``enabled`` (and the Telegram bot token + chat id secrets exist),
+    the monitor long-polls the Bot API's ``getUpdates`` endpoint and answers
+    operator commands (/status, /why, /check, ...). Off by default — the
+    operator opts in explicitly (ROADMAP #2). Only ONE consumer may call
+    ``getUpdates`` per bot token; this listener is that consumer (the alert
+    sink only ever calls ``sendMessage``).
+    """
+
+    enabled: bool = False
+    poll_timeout_seconds: float = 25.0     # server-side long-poll wait (1..50)
+    idle_delay_seconds: float = 2.0        # pause between successful polls
+    error_backoff_max_seconds: float = 60.0  # cap for the poll-error backoff
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.poll_timeout_seconds) or not (
+                1.0 <= self.poll_timeout_seconds <= 50.0):
+            raise ConfigurationError(
+                "telegram_commands poll_timeout_seconds must be within [1, 50], "
+                f"got {self.poll_timeout_seconds}")
+        for name in ("idle_delay_seconds", "error_backoff_max_seconds"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value <= 0:
+                raise ConfigurationError(
+                    f"telegram_commands setting '{name}' must be positive, got {value}")
+
+
+@dataclass(frozen=True)
+class ExecutionSettings:
+    """Buy-button scaffold (Project 2) — DRY RUN ONLY, hidden by default.
+
+    The system's standing doctrine is decision-support / never-auto-trades.
+    A button pressed by the operator is a manual decision, but real
+    execution would still require holding a hot wallet key on the droplet —
+    a security decision the owner must make explicitly (see DECISIONS_LOG,
+    2026-07-10). Until then there is NO live executor:
+    ``buy_button_enabled`` only reveals a button that routes to
+    :class:`~meme_intelligence.trading.execution.DryRunExecutor`, and
+    ``dry_run`` is effectively always true regardless of its value.
+    """
+
+    buy_button_enabled: bool = False  # show the [Buy (dry run)] button on alerts
+    dry_run: bool = True              # no live executor exists; false has no effect
+    max_buy_sol: float = 0.1          # SOL amount a dry-run buy intent records
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.max_buy_sol) or self.max_buy_sol <= 0:
+            raise ConfigurationError(
+                f"execution max_buy_sol must be positive, got {self.max_buy_sol}")
+
+
+@dataclass(frozen=True)
 class RugThresholds:
     """Firing thresholds for the hard rug signals (Section 5a).
 
@@ -1198,6 +1252,8 @@ class Settings:
     viral_weights: ViralSubWeights = field(default_factory=ViralSubWeights)
     alert_engine: AlertEngineSettings = field(default_factory=AlertEngineSettings)
     alert_delivery: AlertDeliverySettings = field(default_factory=AlertDeliverySettings)
+    telegram_commands: TelegramCommandSettings = field(default_factory=TelegramCommandSettings)
+    execution: ExecutionSettings = field(default_factory=ExecutionSettings)
     wallet: WalletIntelSettings = field(default_factory=WalletIntelSettings)
     smart_money_weights: SmartMoneySubWeights = field(default_factory=SmartMoneySubWeights)
     liquidity_probe: LiquidityProbeSettings = field(default_factory=LiquidityProbeSettings)
@@ -1259,6 +1315,8 @@ class Settings:
             viral_weights=_load_group(ViralSubWeights, "VIRAL_WEIGHTS", env),
             alert_engine=_load_group(AlertEngineSettings, "ALERT_ENGINE", env),
             alert_delivery=_load_group(AlertDeliverySettings, "ALERT_DELIVERY", env),
+            telegram_commands=_load_group(TelegramCommandSettings, "TELEGRAM_COMMANDS", env),
+            execution=_load_group(ExecutionSettings, "EXECUTION", env),
             wallet=_load_group(WalletIntelSettings, "WALLET", env),
             smart_money_weights=_load_group(SmartMoneySubWeights, "SMART_MONEY_WEIGHTS", env),
             liquidity_probe=_load_group(LiquidityProbeSettings, "LIQUIDITY_PROBE", env),

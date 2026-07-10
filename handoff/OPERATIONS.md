@@ -91,6 +91,33 @@ Editing on the phone: `nano .env` trips him up — give exact keystrokes
   evidence lines name the veto (`deterministic risk veto: ...`,
   `duplicates established token ...`, `interest gate`).
 
+## Telegram commands (Project 2 — control the bot from the phone)
+
+**Enable once:** add `MEMEINTEL_TELEGRAM_COMMANDS_ENABLED=true` to `.env`
+(the bot token + chat id from alert delivery are reused), then restart the
+service. Only the configured chat id is answered — anyone else who finds
+the bot gets silence. Note: exactly ONE process may consume `getUpdates`
+per bot token; the monitor is that process (don't run a second listener
+with the same token).
+
+| Command | What it does |
+|---|---|
+| `/status` | scanner health, last cycle stats, which layers are on, DB totals |
+| `/why <address>` | recent alerts with recorded evidence/veto reasons, latest score, flags |
+| `/check <address> [chain]` | run the full analysis pipeline on a token right now (default chain solana; one at a time, 60s cache) |
+| `/holding <address>` / `/unhold` | mark/unmark a coin actually bought — held coins keep full-priority protective alerts forever |
+| `/holdings` | list active holdings with latest scores |
+| `/watchlist` | top tracked coins by tier |
+| `/mind` | learning report card + 👍/👎 feedback tallies |
+| `/mute <address>` / `/unmute` | silence/restore ALL alert delivery for one token (analysis continues) |
+
+Every Telegram alert carries 👍/👎 buttons (stored as **advisory**
+operator feedback — never a training label) and a one-tap **📋 Copy
+address** button. The `[Buy (dry run)]` button appears only when
+`MEMEINTEL_EXECUTION_BUY_BUTTON_ENABLED=true` and does nothing but journal
+the intent — there is no live trade executor, deliberately (DECISIONS_LOG
+2026-07-10).
+
 ## Troubleshooting
 
 | Symptom | Likely cause / fix |

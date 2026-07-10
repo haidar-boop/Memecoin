@@ -59,7 +59,7 @@ Get free keys at:
 ## Verify the install
 
 ```bash
-python -m pytest              # all tests should pass (650 as of 2026-07-10)
+python -m pytest              # all tests should pass (698 as of 2026-07-10)
 ```
 
 ## Full CLI command reference

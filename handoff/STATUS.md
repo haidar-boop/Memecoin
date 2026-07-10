@@ -602,6 +602,56 @@ back, the same "can you actually sell it?" test a trader would do by hand.
 
 ---
 
+## New (2026-07-10, Project 2 of the 5-project roadmap): two-way Telegram control
+
+The bot already sent alerts to Telegram; now it listens (ROADMAP item 2,
+plus two operator-requested additions: on-demand `/check` intelligence and
+a one-tap copy-address button).
+
+- `alerts/telegram_commands.py` (new) — `TelegramCommandListener`: raw
+  Bot-API `getUpdates` long polling (no third-party library) on
+  `BaseCollector`, running as an isolated asyncio task inside the monitor
+  (started/stopped by `ContinuousScanner`; a listener failure never
+  touches the scan loop — Rule 7). Only the configured
+  `MEMEINTEL_TELEGRAM_CHAT_ID` is answered; every other chat is logged
+  (id only) and silently ignored. All inbound text is untrusted: strict
+  address charset validation, sanitized echoes, plain-text replies (no
+  parse_mode), token redaction in logs.
+- Commands: `/status` (health + last cycle + layers + DB counts), `/why
+  <address>` (recent alerts with recorded reasons, latest score,
+  watchlist/holding/mute state, red flags incl. the live Jupiter probe),
+  `/check <address> [chain]` (full pipeline analysis on demand — one at a
+  time with a 60s result cache, Rule 11), `/holding` / `/unhold` /
+  `/holdings`, `/watchlist`, `/mind` (report card + feedback tallies),
+  `/mute` / `/unmute`, `/help`.
+- 👍/👎 inline buttons on every Telegram alert -> `operator_feedback`
+  table. **Advisory only** (Rule 8): never written into `alerts.outcome`,
+  never a learning ground-truth label; surfaced in `/mind`.
+- One-tap **📋 Copy address** button (Bot API `copy_text`) on every alert
+  and on `/check`/`/why` replies (operator request).
+- `database/storage.py` — new tables `holdings`, `muted_tokens`,
+  `operator_feedback` (+ `find_token`, `table_counts`, holdings/mute/
+  feedback methods; `alert_history` rows now include parsed `reasons`).
+- `workflow/controller.py` — `_operator_interest()` now checks holdings
+  FIRST (a held coin is permanent interest); muted tokens have delivery
+  suppressed at dispatch (analysis/facts/learning unaffected; fails open);
+  new `status_snapshot()` / `check_token()` / `set_telegram_listener()`;
+  and the Project 1 gap ROADMAP §1 named is closed: the live probe's
+  confirmed cannot-sell now feeds `RugEngine.assess(unsellable_override=...)`
+  — only ever True or None, never False.
+- **Buy-button scaffold (operator-requested, NOT launched):**
+  `trading/execution.py` — `DryRunExecutor` only: journals a
+  `trade_intent` and answers "DRY RUN — no real trade executed". NO wallet
+  keys, NO signing, NO live path exists;
+  `MEMEINTEL_EXECUTION_BUY_BUTTON_ENABLED` (default false) merely reveals
+  the `[Buy (dry run)]` button. See DECISIONS_LOG (2026-07-10).
+- Config: `TelegramCommandSettings` (`MEMEINTEL_TELEGRAM_COMMANDS_*`,
+  enabled=false by default) and `ExecutionSettings`
+  (`MEMEINTEL_EXECUTION_*`).
+- Tests: `tests/test_telegram_commands.py` (new) plus additions to
+  `test_storage.py`, `test_controller.py`, `test_alert_delivery.py`,
+  `test_settings.py`.
+
 ---
 
 ## What's NOT built yet

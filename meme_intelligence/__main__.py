@@ -29,6 +29,11 @@ from meme_intelligence.alerts.notification_engine import (
     NotificationEngine,
 )
 from meme_intelligence.alerts.sinks import DiscordSink, TelegramSink, parse_routes
+from meme_intelligence.alerts.telegram_commands import (
+    CommandContext,
+    TelegramCommandListener,
+)
+from meme_intelligence.trading.execution import DryRunExecutor
 from meme_intelligence.analyzers.onchain_analyzer import OnChainAnalyzer, derive_onchain_profile
 from meme_intelligence.analyzers.security_analyzer import SecurityAnalyzer
 from meme_intelligence.analyzers.wallet_intelligence import sightings_from_assessment
@@ -188,7 +193,11 @@ def build_sinks(settings: Settings) -> list:
     if settings.telegram_bot_token and settings.telegram_chat_id:
         sinks.append(TelegramSink(
             settings.telegram_bot_token, settings.telegram_chat_id,
-            routes=parse_routes(settings.alert_delivery.telegram_routes), **shared,
+            routes=parse_routes(settings.alert_delivery.telegram_routes),
+            # Project 2 scaffold: shows [Buy (dry run)] only when the operator
+            # flipped the flag; there is no live executor either way.
+            buy_button_enabled=settings.execution.buy_button_enabled,
+            **shared,
         ))
     if settings.discord_webhook_url:
         sinks.append(DiscordSink(
@@ -941,6 +950,36 @@ async def _cmd_monitor(args, settings) -> int:
                 learning_service=learning_service,
                 regime=MarketRegime(args.regime),
             )
+            # Two-way Telegram control (Project 2): opt-in via
+            # MEMEINTEL_TELEGRAM_COMMANDS_ENABLED; needs the same bot
+            # secrets the alert sink uses. Built AFTER the scanner because
+            # its command context wraps the scanner's public methods.
+            if settings.telegram_commands.enabled:
+                if settings.telegram_bot_token and settings.telegram_chat_id:
+                    context = CommandContext(
+                        storage=storage,
+                        settings=settings,
+                        status_provider=scanner.status_snapshot,
+                        check_runner=scanner.check_token,
+                        learning_service=learning_service,
+                        executor=DryRunExecutor(storage),
+                    )
+                    listener = TelegramCommandListener(
+                        settings.telegram_bot_token, settings.telegram_chat_id,
+                        context,
+                        poll_timeout_seconds=settings.telegram_commands.poll_timeout_seconds,
+                        idle_delay_seconds=settings.telegram_commands.idle_delay_seconds,
+                        error_backoff_max_seconds=(
+                            settings.telegram_commands.error_backoff_max_seconds),
+                        rate_limiter=RateLimiter.per_minute(120.0),
+                    )
+                    scanner.set_telegram_listener(listener)
+                    stack.push_async_callback(listener.close)
+                    stack.push_async_callback(listener.stop)
+                else:
+                    print("Note: MEMEINTEL_TELEGRAM_COMMANDS_ENABLED is on but "
+                          "MEMEINTEL_TELEGRAM_BOT_TOKEN / MEMEINTEL_TELEGRAM_CHAT_ID "
+                          "is not set — Telegram commands stay off.")
             try:
                 history = await scanner.run(max_cycles=args.cycles)
             except KeyboardInterrupt:
