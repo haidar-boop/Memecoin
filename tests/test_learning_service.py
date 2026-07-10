@@ -315,6 +315,63 @@ def test_rug_upgrade_does_not_double_blacklist():
     assert service.store.deployer_rug_count("devFast", "solana") == 1
 
 
+def test_stale_process_persist_does_not_clobber_graded_ensemble(tmp_path):
+    """Bug-hunt: the monitor (which never grades) persisted its stale
+    in-memory ensemble over the cron's graded accuracy history — and since
+    predictions are durably marked scored, the grades could never be
+    regenerated. Only a process that actually graded writes ensemble.joblib."""
+    env = dict(_ENV)
+    env["MEMEINTEL_LEARNING_STATE_DIR"] = str(tmp_path)
+    settings = Settings.from_env(env=env)
+
+    # "Cron" process: grades one outcome, persists.
+    cron = LearningService(settings, now_func=lambda: NOW)
+    cron.evaluate_coin("g1", "solana", _rug_series())
+    cron.resolve_outcome("g1", "solana", 24.0, -95.0, is_rug=True)  # persists
+    cron.store.close()
+
+    # "Monitor" process: loads the graded state, never grades, persists.
+    monitor = LearningService(settings, now_func=lambda: NOW)
+    from meme_intelligence.learning.ensemble import AdaptiveEnsemble
+    monitor._ensemble = AdaptiveEnsemble(window=50)  # simulate stale/blank copy
+    monitor.persist()  # must NOT overwrite the graded file
+    monitor.store.close()
+
+    reloaded = AdaptiveEnsemble.load(str(tmp_path / "ensemble.joblib"))
+    assert reloaded.final_samples == 1  # cron's grade survived
+
+
+def test_racing_resolutions_blacklist_deployer_once():
+    """Bug-hunt: the check-then-act in resolve_outcome let two overlapping
+    backtest runs both fire instant learning and durably record TWO rugs for
+    one rug event. The atomic once-per-coin claim makes it exactly one."""
+    service = _service()
+    service.record_detection("r1", "solana", detection_price_usd=1.0, creator="devR")
+    for snap in _rug_series():
+        service.capture_snapshot("r1", "solana", snap)
+    coin_id = service.store.coin_id(
+        __import__("meme_intelligence.core.models", fromlist=["TokenIdentity"])
+        .TokenIdentity(chain="solana", address="r1"))
+    # Simulate the race: both passes believe they are first.
+    service.resolve_outcome("r1", "solana", 1.0, -95.0, is_rug=True)
+    service._on_resolved(coin_id)  # second racing invocation
+    assert service.store.deployer_rug_count("devR", "solana") == 1
+
+
+def test_slow_rug_upgrade_regrades_the_prediction():
+    """Bug-hunt: a slow rug graded the sources against the early FLAT bucket
+    and never re-graded — the rug engine was recorded WRONG for a correct rug
+    call. The upgrade now adds a corrective grade (once)."""
+    service = _service()
+    service.evaluate_coin("s1", "solana", _rug_series())
+    service.resolve_outcome("s1", "solana", 1.0, 5.0)               # FLAT: grade 1
+    assert service._ensemble.final_samples == 1
+    service.resolve_outcome("s1", "solana", 24.0, -95.0, is_rug=True)  # upgrade
+    assert service._ensemble.final_samples == 2                     # regraded once
+    service.resolve_outcome("s1", "solana", 168.0, -99.0, is_rug=True)
+    assert service._ensemble.final_samples == 2                     # never twice
+
+
 def test_empty_trajectory_resolution_does_not_pollute_analog_index():
     """Bug-hunt regression: a coin resolved with zero snapshots extracted a
     zero-vector fingerprint that entered the analog index as a meaningless

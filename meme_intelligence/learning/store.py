@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS learning_coins (
     creator TEXT,
     final_bucket TEXT,              -- NULL until resolved (Section 1)
     updated_at TEXT NOT NULL,
+    deployer_counted INTEGER NOT NULL DEFAULT 0,  -- blacklist counted once per coin
     UNIQUE (chain, address)
 );
 
@@ -130,7 +131,24 @@ class LearningStore:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout=30000")
         self._conn.executescript(_SCHEMA)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Add post-release columns to databases from older builds (Rule 18)."""
+        existing = {row["name"] for row in
+                    self._conn.execute("PRAGMA table_info(learning_coins)")}
+        if "deployer_counted" not in existing:
+            try:
+                self._conn.execute(
+                    "ALTER TABLE learning_coins ADD COLUMN "
+                    "deployer_counted INTEGER NOT NULL DEFAULT 0")
+            except sqlite3.OperationalError as exc:
+                # Two processes migrating a pre-upgrade file at once: the
+                # loser hits "duplicate column", which means it already
+                # happened (same pattern as database/storage.py).
+                if "duplicate column" not in str(exc).lower():
+                    raise
 
     def close(self) -> None:
         self._conn.close()
@@ -307,6 +325,21 @@ class LearningStore:
             (creator, chain),
         ).fetchone()
         return int(row["rug_count"])
+
+    def mark_deployer_counted(self, coin_id: int) -> bool:
+        """Atomically claim the one-time deployer-blacklist count for a coin.
+
+        Returns True exactly once per coin even when two resolution passes
+        race (an overlapping backtest cron + a manual `backtest` run both
+        seeing the coin unresolved): the single UPDATE with the guard in its
+        WHERE clause is atomic in SQLite, so exactly one caller wins — the
+        blacklist can never durably record two rugs for one rug event.
+        """
+        cursor = self._conn.execute(
+            "UPDATE learning_coins SET deployer_counted = 1 "
+            "WHERE id = ? AND deployer_counted = 0", (coin_id,))
+        self._conn.commit()
+        return cursor.rowcount > 0
 
     def deployer_rug_count(self, creator: str | None, chain: str) -> int:
         """How many confirmed rugs this creator wallet is linked to (0 if clean)."""

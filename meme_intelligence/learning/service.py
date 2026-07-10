@@ -110,6 +110,14 @@ class LearningService:
         # Learning-loop bookkeeping.
         self._last_retrain_count = 0
         self._scaler_fit_count = 0
+        # True once THIS process has graded outcomes into the ensemble. The
+        # monitor and the backtest cron share the state dir: only the process
+        # that actually graded may overwrite ensemble.joblib, otherwise the
+        # monitor's stale in-memory copy (loaded at startup, never graded)
+        # clobbers the cron's accumulated accuracy history — and because
+        # predictions are marked scored durably, those grades could never be
+        # regenerated (bug-hunt finding).
+        self._ensemble_dirty = False
 
         self._load_artifacts()
 
@@ -179,7 +187,8 @@ class LearningService:
                 self._classifier.save(self._path("classifier.txt"))
             if self._archetypes.is_fitted:
                 self._archetypes.save(self._path("archetypes.joblib"))
-            self._ensemble.save(self._path("ensemble.joblib"))
+            if self._ensemble_dirty or not os.path.exists(self._path("ensemble.joblib")):
+                self._ensemble.save(self._path("ensemble.joblib"))
             import joblib
 
             joblib.dump({"last_retrain_count": self._last_retrain_count,
@@ -382,7 +391,11 @@ class LearningService:
                               record.token.address)
 
         # Grow the deployer blacklist on confirmed rugs (Section 5a / Section 7).
-        if bucket is OutcomeBucket.RUG and record.creator:
+        # mark_deployer_counted is an atomic once-per-coin claim, so racing
+        # resolution passes (overlapping backtest runs) can never double-count
+        # one rug event.
+        if (bucket is OutcomeBucket.RUG and record.creator
+                and self._store.mark_deployer_counted(coin_id)):
             self._store.blacklist_deployer(record.creator, record.token.chain)
 
         # Update ensemble accuracy from the stored prediction (Section 6).
@@ -393,6 +406,7 @@ class LearningService:
                 final_label=prediction.get("predicted_label"))
             prediction["scored"] = True
             self._store.update_prediction(coin_id, prediction)
+            self._ensemble_dirty = True
 
         self.persist()
 
@@ -414,10 +428,25 @@ class LearningService:
         record = self._store.get_record(coin_id)
         if record is None:
             return
-        if record.creator:
+        if record.creator and self._store.mark_deployer_counted(coin_id):
             count = self._store.blacklist_deployer(record.creator, record.token.chain)
             self._logger.info("rug upgrade for %s: deployer %s blacklisted (%d rug(s))",
                               record.token.address, record.creator, count)
+        # Re-grade the prediction against the corrected RUG outcome, once.
+        # The first grade (against the early non-rug bucket) punished exactly
+        # the sources that correctly called the slow rug — the rug engine was
+        # recorded WRONG for a right call, cutting its adaptive weight
+        # (bug-hunt finding). The stale grade stays in the rolling window
+        # (it ages out); the corrective grade enters now.
+        prediction = self._store.get_prediction(coin_id)
+        if (prediction and prediction.get("scored")
+                and not prediction.get("rug_regraded")):
+            self._ensemble.record_outcome(
+                prediction.get("source_labels", {}), OutcomeBucket.RUG.value,
+                final_label=prediction.get("predicted_label"))
+            prediction["rug_regraded"] = True
+            self._store.update_prediction(coin_id, prediction)
+            self._ensemble_dirty = True
         fingerprint = self._extractor.extract(record.snapshots)
         if fingerprint.coverage > 0.0:
             scaled = self._scaler.transform(fingerprint.vector)
@@ -472,6 +501,7 @@ class LearningService:
             # Old grades measured the replaced models; keeping them would
             # re-fire the trigger every cycle until the window rolled over.
             self._ensemble.reset_final_history()
+            self._ensemble_dirty = True  # a real mutation this process owns
         self.persist()
         return True
 
