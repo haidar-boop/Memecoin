@@ -91,6 +91,19 @@ def test_overall_accuracy():
     assert compute_metrics(records)["overall_accuracy"] == pytest.approx(0.5)
 
 
+def test_empty_distribution_record_does_not_crash_calibration():
+    """Fuzz regression: a record with an empty predicted_distribution lands in
+    the first confidence bin and must not crash the bin-mean computation."""
+    records = [
+        PredictionRecord(predicted_distribution={}, predicted_label="pump",
+                         actual_label="dump"),
+        _rec("pump", "pump"),
+    ]
+    m = compute_metrics(records)
+    assert m["resolved_count"] == 2
+    assert isinstance(m["calibration"], list)
+
+
 def test_calibration_bins_present():
     records = [_rec("pump", "pump", dist={"pump": 0.9, "flat": 0.1, "dump": 0.0, "rug": 0.0})
                for _ in range(5)]

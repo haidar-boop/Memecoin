@@ -99,7 +99,11 @@ def _calibration(records: Sequence[PredictionRecord], bins: int = 5) -> list[dic
                   or (i == bins - 1 and max(r.predicted_distribution.values(), default=0.0) == 1.0)]
         if not in_bin:
             continue
-        mean_conf = sum(max(r.predicted_distribution.values()) for r in in_bin) / len(in_bin)
+        # default=0.0 matches the bin-membership expression above — a record
+        # with an EMPTY distribution lands in the first bin and must not crash
+        # the mean (fuzz finding: max() on an empty sequence).
+        mean_conf = sum(max(r.predicted_distribution.values(), default=0.0)
+                        for r in in_bin) / len(in_bin)
         accuracy = sum(1 for r in in_bin if r.predicted_label == r.actual_label) / len(in_bin)
         buckets.append({"bin": f"{lo:.1f}-{hi:.1f}", "mean_confidence": mean_conf,
                         "empirical_accuracy": accuracy, "samples": len(in_bin)})
