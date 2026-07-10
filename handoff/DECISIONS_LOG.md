@@ -815,6 +815,45 @@ Project 2's feedback remains advisory display only. The veto's authority
 comes exclusively from measured market outcomes (graded predictions),
 never from opinion — same Rule 8 line drawn in the Project 2 entry.
 
+## 2026-07-10 — Adversarial review of Projects 1-3: three fixes
+
+A cold multi-agent review of the three shipped features (each finding
+independently verified) surfaced three real defects, all fixed:
+
+### 1. (HIGH) Sell-leg "no route" was a false-positive honeypot verdict
+
+Project 1's buy leg correctly treated Jupiter "no route" as unknown (Rule
+8 — a fresh pool Jupiter hasn't indexed isn't a rug), but the sell leg
+mapped the identical ambiguous 4xx to a CONFIRMED cannot-sell -> forced
+DESTRUCTIVE/score 0. That sinks legit brand-new or thin pools that simply
+can't exit a full $50 position in one swap — the exact false positive the
+operator called unacceptable. **Fix:** when a full-size sell finds no
+route, re-probe with a small fraction (`sell_confirm_fraction`, default
+5%). Nothing sells at any size -> real honeypot (destructive stands); a
+tiny sell routes -> the pool is merely thin, sellability is confirmed and
+the token is NOT condemned (round-trip loss left unknown; the liquidity
+sub-score already handles thinness). Verified end-to-end: honeypot ->
+destructive, thin pool -> survives, healthy -> unchanged.
+
+### 2. (LOW) Mute/holding missed on non-Ethereum EVM addresses
+
+`_resolve_token` guessed chain "ethereum" for any unknown 0x address, so a
+`/mute` or `/holding` on an unscanned Base/BSC/Arbitrum token filed under
+the wrong chain and silently did nothing. Dormant under the Solana-only
+default. **Fix:** `is_muted`/`is_holding` now match by ADDRESS on any chain
+(SOL base58 and EVM 0x formats can't collide; 0x matched
+case-insensitively), so the operator's intent sticks regardless of the
+inferred chain.
+
+### 3. (LOW) Command replay after a monitor restart
+
+The getUpdates offset lived only in memory; Telegram redelivers
+un-acknowledged updates for ~24h, so a restart could replay the last
+commands and double-record advisory feedback / re-journal dry-run intents.
+**Fix:** on startup the listener drains and DISCARDS any pending backlog
+(short poll) before processing — a redeploy is now a no-op for input, and
+stale commands never re-fire (correct for a control bot).
+
 ## Notable implementation choices (Rule 19)
 
 - **Python 3.11 + asyncio** over Node.js (both allowed by spec): the

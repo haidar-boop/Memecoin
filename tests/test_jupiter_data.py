@@ -71,16 +71,35 @@ async def test_buy_route_not_found_short_circuits(monkeypatch):
     assert len(calls) == 1  # sell leg never attempted
 
 
-async def test_buy_succeeds_sell_route_not_found(monkeypatch):
+async def test_confirmed_honeypot_when_no_sell_of_any_size_routes(monkeypatch):
+    """Full AND confirmation (small) sell both find no route -> real cannot-sell."""
     client = make_client()
-    calls = patch_calls(monkeypatch, client, [route("500000"), NO_ROUTE])
+    # buy -> 500,000 units; full sell fails; small (5% = 25,000) sell also fails.
+    calls = patch_calls(monkeypatch, client, [route("500000"), NO_ROUTE, NO_ROUTE])
 
     result = await client.check_round_trip_liquidity(MINT, probe_sol_amount=PROBE_SOL_AMOUNT)
 
     assert result.live_buy_route_found is True
-    assert result.live_sell_route_found is False
+    assert result.live_sell_route_found is False   # confirmed non-sellable -> destructive
     assert result.live_round_trip_loss_percent is None
-    assert len(calls) == 2
+    assert len(calls) == 3                          # buy + full sell + confirm sell
+    assert calls[2]["amount"] == str(int(500000 * 0.05))  # 25,000
+
+
+async def test_thin_pool_full_sell_fails_but_small_sell_confirms_route(monkeypatch):
+    """A full-size sell that fails ONLY because the pool is thin is NOT a
+    honeypot: the small confirmation sell routes, so a sell route exists and
+    the token is not condemned (the false positive this fix removes)."""
+    client = make_client()
+    calls = patch_calls(monkeypatch, client, [route("500000"), NO_ROUTE, route("40000000")])
+
+    result = await client.check_round_trip_liquidity(MINT, probe_sol_amount=PROBE_SOL_AMOUNT)
+
+    assert result.live_buy_route_found is True
+    assert result.live_sell_route_found is True     # a route exists -> NOT destructive
+    assert result.live_round_trip_loss_percent is None  # full-position exit unmeasured
+    assert len(calls) == 3
+    assert calls[2]["amount"] == str(int(500000 * 0.05))
 
 
 async def test_degenerate_buy_quote_is_inconclusive(monkeypatch):

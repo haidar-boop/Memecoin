@@ -43,7 +43,8 @@ class FakeJupiter:
         self._result = result
         self.calls: list[tuple] = []
 
-    async def check_round_trip_liquidity(self, mint, *, probe_sol_amount, slippage_bps):
+    async def check_round_trip_liquidity(self, mint, *, probe_sol_amount, slippage_bps,
+                                         sell_confirm_fraction=0.05):
         self.calls.append((mint, probe_sol_amount, slippage_bps))
         return self._result
 

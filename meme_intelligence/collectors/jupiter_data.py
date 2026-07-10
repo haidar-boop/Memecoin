@@ -5,10 +5,13 @@ GoPlus's contract analysis is static (what the code says the contract
 *could* do). This collector asks Jupiter's swap router for a real quote to
 buy the token, then a real quote to sell it straight back — the same "can
 you actually sell it?" test a trader would do by hand. A token that can be
-bought but has no route to sell it is treated as a confirmed rug regardless
-of how clean its static contract analysis looks (Rule 9 — multi-source:
-this is deliberately independent evidence from GoPlus, not a restatement
-of it).
+bought but has no route to sell it back AT ANY SIZE is treated as a
+confirmed rug regardless of how clean its static contract analysis looks
+(Rule 9 — multi-source: this is deliberately independent evidence from
+GoPlus, not a restatement of it). A full-size sell that fails only because
+the pool is too thin to exit the whole position at once is NOT a rug and is
+confirmed with a small follow-up sell before any verdict (Rule 8 —
+unknown/thin != unsafe).
 
 Requires a free Jupiter Developer Platform API key (``x-api-key`` header)
 — Jupiter deprecated its fully keyless "Lite" tier; the $0/month "Free"
@@ -93,6 +96,7 @@ class JupiterClient(BaseCollector):
         probe_sol_amount: float,
         slippage_bps: int = 500,
         quote_mint: str = SOL_MINT,
+        sell_confirm_fraction: float = 0.05,
     ) -> LiquidityProbeResult:
         """The buy-then-sell round trip -- can this token actually be sold back right now?"""
         if not mint:
@@ -117,9 +121,31 @@ class JupiterClient(BaseCollector):
 
         sell = await self._quote(mint, quote_mint, received, slippage_bps)
         if sell is None:
+            # A FULL-size sell found no route -- but Jupiter returns the same
+            # "no route" for three different things: a real honeypot (no sell
+            # ever), a not-yet-indexed sell direction on a brand-new pool, or
+            # simply a pool too thin to absorb the whole position in one swap.
+            # Only the first is a rug. Condemning on the full-size failure
+            # alone would sink fresh/thin but legitimate launches -- the exact
+            # false positive the buy leg is careful to avoid (Rule 8). So we
+            # CONFIRM with a tiny sell before calling it non-sellable:
+            #   * tiny sell also fails -> nothing sells -> real cannot-sell
+            #     (honeypot; the destructive override fires downstream);
+            #   * tiny sell succeeds  -> a sell route DOES exist, the full
+            #     size just exceeded instantaneous depth -> NOT a honeypot.
+            #     Sellability is confirmed; round-trip loss stays unknown
+            #     (a 5% sell doesn't measure a full-position exit), and the
+            #     liquidity sub-score already handles thin pools.
+            small = max(1, int(received * sell_confirm_fraction))
+            confirm = await self._quote(mint, quote_mint, small, slippage_bps)
+            if confirm is None:
+                return LiquidityProbeResult(
+                    token=token, source="jupiter",
+                    live_buy_route_found=True, live_sell_route_found=False,
+                )
             return LiquidityProbeResult(
                 token=token, source="jupiter",
-                live_buy_route_found=True, live_sell_route_found=False,
+                live_buy_route_found=True, live_sell_route_found=True,
             )
 
         returned = _to_int(sell.get("outAmount")) or 0

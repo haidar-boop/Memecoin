@@ -474,3 +474,30 @@ async def test_mind_shows_veto_authority_earned_and_flag_state():
     text = sent_messages(calls)[0]["text"]
     assert "p(rug) veto: ON" in text
     assert "EARNED — rug precision 0.82 over 17 graded rug calls" in text
+
+
+# ---- Project 2 fix: startup backlog is discarded, not replayed ----
+
+async def test_startup_discards_pending_backlog_without_handling():
+    """A restart must not replay commands Telegram buffered while we were down:
+    the backlog is drained (offset advanced) but NO handler runs."""
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage)
+        batches = [
+            {"ok": True, "result": [callback_update(f"fb:1:{SOL_ADDR}", update_id=10),
+                                    message_update(f"/holding {SOL_ADDR}", update_id=11)]},
+            {"ok": True, "result": []},   # drained
+        ]
+
+        async def fake_get_json(path, params=None, *, cache_key=None, cache_ttl=None,
+                                headers=None, json_body=None, error_status_as_json=None):
+            calls.append((path, params, json_body))
+            return batches.pop(0)
+
+        listener._get_json = fake_get_json
+        await listener._discard_backlog()
+
+        assert listener._offset == 12                # advanced past the whole backlog
+        assert storage.feedback_summary() == {"up": 0, "down": 0}   # feedback NOT replayed
+        assert storage.get_holdings(active_only=True) == []         # /holding NOT replayed
+        assert sent_messages(calls) == []                           # no replies emitted

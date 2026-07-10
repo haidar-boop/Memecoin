@@ -700,6 +700,11 @@ class LiquidityProbeSettings:
     enabled: bool = True
     probe_sol_amount: float = 0.3   # roughly $50 at time of writing; adjust as SOL price moves
     slippage_bps: int = 500         # 5%: tolerate normal slippage without false-positiving on it
+    # When a full-size sell finds no route, re-probe with this fraction of the
+    # bought amount before declaring the token non-sellable: a tiny sell that
+    # still routes proves the pool is merely thin (not a honeypot), so the
+    # destructive verdict is reserved for tokens where NOTHING can be sold.
+    sell_confirm_fraction: float = 0.05
 
     def __post_init__(self) -> None:
         if self.probe_sol_amount <= 0:
@@ -709,6 +714,11 @@ class LiquidityProbeSettings:
         if not (0 < self.slippage_bps <= 10000):
             raise ConfigurationError(
                 f"liquidity probe slippage_bps must be within (0, 10000], got {self.slippage_bps}"
+            )
+        if not (0 < self.sell_confirm_fraction < 1):
+            raise ConfigurationError(
+                "liquidity probe sell_confirm_fraction must be within (0, 1), got "
+                f"{self.sell_confirm_fraction}"
             )
 
 

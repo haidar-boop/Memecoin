@@ -283,3 +283,11 @@ def test_learning_veto_env_overrides():
     assert settings.learning.veto_min_p_rug == 0.9
     assert settings.learning.veto_min_accuracy == 0.8
     assert settings.learning.veto_min_samples == 25
+
+
+def test_liquidity_probe_rejects_bad_sell_confirm_fraction():
+    with pytest.raises(ConfigurationError, match="sell_confirm_fraction"):
+        LiquidityProbeSettings(sell_confirm_fraction=0.0)
+    with pytest.raises(ConfigurationError, match="sell_confirm_fraction"):
+        LiquidityProbeSettings(sell_confirm_fraction=1.0)
+    assert LiquidityProbeSettings(sell_confirm_fraction=0.1).sell_confirm_fraction == 0.1

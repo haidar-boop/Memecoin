@@ -245,8 +245,47 @@ class TelegramCommandListener(BaseCollector):
 
     # ---- Poll loop (error-isolated, Rule 7) ----
 
+    async def _discard_backlog(self) -> None:
+        """Skip commands Telegram buffered while the bot was down (Project 2 fix).
+
+        getUpdates redelivers every un-acknowledged update for ~24h, and the
+        offset lives only in memory — so without this, a restart replays the
+        last commands and re-records advisory feedback / re-journals dry-run
+        buy intents. A control bot must act on LIVE input, not a stale
+        backlog: on startup we drain and DISCARD anything already pending
+        (short poll, timeout 0), advancing the offset past it without
+        handling a single update."""
+        while not self._stopping:
+            params = {"timeout": "0"}
+            if self._offset is not None:
+                params["offset"] = str(self._offset)
+            payload = await self._get_json(f"bot{self._token}/getUpdates", params=params)
+            updates = payload.get("result") if isinstance(payload, dict) else None
+            if not updates:
+                return
+            discarded = 0
+            for update in updates:
+                uid = update.get("update_id") if isinstance(update, dict) else None
+                if isinstance(uid, int):
+                    self._offset = (uid + 1 if self._offset is None
+                                    else max(self._offset, uid + 1))
+                    discarded += 1
+            if discarded:
+                self._logger.info("discarded %d stale telegram update(s) on startup",
+                                  discarded)
+
     async def _poll_forever(self) -> None:
         backoff = _ERROR_BACKOFF_START
+        # Drop any backlog before processing anything, so a restart never
+        # replays commands (Rule 7 — a redeploy must be a no-op for input).
+        try:
+            await self._discard_backlog()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — best effort; live polling still starts
+            self._logger.warning(
+                "could not discard telegram backlog on startup "
+                "(live polling continues): %s", self._scrub(str(exc)))
         while not self._stopping:
             try:
                 await self._poll_once()

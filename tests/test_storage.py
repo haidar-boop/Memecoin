@@ -284,3 +284,18 @@ def test_table_counts_includes_new_tables(storage):
     counts = storage.table_counts()
     assert counts["holdings"] == 1
     assert set(counts) >= {"tokens", "alerts", "watchlist", "holdings"}
+
+
+def test_mute_and_hold_match_by_address_across_chains(storage):
+    """Project 2 fix: a mute/hold filed under a guessed chain must still apply
+    when the scanner sees the token on its real chain (unscanned EVM address
+    can't have its chain inferred reliably)."""
+    guessed = TokenIdentity(chain="ethereum", address="0x" + "cd" * 20, symbol="X")
+    real = TokenIdentity(chain="base", address="0x" + "CD" * 20, symbol="X")  # same addr, real chain
+    storage.mute_token(guessed)
+    assert storage.is_muted(real) is True          # honored despite chain + case mismatch
+    storage.set_holding(guessed)
+    assert storage.is_holding(real) is True
+    # A different address is unaffected.
+    other = TokenIdentity(chain="base", address="0x" + "ef" * 20, symbol="Y")
+    assert storage.is_muted(other) is False and storage.is_holding(other) is False

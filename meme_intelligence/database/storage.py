@@ -700,11 +700,26 @@ class Storage:
         return [dict(row) for row in rows]
 
     def is_holding(self, token: TokenIdentity) -> bool:
+        """Held by ADDRESS, on any chain (Project 2 fix): the operator marks
+        a holding by pasting an address, and an unscanned EVM address can't
+        have its chain inferred reliably — so a hold set under a guessed
+        chain must still be recognized when the scanner sees the real one.
+        Address formats don't collide across Solana (base58) and EVM (0x)."""
+        return self._exists_by_address(
+            "holdings h JOIN tokens t ON t.id = h.token_id AND h.active = 1",
+            token.address)
+
+    def _exists_by_address(self, from_join: str, address: str) -> bool:
+        """True when any row of the given table exists for ``address`` on any
+        chain (exact match; 0x addresses also matched case-insensitively)."""
         row = self._conn.execute(
-            """SELECT 1 FROM holdings h JOIN tokens t ON t.id = h.token_id
-               WHERE t.chain = ? AND t.address = ? AND h.active = 1 LIMIT 1""",
-            (token.chain, token.address),
+            f"SELECT 1 FROM {from_join} WHERE t.address = ? LIMIT 1", (address,)
         ).fetchone()
+        if row is None and address.lower().startswith("0x"):
+            row = self._conn.execute(
+                f"SELECT 1 FROM {from_join} WHERE lower(t.address) = lower(?) LIMIT 1",
+                (address,),
+            ).fetchone()
         return row is not None
 
     # ---- Muted tokens (Project 2) ----
@@ -736,12 +751,11 @@ class Storage:
         return unmuted
 
     def is_muted(self, token: TokenIdentity) -> bool:
-        row = self._conn.execute(
-            """SELECT 1 FROM muted_tokens m JOIN tokens t ON t.id = m.token_id
-               WHERE t.chain = ? AND t.address = ? LIMIT 1""",
-            (token.chain, token.address),
-        ).fetchone()
-        return row is not None
+        """Muted by ADDRESS, on any chain (Project 2 fix) — same reasoning as
+        :meth:`is_holding`: a mute set under an inferred chain must still
+        suppress alerts when the scanner analyzes the token on its real one."""
+        return self._exists_by_address(
+            "muted_tokens m JOIN tokens t ON t.id = m.token_id", token.address)
 
     def muted_list(self) -> list[dict]:
         rows = self._conn.execute(

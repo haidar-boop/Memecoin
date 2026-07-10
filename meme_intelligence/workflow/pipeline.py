@@ -155,6 +155,7 @@ class ResearchPipeline:
                     pair.base_token.address,
                     probe_sol_amount=self._liquidity_probe.probe_sol_amount,
                     slippage_bps=self._liquidity_probe.slippage_bps,
+                    sell_confirm_fraction=self._liquidity_probe.sell_confirm_fraction,
                 )
                 profile = dataclasses.replace(
                     profile,
