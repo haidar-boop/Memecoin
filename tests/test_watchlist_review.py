@@ -138,6 +138,30 @@ async def test_skip_set_and_limit_respected():
         assert changes == []
 
 
+async def test_review_rotates_through_whole_watchlist():
+    """Bug-hunt regression: the tier/score ordering plus the per-run limit
+    re-reviewed the same top entries forever — everything below the cutoff
+    was never re-assessed, never archived, and kept stale scores for the
+    process lifetime. Least-recently-updated-first rotation fixes it because
+    every review bumps updated_at."""
+    clock = {"now": NOW}
+    toks = [token(f"TOK{i}") for i in range(3)]
+    with Storage(":memory:", now_func=lambda: clock["now"]) as storage:
+        for i, tok in enumerate(toks):
+            storage.update_watchlist(tok, WatchlistTier.TIER_1_HIGH_PRIORITY,
+                                     score=90.0 - i)
+            clock["now"] += timedelta(seconds=1)
+        market = FakeMarket({t.address: [make_pair(t)] for t in toks})
+        pipeline = make_pipeline({t.address: clean_profile(t) for t in toks})
+        touched: list[str] = []
+        for _ in range(3):
+            changes = await review_entries(storage, market, pipeline, limit=1)
+            touched.extend(c.token.address for c in changes)
+            clock["now"] += timedelta(seconds=1)
+        # With limit=1 per run, three runs must visit three DIFFERENT entries.
+        assert set(touched) == {t.address for t in toks}
+
+
 async def test_market_failure_skips_gracefully():
     tok = token("FAIL")
     with Storage(":memory:", now_func=lambda: NOW) as storage:

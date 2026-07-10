@@ -544,6 +544,25 @@ def test_ready_candidate_survives_pending_ttl_while_awaiting_confirmation():
     assert len(candidates) == 1
 
 
+def test_ready_candidate_expires_after_confirmation_ttl():
+    """Bug-hunt: READY candidates had NO expiry at all — a promoted token
+    whose market confirmation never succeeded retried every interval forever
+    (real API calls), permanently occupying max_pending slots until the
+    funnel rejected every new launch. Bounded by ready_ttl_hours now."""
+    clock = Clock()
+    monitor = make_monitor(clock, pending_ttl_hours=1.0)
+    monitor.ingest([make_launch()])
+    monitor.note_migration(TokenIdentity(chain="solana", address=MINT))
+    assert len(monitor.ready_candidates()) == 1
+
+    monitor.defer(TOKEN)
+    clock.advance(hours=71)  # still within the 72h confirmation window
+    assert monitor.tracked_count == 1
+    clock.advance(hours=2)   # now past ready_ttl_hours
+    assert monitor.ready_candidates() == []
+    assert monitor.tracked_count == 0  # slot released; funnel stays alive
+
+
 def test_promoted_at_is_stable_across_repeated_calls():
     """Bug-hunt: promoted_at was set to the ready_candidates() call time,
     not the actual promotion moment, so it drifted on every call instead

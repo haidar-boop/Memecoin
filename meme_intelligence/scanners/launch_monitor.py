@@ -264,20 +264,30 @@ class LaunchMonitor:
         return True, reasons
 
     def _expire_stale(self, now: datetime) -> None:
-        # Only PENDING entries expire on the TTL — a READY candidate has
-        # already earned promotion and is just waiting on independent
-        # market confirmation (Section 2), which can legitimately take
-        # longer than pending_ttl_hours for a token the market providers
-        # haven't indexed yet. Expiring it here would silently discard an
-        # already-vetted candidate and contradicts the module's own
-        # documented retry guarantee (Rule 7).
+        # PENDING entries expire on the traction TTL. READY candidates get a
+        # separate, LONGER confirmation TTL (market indexing can legitimately
+        # outlast pending_ttl_hours) — but not none at all: a promoted token
+        # whose market confirmation never succeeds (bonding-curve spike that
+        # died without a DEX pool) previously retried every interval FOREVER,
+        # each retry a real market call, while permanently occupying a
+        # max_pending slot — until the funnel silently rejected every new
+        # launch (bug-hunt finding: 5 zombies = 75k calls in 3 simulated
+        # weeks; at 500 the funnel is dead). Bounded retries, honest drop
+        # (Rules 7/11).
         cutoff = now - timedelta(hours=self._s.pending_ttl_hours)
-        stale = [key for key, e in self._tracked.items()
-                 if e.status is LaunchStatus.PENDING and e.first_seen < cutoff]
-        for key in stale:
+        ready_cutoff = now - timedelta(hours=self._s.ready_ttl_hours)
+        stale = []
+        for key, e in self._tracked.items():
+            if e.status is LaunchStatus.PENDING and e.first_seen < cutoff:
+                stale.append((key, f"no promotion within {self._s.pending_ttl_hours:.0f}h"))
+            elif (e.status is LaunchStatus.READY
+                  and (e.promoted_at or e.first_seen) < ready_cutoff):
+                stale.append((key, "market confirmation never succeeded within "
+                                   f"{self._s.ready_ttl_hours:.0f}h of promotion"))
+        for key, reason in stale:
             entry = self._tracked.pop(key)
-            self._logger.info("expiring tracked launch %s (%s): no promotion within %.0fh",
-                              key, entry.launch.token.symbol or "?", self._s.pending_ttl_hours)
+            self._logger.info("expiring tracked launch %s (%s): %s",
+                              key, entry.launch.token.symbol or "?", reason)
 
     # ---- Scanner-facing candidate handoff ----
 

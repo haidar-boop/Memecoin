@@ -507,13 +507,19 @@ class AlertSink(Protocol):
 class ConsoleSink:
     """Prints alerts to stdout and the log (default sink until Part 29)."""
 
+    # A local log, not a delivery target: when external sinks (Telegram/
+    # Discord) are configured, the console's unconditional success must not
+    # make a lost phone alert count as delivered (see dispatch()).
+    external = False
+
     def __init__(self):
         self._logger = get_logger("alerts.console")
 
-    async def send(self, event: AlertEvent) -> None:
+    async def send(self, event: AlertEvent) -> bool:
         print(event.render())
         self._logger.info("alert dispatched: %s %s %s",
                           event.priority.value, event.alert_type, event.token.address)
+        return True
 
 
 class NotificationEngine:
@@ -577,15 +583,27 @@ class NotificationEngine:
             # unconditionally beforehand meant a total delivery outage
             # (e.g. Telegram down) permanently lost the alert instead of
             # letting it retry once the cooldown window elapsed (Rule 7).
+            # Delivery accounting (bug-hunt finding): sinks used to swallow
+            # their failures, and the always-successful console made a LOST
+            # phone alert count as delivered — cooldown stamped, recorded in
+            # history, never retried. Now a sink returns True (delivered),
+            # False (failed), or None (filtered / legacy sink, treated as
+            # success for compatibility); and when any EXTERNAL sink is
+            # configured, only external sinks decide delivery — the console
+            # is a log, not the operator's phone.
+            has_external = any(getattr(s, "external", False) for s in self._sinks)
             any_delivered = False
             for sink in self._sinks:
                 try:
-                    await sink.send(event)
-                    any_delivered = True
+                    outcome = await sink.send(event)
                 except Exception as exc:  # noqa: BLE001 — one sink's bug must not sink the batch
+                    outcome = False
                     self._logger.error("sink %s failed to deliver %s alert for %s: %s",
                                        type(sink).__name__, event.alert_type,
                                        event.token.address, exc)
+                counts = getattr(sink, "external", False) or not has_external
+                if counts and outcome is not False:
+                    any_delivered = True
             if any_delivered:
                 self._last_sent[key] = now
                 delivered.append(event)

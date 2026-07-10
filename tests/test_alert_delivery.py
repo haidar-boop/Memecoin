@@ -242,6 +242,45 @@ async def test_total_delivery_outage_does_not_permanently_lose_the_alert():
     assert key not in engine._last_sent
 
 
+async def test_console_success_does_not_mask_failed_phone_delivery():
+    """Bug-hunt: Telegram/Discord swallowed their delivery failures and the
+    always-successful console counted as delivery — a lost phone alert was
+    cooldown-stamped, recorded as delivered, and never retried. When external
+    sinks are configured, only THEY decide delivery."""
+    from meme_intelligence.alerts.notification_engine import ConsoleSink
+
+    class FailingExternalSink:
+        external = True
+
+        def __init__(self):
+            self.calls = 0
+
+        async def send(self, event):
+            self.calls += 1
+            return False  # delivery failed (e.g. Telegram down / bad token)
+
+    failing = FailingExternalSink()
+    engine = NotificationEngine([ConsoleSink(), failing],
+                                AlertEngineSettings(cooldown_seconds=900.0),
+                                time_func=lambda: 0.0)
+    event = make_event(detected_at=None)
+    delivered = await engine.dispatch([event])
+    assert delivered == []          # console printing is not phone delivery
+    await engine.dispatch([event])
+    assert failing.calls == 2       # cooldown not stamped -> retried
+
+    class OkExternalSink:
+        external = True
+
+        async def send(self, event):
+            return True
+
+    engine_ok = NotificationEngine([ConsoleSink(), OkExternalSink()],
+                                   AlertEngineSettings(), time_func=lambda: 0.0)
+    delivered = await engine_ok.dispatch([make_event(detected_at=None)])
+    assert len(delivered) == 1      # a real external success still delivers
+
+
 # ---- Sections 11-12: history and performance ----
 
 def make_master(score: float):

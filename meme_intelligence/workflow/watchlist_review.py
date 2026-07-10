@@ -52,7 +52,11 @@ async def review_entries(
     """
     changes: list[WatchlistChange] = []
     reviewed = 0
-    for entry in storage.get_watchlist():
+    # Least-recently-updated first: with the default tier/score ordering the
+    # per-run limit re-reviewed the same top-N forever and starved everything
+    # below (never re-assessed, never archived). Reviews bump updated_at, so
+    # this ordering rotates the limit through the whole watchlist.
+    for entry in sorted(storage.get_watchlist(), key=lambda e: e.updated_at):
         if reviewed >= limit:
             break
         if entry.token.address.lower() in skip:

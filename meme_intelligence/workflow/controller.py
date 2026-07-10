@@ -39,7 +39,11 @@ from meme_intelligence.analyzers.security_monitor import (
 )
 from meme_intelligence.config.settings import Settings
 from meme_intelligence.core.enums import AlertPriority, MarketRegime, WatchlistTier
-from meme_intelligence.core.errors import CollectorError, MemeIntelError
+from meme_intelligence.core.errors import (
+    AllProvidersFailedError,
+    CollectorError,
+    MemeIntelError,
+)
 from meme_intelligence.core.logging_setup import get_logger
 from meme_intelligence.database.storage import Storage
 from meme_intelligence.scanners.discovery import DiscoveryEngine, scan_new_pools
@@ -265,9 +269,18 @@ class ContinuousScanner:
     async def _run_cycle(self, cycle: int) -> CycleStats:
         stats = CycleStats(cycle=cycle)
 
-        candidates, rejected = await scan_new_pools(
-            self._gecko, self._discovery, self._settings.workflow.network_list,
-        )
+        # Discovery is ONE source; a GeckoTerminal outage must not stall the
+        # launch funnel, watchlist rechecks, security-change detection, or the
+        # learning retrain for hours (bug-hunt finding: an uncaught
+        # CollectorError here aborted the whole cycle into the outer backoff
+        # even though every other stage uses independent providers — Rule 9).
+        try:
+            candidates, rejected = await scan_new_pools(
+                self._gecko, self._discovery, self._settings.workflow.network_list,
+            )
+        except CollectorError as exc:
+            self._logger.warning("pool discovery unavailable this cycle: %s", exc)
+            candidates, rejected = [], []
         stats.pools_seen = len(candidates) + len(rejected)
         stats.candidates = len(candidates)
 
@@ -589,8 +602,15 @@ class ContinuousScanner:
                                  result.pair.base_token.address, exc)
 
     async def _recheck_watchlist(self, stats: CycleStats, *, skip: set[str] = frozenset()) -> None:
-        """Re-analyze tracked tokens on the slower cadence (Part 15, Section 2)."""
-        entries = self._storage.get_watchlist()
+        """Re-analyze tracked tokens on the slower cadence (Part 15, Section 2).
+
+        Entries are visited least-recently-updated FIRST (bug-hunt finding:
+        the default tier/score ordering plus the per-pass limit meant entries
+        ranked below the top N were never re-assessed, never archived, and
+        kept stale scores forever — every review bumps updated_at, so this
+        ordering rotates the limit through the whole list).
+        """
+        entries = sorted(self._storage.get_watchlist(), key=lambda e: e.updated_at)
         limit = self._settings.workflow.watchlist_review_limit
         rechecked = 0
         for entry in entries:
@@ -600,28 +620,26 @@ class ContinuousScanner:
                 continue  # analyzed moments ago this cycle; nothing new to learn
             if entry.tier is WatchlistTier.TIER_3_RESEARCH_ONLY:
                 continue  # research-only entries wait for the daily routine
-            pair = await self._market.get_best_pair(entry.token.address, chain=entry.token.chain)
-            if pair is None:
-                # get_best_pair collapses two different situations into the
-                # same None: the token genuinely has no pairs left (dead),
-                # or every provider is transiently unavailable
-                # (AllProvidersFailedError). Archiving on the latter would
-                # silently discard a healthy watchlist token during a
-                # provider outage. Check health() to tell them apart —
-                # only archive when at least one provider is actually up
-                # and still reports nothing (Rule 6/9).
-                # Duck-typed market services (test doubles, older clients)
-                # may not implement health() — treat that as "unknown",
-                # not "all down", so archiving still proceeds as before.
-                health = self._market.health() if hasattr(self._market, "health") else []
-                if health and all(not p.healthy for p in health):
-                    self._logger.warning(
-                        "watchlist recheck for %s skipped: all market providers "
-                        "unavailable (transient outage, not archiving)",
-                        entry.token.address)
-                    continue
+            # Fetch via get_token_pairs, which RAISES on a provider outage,
+            # rather than get_best_pair, which collapses "all providers down"
+            # into the same None as "token has no pairs" (bug-hunt finding:
+            # a 2-failure blip passed the old health() heuristic — providers
+            # only report unhealthy after 3 consecutive failures — and
+            # permanently archived healthy tokens). Archive ONLY when a
+            # SUCCESSFUL call says the market is empty (Rule 8), exactly as
+            # watchlist_review.review_entries does.
+            try:
+                pairs = await self._market.get_token_pairs(
+                    entry.token.address, chain=entry.token.chain)
+            except (CollectorError, AllProvidersFailedError) as exc:
+                self._logger.warning(
+                    "watchlist recheck for %s skipped: market data unavailable (%s)",
+                    entry.token.address, exc)
+                continue
+            if not pairs:
                 self._storage.archive(entry.token, "no active trading pairs remain")
                 continue
+            pair = max(pairs, key=lambda p: p.liquidity_usd or 0.0)
             result = await self._pipeline.analyze_pair(pair, regime=self._regime)
             if result is None:
                 continue

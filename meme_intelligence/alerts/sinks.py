@@ -107,9 +107,13 @@ class TelegramSink(BaseCollector):
     """Delivers alerts via a Telegram bot (Part 29, Section 8).
 
     ``routes`` optionally maps channel categories to chat ids; everything
-    else goes to ``chat_id``. Delivery failures are logged and swallowed —
-    an unreachable messenger must never stop the scanner (Rule 7).
+    else goes to ``chat_id``. Delivery failures are logged and REPORTED
+    (``send`` returns False) so the engine can retry after the cooldown —
+    but never raised: an unreachable messenger must never stop the scanner
+    (Rule 7).
     """
+
+    external = True  # a real delivery target, not a local log (see dispatch)
 
     def __init__(
         self,
@@ -129,9 +133,16 @@ class TelegramSink(BaseCollector):
         self._routes = routes or {}
         self._min_rank = _PRIORITY_RANK[min_priority]
 
-    async def send(self, event: AlertEvent) -> None:
+    async def send(self, event: AlertEvent) -> bool | None:
+        """True = delivered, False = FAILED, None = filtered by min-priority.
+
+        Reporting the failure (instead of swallowing it, bug-hunt finding)
+        lets the engine skip the cooldown stamp so a lost phone alert
+        retries once the window elapses, rather than being counted as
+        delivered and gone forever.
+        """
         if _PRIORITY_RANK[event.priority] > self._min_rank:
-            return
+            return None
         chat_id = self._routes.get(channel_for(event), self._chat_id)
         try:
             payload = await self._get_json(
@@ -146,9 +157,11 @@ class TelegramSink(BaseCollector):
                 raise CollectorError(f"telegram: unexpected response {payload!r}")
             self._logger.info("telegram alert sent: %s %s -> chat %s",
                               event.priority.value, event.alert_type, chat_id)
+            return True
         except CollectorError as exc:
             self._logger.error("telegram delivery failed for %s %s: %s",
                                event.alert_type, event.token.address, exc)
+            return False
 
 
 class DiscordSink(BaseCollector):
@@ -178,9 +191,12 @@ class DiscordSink(BaseCollector):
         self._routes = routes or {}
         self._min_rank = _PRIORITY_RANK[min_priority]
 
-    async def send(self, event: AlertEvent) -> None:
+    external = True  # a real delivery target, not a local log (see dispatch)
+
+    async def send(self, event: AlertEvent) -> bool | None:
+        """True = delivered, False = FAILED, None = filtered (see TelegramSink)."""
         if _PRIORITY_RANK[event.priority] > self._min_rank:
-            return
+            return None
         url = self._routes.get(channel_for(event), self._webhook_url)
         try:
             # ?wait=true makes Discord return 200 + JSON instead of a bare 204.
@@ -190,9 +206,11 @@ class DiscordSink(BaseCollector):
             )
             self._logger.info("discord alert sent: %s %s", event.priority.value,
                               event.alert_type)
+            return True
         except CollectorError as exc:
             self._logger.error("discord delivery failed for %s %s: %s",
                                event.alert_type, event.token.address, exc)
+            return False
 
 
 def parse_routes(spec: str) -> dict[str, str]:

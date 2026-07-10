@@ -119,7 +119,11 @@ async def test_alerts_dispatched_and_journaled():
         assert any(e["kind"] == "alert" for e in journal)
 
 
-async def test_failed_cycle_backs_off_and_recovers():
+async def test_discovery_outage_isolated_cycle_still_completes():
+    """Bug-hunt: a GeckoTerminal outage used to abort the WHOLE cycle into
+    the outer backoff, stalling the launch funnel, watchlist rechecks, and
+    security-change detection whose providers were fine (Rule 9). Discovery
+    failure now yields an empty candidate list and the cycle completes."""
     pair = make_pair()
     with Storage(":memory:", now_func=lambda: NOW) as storage:
         scanner, sleeps = make_scanner(
@@ -127,6 +131,34 @@ async def test_failed_cycle_backs_off_and_recovers():
             {pair.base_token.address: clean_profile(pair.base_token)},
             fail_on_call=1,  # first discovery call raises
         )
+        history = await scanner.run(max_cycles=2)
+
+        # Both cycles completed; the outage cycle simply saw no pools.
+        assert len(history) == 2
+        assert history[0].pools_seen == 0 and history[0].analyzed == 0
+        assert history[1].analyzed == 1  # discovery recovered next cycle
+        assert 5.0 not in sleeps  # no error backoff was needed
+
+
+async def test_failed_cycle_backs_off_and_recovers():
+    """The outer backoff still guards non-provider cycle failures (Rule 7)."""
+    from meme_intelligence.core.errors import MemeIntelError
+
+    pair = make_pair()
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner, sleeps = make_scanner(
+            storage, [pair],
+            {pair.base_token.address: clean_profile(pair.base_token)})
+        real_run_cycle = scanner._run_cycle
+        calls = {"n": 0}
+
+        async def flaky_cycle(cycle):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise MemeIntelError("simulated storage failure")
+            return await real_run_cycle(cycle)
+
+        scanner._run_cycle = flaky_cycle
         history = await scanner.run(max_cycles=2)
 
         # cycle 1 failed (no stats), cycle 2 succeeded after backoff
@@ -176,6 +208,16 @@ class FakeMarketService:
     async def get_best_pair(self, address, chain=None):
         self.recheck_calls += 1
         return self.pairs_by_address.get(address)
+
+    async def get_token_pairs(self, address, chain=None):
+        # Mirrors the real service: raises when every provider is down,
+        # returns [] when the token genuinely has no pairs.
+        from meme_intelligence.core.errors import AllProvidersFailedError
+        self.recheck_calls += 1
+        if self._all_providers_down:
+            raise AllProvidersFailedError("get_token_pairs", {"dexscreener": Exception("down")})
+        pair = self.pairs_by_address.get(address)
+        return [pair] if pair is not None else []
 
     async def cross_check_liquidity(self, pair):
         self.verify_calls += 1

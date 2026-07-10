@@ -335,6 +335,11 @@ class PumpFunSettings:
     min_usd_market_cap: float = 10000.0       # promotion gate: evidence of real buying
     min_reply_count: int = 5                  # promotion gate: community interest exists
     max_last_trade_age_minutes: float = 30.0  # promotion gate: still actively trading
+    # A promoted (READY) candidate whose market confirmation never succeeds is
+    # dropped after this window — longer than pending_ttl_hours because market
+    # indexing can lag, but bounded so dead bonding-curve tokens can't retry
+    # forever, hammer providers, and exhaust max_pending slots (Rules 7/11).
+    ready_ttl_hours: float = 72.0
 
     @property
     def launchpad_list(self) -> list[str]:
@@ -344,7 +349,8 @@ class PumpFunSettings:
         for name in ("max_creator_buy_percent", "max_pending", "pending_ttl_hours",
                      "recheck_interval_seconds", "max_rechecks_per_cycle",
                      "min_market_cap_growth_ratio", "min_usd_market_cap",
-                     "min_reply_count", "max_last_trade_age_minutes"):
+                     "min_reply_count", "max_last_trade_age_minutes",
+                     "ready_ttl_hours"):
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
                 raise ConfigurationError(f"pumpfun setting '{name}' must be positive")
