@@ -768,12 +768,18 @@ class TelegramCommandListener(BaseCollector):
             sol_amount = float(args[1])
         except ValueError:
             return "The amount must be a number of SOL, e.g. 0.05"
+        guard = self._trading_guard()
+        if guard:
+            return guard
         return await self._do_buy(args[0], sol_amount)
 
     async def _cmd_dump(self, args: list[str]) -> str:
         address, error = self._validated_address(args, "/dump <address>")
         if error:
             return error
+        guard = self._trading_guard()
+        if guard:
+            return guard
         return await self._do_dump(address)
 
     # ---- Callback queries: 👍/👎 feedback + buy/dump buttons ----
@@ -827,7 +833,12 @@ class TelegramCommandListener(BaseCollector):
         return f"Feedback recorded: {'👍' if verdict == 'up' else '👎'} (advisory)"
 
     async def _handle_buy(self, data: str) -> str:
-        """Callback ``buy:<address>:<sol>`` — an alert's preset buy button."""
+        """Callback ``buy:<address>:<sol>`` — an alert's preset buy button.
+
+        Unlike the text commands (D4), a callback ack is a small popup, not a
+        chat message — a stale/disabled button must not spam the chat, so a
+        guard failure returns ack-only. A real trade replies with the full
+        result AND returns a short ack (the popup can't hold a Solscan link)."""
         parts = data.split(":", 2)
         if len(parts) != 3 or classify_address(parts[1]) is None:
             return "Invalid buy button."
@@ -835,14 +846,24 @@ class TelegramCommandListener(BaseCollector):
             sol_amount = float(parts[2])
         except ValueError:
             return "Invalid buy amount."
-        return await self._do_buy(parts[1], sol_amount)
+        guard = self._trading_guard()
+        if guard:
+            return guard
+        message = await self._do_buy(parts[1], sol_amount)
+        await self._reply(message)
+        return "Buy sent — details in chat."
 
     async def _handle_dump(self, data: str) -> str:
         """Callback ``dump:<address>`` — sell the whole position back to SOL."""
         address = data.split(":", 1)[1]
         if classify_address(address) is None:
             return "Invalid dump button."
-        return await self._do_dump(address)
+        guard = self._trading_guard()
+        if guard:
+            return guard
+        message = await self._do_dump(address)
+        await self._reply(message)
+        return "Dump sent — details in chat."
 
     def _trading_guard(self) -> str | None:
         """Common preconditions for any live/dry trade; a reason to refuse or None."""
@@ -853,9 +874,11 @@ class TelegramCommandListener(BaseCollector):
         return None
 
     async def _do_buy(self, address: str, sol_amount: float) -> str:
-        guard = self._trading_guard()
-        if guard:
-            return guard
+        """Runs the buy and returns the full result — no reply side effect.
+
+        Callers own delivery: the callback handlers reply once then return a
+        short ack; the /buy text command just returns this string, so
+        _handle_message's normal reply path sends it exactly once."""
         if sol_amount <= 0:
             return "Buy amount must be positive."
         from meme_intelligence.trading.execution import TradeIntent
@@ -865,18 +888,12 @@ class TelegramCommandListener(BaseCollector):
             token_address=token.address, chain=token.chain,
             sol_amount=sol_amount, requested_at=self._now(), source="telegram",
         )
-        message = await self._ctx.executor.execute_buy(intent)
-        await self._reply(message)
-        return "Buy sent — details in chat."
+        return await self._ctx.executor.execute_buy(intent)
 
     async def _do_dump(self, address: str) -> str:
-        guard = self._trading_guard()
-        if guard:
-            return guard
+        """Runs the dump and returns the full result — see :meth:`_do_buy`."""
         token = self._resolve_token(address)
-        message = await self._ctx.executor.execute_sell_all(token.address, token.chain)
-        await self._reply(message)
-        return "Dump sent — details in chat."
+        return await self._ctx.executor.execute_sell_all(token.address, token.chain)
 
     async def _answer_callback(self, callback_id, text: str) -> None:
         if not callback_id:

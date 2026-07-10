@@ -337,8 +337,11 @@ async def test_buy_button_on_routes_to_dry_run_when_not_live():
         listener, calls = make_listener(storage, settings=settings)  # DryRunExecutor
         await listener._handle_update(callback_update(f"buy:{SOL_ADDR}:0.05"))
         replies = sent_messages(calls)
-        assert replies and "DRY RUN — no real trade executed" in replies[0]["text"]
+        assert len(replies) == 1                    # exactly one chat message, not two
+        assert "DRY RUN — no real trade executed" in replies[0]["text"]
         assert "0.05 SOL" in replies[0]["text"]
+        acks = callback_answers(calls)
+        assert acks and "Buy sent" in acks[0]["text"]  # the button's own popup ack
         journal = storage.journal_entries(limit=10)
         assert journal and journal[0]["kind"] == "trade_intent"
 
@@ -366,10 +369,32 @@ async def test_buy_command_parses_amount():
     with Storage(":memory:", now_func=lambda: NOW) as storage:
         listener, calls = make_listener(storage, settings=settings)
         await listener._handle_update(message_update(f"/buy {SOL_ADDR} 0.1"))
-        assert "0.1 SOL" in sent_messages(calls)[0]["text"]
+        replies = sent_messages(calls)
+        assert len(replies) == 1                    # exactly one reply, not two (bug fix)
+        assert "0.1 SOL" in replies[0]["text"]
         # A bad amount is rejected, not executed.
         await listener._handle_update(message_update(f"/buy {SOL_ADDR} lots"))
         assert "must be a number" in sent_messages(calls)[-1]["text"]
+
+
+async def test_dump_command_sends_exactly_one_reply():
+    settings = make_settings(MEMEINTEL_EXECUTION_BUY_BUTTON_ENABLED="true")
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage, settings=settings)
+        await listener._handle_update(message_update(f"/dump {SOL_ADDR}"))
+        replies = sent_messages(calls)
+        assert len(replies) == 1
+        assert "DRY RUN" in replies[0]["text"]
+
+
+async def test_buy_command_guard_off_gives_single_reply_no_trade():
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage)  # buttons off by default
+        await listener._handle_update(message_update(f"/buy {SOL_ADDR} 0.1"))
+        replies = sent_messages(calls)
+        assert len(replies) == 1
+        assert "off" in replies[0]["text"].lower()
+        assert storage.journal_entries(limit=10) == []
 
 
 # ---- Poll loop mechanics ----
