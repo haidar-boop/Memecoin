@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import signal
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Awaitable, Callable
@@ -87,6 +88,38 @@ def _creator_outflow_usd(wallet_assessment, creator: str | None) -> float | None
         if candidate == wanted and net_usd is not None:
             return -net_usd if net_usd < 0 else 0.0
     return 0.0
+
+
+class _BoundedKeySet:
+    """Insertion-ordered membership set with a hard capacity (FIFO eviction).
+
+    The scanner's dedupe/verified caches grow one entry per token forever;
+    over weeks on the 1GB droplet with the pump.fun firehose that is
+    hundreds of thousands of dead keys (bug-hunt finding). Capping them
+    bounds memory; a token evicted after tens of thousands of newer tokens
+    is, in practice, one the scanner will never revisit, and re-adding it is
+    harmless (at worst one redundant re-analysis). Backed by a dict so it can
+    also carry a value (used by the AI-verified cache).
+    """
+
+    def __init__(self, capacity: int) -> None:
+        self._capacity = max(1, capacity)
+        self._data: "OrderedDict[tuple[str, str], object]" = OrderedDict()
+
+    def __contains__(self, key) -> bool:
+        return key in self._data
+
+    def add(self, key, value: object = True) -> None:
+        self._data[key] = value
+        self._data.move_to_end(key)
+        while len(self._data) > self._capacity:
+            self._data.popitem(last=False)  # evict oldest
+
+    def get(self, key, default=None):
+        return self._data.get(key, default)
+
+    def __len__(self) -> int:
+        return len(self._data)
 
 
 @dataclass
@@ -193,7 +226,7 @@ class ContinuousScanner:
         # discarded below the confidence floor / call failed) so the
         # strong-candidate veto holds on later rechecks too — otherwise a
         # token whose judgment was thrown away fired HIGH one cycle later.
-        self._ai_verified: dict[tuple[str, str], bool] = {}
+        self._ai_verified = _BoundedKeySet(settings.workflow.max_tracked_keys)
         # Self-learning mind layer (Section 10): additive and off by default.
         # Like the metered layers, the settings flag is authoritative — a
         # wired service with the flag off stays out of the loop (Rule 10/11).
@@ -209,7 +242,7 @@ class ContinuousScanner:
                                           ai_service=ai_service,
                                           now_func=now_func)
         self._rules = AutomationRules(settings.alerts, settings.alert_engine)
-        self._seen: set[tuple[str, str]] = set()
+        self._seen = _BoundedKeySet(settings.workflow.max_tracked_keys)
         self._stop = asyncio.Event()
 
     def request_stop(self) -> None:
@@ -433,7 +466,7 @@ class ContinuousScanner:
                     # the call failed) — recorded so the alert rules treat it
                     # as unconfirmed rather than as if AI never looked (Rule 8).
                     ai_inconclusive = enriched.ai_judgment is None
-                    self._ai_verified[verify_key] = ai_inconclusive
+                    self._ai_verified.add(verify_key, ai_inconclusive)
                     if (enriched is not result
                             and enriched.master.final_score < result.master.final_score):
                         self._logger.info(

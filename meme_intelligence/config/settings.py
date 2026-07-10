@@ -600,13 +600,16 @@ class WorkflowSettings:
     monitor_interval_seconds: float = 45.0    # continuous-scanner cycle cadence (fast layer)
     watchlist_recheck_cycles: int = 10        # re-check tracked tokens every N cycles
                                               # (secondary cadence, Part 15 Section 2)
+    max_tracked_keys: int = 50000             # cap on the scanner's in-memory dedupe /
+                                              # verified caches (bounds weeks-long memory)
 
     def __post_init__(self) -> None:
         if not self.networks.strip():
             raise ConfigurationError("workflow networks must be non-empty")
         for name in ("top_candidates", "watchlist_review_limit",
                      "risk_on_btc_change_percent", "risk_off_btc_drop_percent",
-                     "monitor_interval_seconds", "watchlist_recheck_cycles"):
+                     "monitor_interval_seconds", "watchlist_recheck_cycles",
+                     "max_tracked_keys"):
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
                 raise ConfigurationError(f"workflow setting '{name}' must be positive")

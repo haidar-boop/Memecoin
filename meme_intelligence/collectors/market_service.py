@@ -16,6 +16,7 @@ Cross-checking philosophy (Part 32, Section 7 / Part 32.5, Section 9):
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from typing import Sequence
 
 from meme_intelligence.core.errors import AllProvidersFailedError
@@ -44,7 +45,12 @@ class MarketDataService:
         # cross_check_liquidity can exclude the TRUE source (failover means
         # it is not always providers[0]) instead of guessing by position —
         # see cross_check_liquidity for why that guess was wrong.
-        self._last_provider_by_pair: dict[str, str] = {}
+        # Bounded LRU: one entry per pair ever fetched would grow forever in
+        # the weeks-long monitor process (bug-hunt finding). Only the most
+        # recent fetches are ever cross-checked, so an OrderedDict capped at a
+        # few thousand entries loses nothing in practice.
+        self._last_provider_by_pair: "OrderedDict[str, str]" = OrderedDict()
+        self._provider_cache_cap = 4096
         self._pool = ProviderPool(
             self._providers,
             failure_threshold=failure_threshold,
@@ -57,7 +63,11 @@ class MarketDataService:
         pairs, provider_name = await self._pool.call_with_provider(
             "get_token_pairs", token_address, chain=chain)
         for pair in pairs:
-            self._last_provider_by_pair[pair.pair_address.lower()] = provider_name
+            key = pair.pair_address.lower()
+            self._last_provider_by_pair[key] = provider_name
+            self._last_provider_by_pair.move_to_end(key)
+        while len(self._last_provider_by_pair) > self._provider_cache_cap:
+            self._last_provider_by_pair.popitem(last=False)
         return pairs
 
     async def get_best_pair(self, token_address: str, chain: str | None = None) -> DexPair | None:

@@ -167,6 +167,24 @@ async def test_failed_cycle_backs_off_and_recovers():
         assert sleeps and sleeps[0] == 5.0  # error backoff, not the normal interval
 
 
+async def test_seen_cache_is_bounded():
+    """Bug-hunt: _seen / _ai_verified grew one entry per token forever. They
+    are now capacity-bounded (FIFO eviction) so weeks of scanning can't leak
+    memory on the 1GB droplet."""
+    from meme_intelligence.workflow.controller import _BoundedKeySet
+
+    s = _BoundedKeySet(capacity=3)
+    for i in range(10):
+        s.add((f"c{i}", "solana"))
+    assert len(s) == 3
+    assert ("c9", "solana") in s          # newest kept
+    assert ("c0", "solana") not in s      # oldest evicted
+    # Value-carrying use (the AI-verified cache) round-trips within capacity.
+    s.add(("v", "solana"), "inconclusive")
+    assert s.get(("v", "solana")) == "inconclusive"
+    assert s.get(("missing", "solana"), False) is False
+
+
 async def test_request_stop_ends_loop():
     pair = make_pair()
     with Storage(":memory:", now_func=lambda: NOW) as storage:

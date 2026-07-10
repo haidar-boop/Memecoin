@@ -589,6 +589,15 @@ class NotificationEngine:
             return (event.token.chain, event.token.address.lower(),
                     event.alert_type, event.priority.value)
 
+        # Evict cooldown entries that have expired: once older than the
+        # cooldown they can never suppress anything, so keeping them is pure
+        # memory growth in the weeks-long monitor process (bug-hunt finding).
+        # A just-expired key is treated as novel again anyway, so pruning is
+        # behaviour-preserving.
+        if len(self._last_sent) > 256:
+            self._last_sent = {k: t for k, t in self._last_sent.items()
+                               if now - t < self._cooldown}
+
         ranked = sorted(
             events,
             key=lambda e: rank_alert(e, is_novel=key_of(e) not in self._last_sent),
