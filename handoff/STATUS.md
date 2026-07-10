@@ -689,6 +689,40 @@ The learning layer gets a vote — once it has EARNED it (ROADMAP item 3).
 
 ---
 
+## New (2026-07-10, Project 6 — operator-requested): live buy/dump from Telegram
+
+Turns the Project 2 dry-run buy scaffold into real, operator-initiated
+execution. NEVER auto-trades; a trade only happens on a button/command.
+
+- `trading/execution.py` — `LiveExecutor` (alongside `DryRunExecutor`):
+  buy (SOL→token) and dump (sell 100% token→SOL) via Jupiter quote → build
+  swap tx → sign with `solders` → submit via Helius RPC → confirm. Per-trade
+  cap, live balance re-check, one-trade-at-a-time lock, graceful no-route/
+  on-chain-error/timeout handling, wallet pubkey scrubbed from errors.
+- `trading/solana_rpc.py` — `SolanaRpcClient` (getBalance,
+  getTokenAccountsByOwner, sendTransaction, getSignatureStatuses) over the
+  operator's Helius RPC.
+- `collectors/jupiter_data.py` — `JupiterClient.get_quote` +
+  `build_swap_transaction` (POST /swap/v1/swap, dynamic slippage + compute
+  limit, capped priority fee).
+- Telegram: `/buy <address> <sol>`, `/dump <address>`, and one-tap
+  **Buy 0.05◎ / 0.1◎ / 💥 Dump all** buttons on every alert. `/status` shows
+  `trading off | dry-run | LIVE`.
+- Config: `ExecutionSettings` (`MEMEINTEL_EXECUTION_*`): `buy_button_enabled`
+  (show buttons), `live_enabled` (sign+send; default OFF), `max_buy_sol`,
+  `buy_presets_sol`, slippage/priority-fee/confirm-timeout; plus the trading
+  wallet key `MEMEINTEL_EXECUTION_PRIVATE_KEY` (dedicated low-balance wallet,
+  env-only, never logged — Rule 16).
+- `solders` added to requirements (imported lazily; scanner runs without it
+  when live trading is off).
+- Ships OFF by default. Operator setup + safety in OPERATIONS.md; custody
+  rationale in DECISIONS_LOG (2026-07-10, Project 6).
+- Tests: `tests/test_execution.py` (new — buy/dump happy paths with a
+  throwaway keypair, cap/balance/no-route/on-chain-error/timeout guards, RPC
+  parsing) + updated Project-2 button/settings tests.
+
+---
+
 ## What's NOT built yet
 
 The **web/monitoring dashboard** (Part 21 §10 / 22 / 27 §12 / 28 §11) and

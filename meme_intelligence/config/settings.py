@@ -1166,26 +1166,74 @@ class TelegramCommandSettings:
 
 @dataclass(frozen=True)
 class ExecutionSettings:
-    """Buy-button scaffold (Project 2) — DRY RUN ONLY, hidden by default.
+    """Operator-initiated manual buy/dump from Telegram (Project 6).
 
-    The system's standing doctrine is decision-support / never-auto-trades.
-    A button pressed by the operator is a manual decision, but real
-    execution would still require holding a hot wallet key on the droplet —
-    a security decision the owner must make explicitly (see DECISIONS_LOG,
-    2026-07-10). Until then there is NO live executor:
-    ``buy_button_enabled`` only reveals a button that routes to
-    :class:`~meme_intelligence.trading.execution.DryRunExecutor`, and
-    ``dry_run`` is effectively always true regardless of its value.
+    HARD SAFETY MODEL. The system never AUTO-trades; a buy or dump is only
+    ever a button the OPERATOR taps. Even so, real execution means the bot
+    signs Solana transactions, which requires the trading wallet's private
+    key on the droplet — so:
+
+    * ``live_enabled`` gates real execution and defaults OFF. With it off (or
+      no key configured) every buy/dump routes to the dry-run executor,
+      which signs nothing.
+    * The trading key is a DEDICATED, low-balance wallet, never the
+      operator's main wallet, read only from ``MEMEINTEL_EXECUTION_PRIVATE_KEY``
+      (never in code, git, or logs — Rule 16). The real hard cap is how
+      little the operator funds it with.
+    * ``max_buy_sol`` is a per-trade ceiling; a single buy above it is
+      refused. The wallet balance is the ultimate cap (the bot cannot spend
+      SOL it does not hold).
+
+    See DECISIONS_LOG (2026-07-10, Project 6).
     """
 
-    buy_button_enabled: bool = False  # show the [Buy (dry run)] button on alerts
-    dry_run: bool = True              # no live executor exists; false has no effect
-    max_buy_sol: float = 0.1          # SOL amount a dry-run buy intent records
+    buy_button_enabled: bool = False  # show Buy/Dump buttons on Telegram alerts
+    live_enabled: bool = False        # actually sign+send trades (else dry-run)
+    max_buy_sol: float = 0.15         # per-trade SOL ceiling (~$50 CAD at build time)
+    slippage_bps: int = 500           # base slippage for trade quotes (dynamic on top)
+    priority_fee_max_lamports: int = 1_000_000   # cap on priority fee per trade (0.001 SOL)
+    confirm_timeout_seconds: float = 45.0        # how long to wait for on-chain confirmation
+    # Preset one-tap buy sizes (SOL) offered as buttons on alerts.
+    buy_presets_sol: str = "0.05,0.1"
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.max_buy_sol) or self.max_buy_sol <= 0:
             raise ConfigurationError(
                 f"execution max_buy_sol must be positive, got {self.max_buy_sol}")
+        if not (0 < self.slippage_bps <= 10000):
+            raise ConfigurationError(
+                f"execution slippage_bps must be within (0, 10000], got {self.slippage_bps}")
+        if self.priority_fee_max_lamports < 0:
+            raise ConfigurationError(
+                "execution priority_fee_max_lamports must be >= 0, got "
+                f"{self.priority_fee_max_lamports}")
+        if not math.isfinite(self.confirm_timeout_seconds) or self.confirm_timeout_seconds <= 0:
+            raise ConfigurationError(
+                "execution confirm_timeout_seconds must be positive, got "
+                f"{self.confirm_timeout_seconds}")
+        for preset in self.buy_preset_list():
+            if preset > self.max_buy_sol:
+                raise ConfigurationError(
+                    f"execution buy preset {preset} SOL exceeds max_buy_sol "
+                    f"{self.max_buy_sol}")
+
+    def buy_preset_list(self) -> tuple[float, ...]:
+        """Parse ``buy_presets_sol`` into positive SOL amounts, ordered."""
+        presets: list[float] = []
+        for part in self.buy_presets_sol.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                value = float(part)
+            except ValueError as exc:
+                raise ConfigurationError(
+                    f"execution buy_presets_sol has a non-number: {part!r}") from exc
+            if value <= 0:
+                raise ConfigurationError(
+                    f"execution buy preset must be positive, got {value}")
+            presets.append(value)
+        return tuple(presets)
 
 
 @dataclass(frozen=True)
@@ -1308,6 +1356,10 @@ class Settings:
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     discord_webhook_url: str = ""
+    # Trading wallet secret (Project 6): base58 private key of the DEDICATED
+    # low-balance trading wallet. Empty = no live executor (dry-run only).
+    # Read from env only; never logged or committed (Rule 16).
+    trading_private_key: str = ""
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Settings":
@@ -1366,6 +1418,7 @@ class Settings:
             telegram_bot_token=env.get(f"{_ENV_PREFIX}_TELEGRAM_BOT_TOKEN", ""),
             telegram_chat_id=env.get(f"{_ENV_PREFIX}_TELEGRAM_CHAT_ID", ""),
             discord_webhook_url=env.get(f"{_ENV_PREFIX}_DISCORD_WEBHOOK_URL", ""),
+            trading_private_key=env.get(f"{_ENV_PREFIX}_EXECUTION_PRIVATE_KEY", ""),
         )
 
 

@@ -2,6 +2,12 @@
 aiohttp>=3.9
 anthropic>=0.80
 
+# Live trading execution (meme_intelligence/trading/) — signs Solana swap
+# transactions for operator-initiated buy/dump. Only imported when live
+# trading is enabled (MEMEINTEL_EXECUTION_LIVE_ENABLED=true); the scanner
+# runs fine without it.
+solders>=0.21
+
 # Self-learning "mind" layer (meme_intelligence/learning/) — analog pattern
 # recognition, continuous learning, and rug detection. The core scanner runs
 # without these; they are imported only when the learning layer is enabled

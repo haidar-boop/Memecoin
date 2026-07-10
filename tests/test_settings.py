@@ -238,10 +238,27 @@ def test_execution_settings_validation_and_defaults():
     from meme_intelligence.config.settings import ExecutionSettings
 
     defaults = ExecutionSettings()
-    assert defaults.buy_button_enabled is False   # scaffold ships hidden
-    assert defaults.dry_run is True
+    assert defaults.buy_button_enabled is False   # buttons hidden by default
+    assert defaults.live_enabled is False         # live trading off by default
+    assert defaults.buy_preset_list() == (0.05, 0.1)
     with pytest.raises(ConfigurationError, match="max_buy_sol"):
         ExecutionSettings(max_buy_sol=0.0)
+    with pytest.raises(ConfigurationError, match="slippage_bps"):
+        ExecutionSettings(slippage_bps=0)
+    # A preset above the per-trade cap is rejected (can't offer an illegal button).
+    with pytest.raises(ConfigurationError, match="exceeds max_buy_sol"):
+        ExecutionSettings(max_buy_sol=0.1, buy_presets_sol="0.05,0.5")
+
+
+def test_execution_live_env_overrides():
+    settings = Settings.from_env(env={
+        "MEMEINTEL_EXECUTION_LIVE_ENABLED": "true",
+        "MEMEINTEL_EXECUTION_PRIVATE_KEY": "somebase58key",
+        "MEMEINTEL_EXECUTION_MAX_BUY_SOL": "0.2",
+    })
+    assert settings.execution.live_enabled is True
+    assert settings.trading_private_key == "somebase58key"
+    assert settings.execution.max_buy_sol == 0.2
 
 
 def test_project2_env_overrides_load():

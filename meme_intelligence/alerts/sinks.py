@@ -116,12 +116,16 @@ def copy_keyboard(address: str) -> dict | None:
     return {"inline_keyboard": [[button]]} if button else None
 
 
-def feedback_keyboard(address: str, *, include_buy: bool = False) -> dict | None:
-    """Inline 👍/👎 feedback buttons for one alert (Project 2), plus a
-    one-tap copy-address button, plus the optional [Buy (dry run)] button
-    when the execution scaffold's flag is on. Returns ``None`` when no
-    valid keyboard can be built."""
-    if not address or len(f"fb:1:{address}".encode()) > _CALLBACK_DATA_MAX_BYTES:
+def _fits(callback_data: str) -> bool:
+    return len(callback_data.encode()) <= _CALLBACK_DATA_MAX_BYTES
+
+
+def feedback_keyboard(address: str, *, buy_presets: tuple[float, ...] = ()) -> dict | None:
+    """Inline buttons for one alert: 👍/👎 feedback, a one-tap copy-address
+    button, and — when ``buy_presets`` is non-empty (trading enabled) — a row
+    of one-tap buy buttons plus a Dump button. Returns ``None`` when no valid
+    keyboard can be built."""
+    if not address or not _fits(f"fb:1:{address}"):
         return None
     keyboard = [[
         {"text": "👍", "callback_data": f"fb:1:{address}"},
@@ -130,8 +134,14 @@ def feedback_keyboard(address: str, *, include_buy: bool = False) -> dict | None
     copy_button = copy_address_button(address)
     if copy_button is not None:
         keyboard.append([copy_button])
-    if include_buy and len(f"buy:{address}".encode()) <= _CALLBACK_DATA_MAX_BYTES:
-        keyboard.append([{"text": "Buy (dry run)", "callback_data": f"buy:{address}"}])
+    buy_row = [
+        {"text": f"Buy {amount:g}◎", "callback_data": f"buy:{address}:{amount:g}"}
+        for amount in buy_presets if _fits(f"buy:{address}:{amount:g}")
+    ]
+    if buy_row:
+        keyboard.append(buy_row)
+    if buy_presets and _fits(f"dump:{address}"):
+        keyboard.append([{"text": "💥 Dump all", "callback_data": f"dump:{address}"}])
     return {"inline_keyboard": keyboard}
 
 
@@ -185,7 +195,7 @@ class TelegramSink(BaseCollector):
         *,
         routes: dict[str, str] | None = None,
         min_priority: AlertPriority = AlertPriority.MEDIUM,
-        buy_button_enabled: bool = False,  # Project 2 dry-run scaffold; off by default
+        buy_presets_sol: tuple[float, ...] = (),  # non-empty -> show Buy/Dump buttons
         **kwargs,
     ) -> None:
         kwargs.setdefault("name", "telegram")
@@ -196,7 +206,7 @@ class TelegramSink(BaseCollector):
         self._chat_id = chat_id
         self._routes = routes or {}
         self._min_rank = _PRIORITY_RANK[min_priority]
-        self._buy_button_enabled = buy_button_enabled
+        self._buy_presets = tuple(buy_presets_sol)
 
     async def send(self, event: AlertEvent) -> bool | None:
         """True = delivered, False = FAILED, None = filtered by min-priority.
@@ -218,8 +228,7 @@ class TelegramSink(BaseCollector):
         # buy button only when the operator flipped the execution flag). The
         # sink and the command listener are separate objects — feedback flows
         # back through the listener and lands in storage; no shared state.
-        markup = feedback_keyboard(event.token.address,
-                                   include_buy=self._buy_button_enabled)
+        markup = feedback_keyboard(event.token.address, buy_presets=self._buy_presets)
         if markup is not None:
             json_body["reply_markup"] = markup
         try:

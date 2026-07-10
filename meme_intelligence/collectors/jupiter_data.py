@@ -89,6 +89,53 @@ class JupiterClient(BaseCollector):
         )
         return None
 
+    async def get_quote(self, input_mint: str, output_mint: str, amount: int,
+                        slippage_bps: int) -> dict[str, Any] | None:
+        """Public quote for one swap direction (used by the live executor).
+
+        Returns the full quote response dict, or ``None`` when Jupiter reports
+        no route exists (never confused with an API failure)."""
+        return await self._quote(input_mint, output_mint, amount, slippage_bps)
+
+    async def build_swap_transaction(
+        self, quote_response: dict, user_public_key: str, *,
+        priority_fee_max_lamports: int = 1_000_000,
+    ) -> str:
+        """POST /swap/v1/swap: turn a quote into a base64 transaction to sign.
+
+        Uses dynamic compute-unit limit and dynamic slippage (Jupiter tunes
+        both for landing/protection), caps the priority fee, and wraps/unwraps
+        SOL automatically. The returned transaction is unsigned — the caller
+        signs it with the trading wallet and submits it (Project 6)."""
+        if not user_public_key:
+            raise ValueError("build_swap_transaction requires a user public key")
+        payload = await self._get_json(
+            "swap/v1/swap",
+            headers=self._headers,
+            json_body={
+                "quoteResponse": quote_response,
+                "userPublicKey": user_public_key,
+                "wrapAndUnwrapSol": True,
+                "dynamicComputeUnitLimit": True,
+                "dynamicSlippage": True,
+                "prioritizationFeeLamports": {
+                    "priorityLevelWithMaxLamports": {
+                        "maxLamports": int(priority_fee_max_lamports),
+                        "priorityLevel": "veryHigh",
+                    }
+                },
+            },
+        )
+        if not isinstance(payload, dict):
+            raise CollectorError(f"{self.name}: expected JSON object from swap endpoint")
+        if payload.get("simulationError"):
+            raise CollectorError(
+                f"{self.name}: swap simulation failed: {payload['simulationError']}")
+        swap_tx = payload.get("swapTransaction")
+        if not isinstance(swap_tx, str) or not swap_tx:
+            raise CollectorError(f"{self.name}: swap endpoint returned no transaction")
+        return swap_tx
+
     async def check_round_trip_liquidity(
         self,
         mint: str,

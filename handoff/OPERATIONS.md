@@ -118,6 +118,48 @@ address** button. The `[Buy (dry run)]` button appears only when
 the intent — there is no live trade executor, deliberately (DECISIONS_LOG
 2026-07-10).
 
+## Live buy / dump from Telegram (Project 6 — real money, arm carefully)
+
+The bot can BUY and DUMP straight from Telegram. It never auto-trades — a
+trade only ever happens when the operator taps a button or sends a command.
+Setup is deliberately manual because it involves a hot wallet.
+
+**One-time setup:**
+1. In Phantom: ☰ → Add / Connect Wallet → **Create new account**. This is a
+   DEDICATED trading wallet. Do NOT use your main account.
+2. Fund it with only what you're willing to risk (agreed cap: ~$50 CAD).
+   That amount is the real hard cap — a server compromise can only touch
+   this wallet.
+3. Export that account's **private key** (Phantom: account → Settings →
+   Export Private Key). Copy it.
+4. On the droplet, put it in `.env` — **never** paste it anywhere else, never
+   into chat, never into git:
+   ```
+   nano ~/meme-intelligence/.env
+   # add these lines:
+   MEMEINTEL_EXECUTION_BUY_BUTTON_ENABLED=true
+   MEMEINTEL_EXECUTION_LIVE_ENABLED=true
+   MEMEINTEL_EXECUTION_PRIVATE_KEY=<the base58 key you exported>
+   MEMEINTEL_EXECUTION_MAX_BUY_SOL=0.15
+   ```
+5. `sudo systemctl restart meme-intelligence`. The startup log prints
+   `LIVE TRADING ARMED — trading wallet <address>`; `/status` shows
+   `trading LIVE`.
+
+**Using it:**
+- Every alert now carries one-tap **Buy 0.05◎ / Buy 0.1◎** buttons and a
+  **💥 Dump all** button.
+- Commands: `/buy <address> <sol>` (any amount up to the cap) and `/dump
+  <address>` (sells your whole position in that token back to SOL).
+- Each buy re-checks the wallet balance and the per-trade cap first; a buy
+  over the cap or beyond the balance is refused, nothing spent. Replies carry
+  a Solscan link to the transaction.
+
+**First live test:** buy a tiny amount (e.g. `/buy <a well-known token> 0.01`)
+and confirm it shows in the Phantom trading account before trusting it on a
+fresh meme coin. To disable instantly: set `MEMEINTEL_EXECUTION_LIVE_ENABLED=false`
+(or `BUY_BUTTON_ENABLED=false` to hide the buttons) and restart.
+
 ## Mind-layer P(rug) veto (Project 3 — enable only when EARNED)
 
 The learning layer can block HIGH opportunity alerts with its learned

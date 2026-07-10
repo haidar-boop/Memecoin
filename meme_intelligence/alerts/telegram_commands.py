@@ -90,6 +90,8 @@ _HELP_TEXT = "\n".join([
     "/mind - learning-layer report card + feedback tallies",
     "/mute <address> - silence ALL alerts for a token",
     "/unmute <address> - restore alerts for a token",
+    "/buy <address> <sol> - buy that many SOL of a token (live if enabled)",
+    "/dump <address> - sell your full position in a token back to SOL",
     "/help - this list",
 ])
 
@@ -211,6 +213,9 @@ class TelegramCommandListener(BaseCollector):
             "/mind": self._cmd_mind,
             "/mute": self._cmd_mute,
             "/unmute": self._cmd_unmute,
+            "/buy": self._cmd_buy,
+            "/dump": self._cmd_dump,
+            "/sell": self._cmd_dump,
         }
 
     # ---- Lifecycle (mirrors PumpPortalClient) ----
@@ -457,11 +462,17 @@ class TelegramCommandListener(BaseCollector):
         def onoff(key: str) -> str:
             return "ON" if layers.get(key) else "off"
 
+        if not layers.get("buy_button"):
+            trading = "off"
+        elif layers.get("trading_live"):
+            trading = "LIVE"
+        else:
+            trading = "dry-run"
         lines.append(
             f"layers: wallet intel {onoff('wallet_intel')} | AI {onoff('ai')} | "
             f"learning {onoff('learning')} | mind veto {onoff('learning_veto')} | "
             f"pump.fun {onoff('pumpfun')} | jupiter probe {onoff('jupiter_probe')} | "
-            f"buy button {'DRY-RUN' if layers.get('buy_button') else 'off'}")
+            f"trading {trading}")
         db = snap.get("db") or {}
         lines.append(
             f"db: {db.get('tokens', '?')} tokens, {db.get('alerts', '?')} alerts, "
@@ -746,7 +757,26 @@ class TelegramCommandListener(BaseCollector):
         return ("Unmuted — alerts restored." if was_muted
                 else "That token was not muted.")
 
-    # ---- Callback queries: 👍/👎 feedback + buy button (D5/D7) ----
+    # ---- Trade commands (Project 6) ----
+
+    async def _cmd_buy(self, args: list[str]) -> str:
+        if len(args) < 2:
+            return "Usage: /buy <address> <sol_amount>   e.g. /buy <mint> 0.05"
+        if classify_address(args[0]) is None:
+            return _BAD_ADDRESS_REPLY
+        try:
+            sol_amount = float(args[1])
+        except ValueError:
+            return "The amount must be a number of SOL, e.g. 0.05"
+        return await self._do_buy(args[0], sol_amount)
+
+    async def _cmd_dump(self, args: list[str]) -> str:
+        address, error = self._validated_address(args, "/dump <address>")
+        if error:
+            return error
+        return await self._do_dump(address)
+
+    # ---- Callback queries: 👍/👎 feedback + buy/dump buttons ----
 
     async def _handle_callback(self, callback: dict) -> None:
         callback_id = callback.get("id")
@@ -767,6 +797,8 @@ class TelegramCommandListener(BaseCollector):
             return await self._handle_feedback(data)
         if data.startswith("buy:"):
             return await self._handle_buy(data)
+        if data.startswith("dump:"):
+            return await self._handle_dump(data)
         return "Unknown button."
 
     async def _handle_feedback(self, data: str) -> str:
@@ -795,30 +827,56 @@ class TelegramCommandListener(BaseCollector):
         return f"Feedback recorded: {'👍' if verdict == 'up' else '👎'} (advisory)"
 
     async def _handle_buy(self, data: str) -> str:
+        """Callback ``buy:<address>:<sol>`` — an alert's preset buy button."""
+        parts = data.split(":", 2)
+        if len(parts) != 3 or classify_address(parts[1]) is None:
+            return "Invalid buy button."
+        try:
+            sol_amount = float(parts[2])
+        except ValueError:
+            return "Invalid buy amount."
+        return await self._do_buy(parts[1], sol_amount)
+
+    async def _handle_dump(self, data: str) -> str:
+        """Callback ``dump:<address>`` — sell the whole position back to SOL."""
         address = data.split(":", 1)[1]
         if classify_address(address) is None:
-            return "Invalid token address."
-        execution = self._ctx.settings.execution
-        if not execution.buy_button_enabled:
-            return "Buy is not enabled."
+            return "Invalid dump button."
+        return await self._do_dump(address)
+
+    def _trading_guard(self) -> str | None:
+        """Common preconditions for any live/dry trade; a reason to refuse or None."""
+        if not self._ctx.settings.execution.buy_button_enabled:
+            return "Trading buttons are off (MEMEINTEL_EXECUTION_BUY_BUTTON_ENABLED)."
         if self._ctx.executor is None:
-            return "Buy is not wired up in this process."
+            return "Trading is not wired up in this process."
+        return None
+
+    async def _do_buy(self, address: str, sol_amount: float) -> str:
+        guard = self._trading_guard()
+        if guard:
+            return guard
+        if sol_amount <= 0:
+            return "Buy amount must be positive."
         from meme_intelligence.trading.execution import TradeIntent
 
         token = self._resolve_token(address)
         intent = TradeIntent(
             token_address=token.address, chain=token.chain,
-            sol_amount=execution.max_buy_sol, requested_at=self._now(),
-            source="telegram",
+            sol_amount=sol_amount, requested_at=self._now(), source="telegram",
         )
         message = await self._ctx.executor.execute_buy(intent)
-        if not execution.dry_run:
-            # Honesty over configuration: there IS no live executor, so the
-            # flag cannot change behavior (see trading/execution.py docstring).
-            message += (" Note: MEMEINTEL_EXECUTION_DRY_RUN=false has no effect — "
-                        "no live executor exists.")
         await self._reply(message)
-        return "Dry run only — details sent."
+        return "Buy sent — details in chat."
+
+    async def _do_dump(self, address: str) -> str:
+        guard = self._trading_guard()
+        if guard:
+            return guard
+        token = self._resolve_token(address)
+        message = await self._ctx.executor.execute_sell_all(token.address, token.chain)
+        await self._reply(message)
+        return "Dump sent — details in chat."
 
     async def _answer_callback(self, callback_id, text: str) -> None:
         if not callback_id:

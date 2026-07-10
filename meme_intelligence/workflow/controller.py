@@ -321,6 +321,7 @@ class ContinuousScanner:
             "pumpfun": self._launch_monitor is not None,
             "jupiter_probe": jupiter_client is not None and settings.liquidity_probe.enabled,
             "buy_button": settings.execution.buy_button_enabled,
+            "trading_live": settings.execution.live_enabled,
         }
         self._pipeline = ResearchPipeline(settings, goplus_client,
                                           community_client=community_client,

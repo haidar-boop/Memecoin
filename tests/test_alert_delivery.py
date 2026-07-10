@@ -458,13 +458,25 @@ def test_feedback_keyboard_has_thumbs_and_copy_but_no_buy_by_default():
     assert all("buy:" not in str(row) for row in rows)
 
 
-def test_feedback_keyboard_adds_buy_only_when_asked():
+def test_feedback_keyboard_adds_buy_and_dump_when_presets_given():
     from meme_intelligence.alerts.sinks import feedback_keyboard
 
     addr = "So1MemeToken111111111111111111111111111111"
-    rows = feedback_keyboard(addr, include_buy=True)["inline_keyboard"]
-    assert rows[-1][0]["callback_data"] == f"buy:{addr}"
-    assert rows[-1][0]["text"] == "Buy (dry run)"
+    rows = feedback_keyboard(addr, buy_presets=(0.05, 0.1))["inline_keyboard"]
+    flat = [b for row in rows for b in row]
+    buys = [b for b in flat if b.get("callback_data", "").startswith("buy:")]
+    assert [b["callback_data"] for b in buys] == [f"buy:{addr}:0.05", f"buy:{addr}:0.1"]
+    dumps = [b for b in flat if b.get("callback_data") == f"dump:{addr}"]
+    assert dumps and dumps[0]["text"] == "💥 Dump all"
+
+
+def test_feedback_keyboard_no_trade_buttons_without_presets():
+    from meme_intelligence.alerts.sinks import feedback_keyboard
+
+    addr = "So1MemeToken111111111111111111111111111111"
+    rows = feedback_keyboard(addr)["inline_keyboard"]
+    flat = str(rows)
+    assert "buy:" not in flat and "dump:" not in flat
 
 
 def test_feedback_keyboard_refuses_oversized_address():
@@ -499,8 +511,8 @@ async def test_telegram_alert_carries_feedback_keyboard(monkeypatch):
     assert "fb:1:" in data and "copy_text" in data and "buy:" not in data
 
 
-async def test_telegram_alert_buy_button_requires_flag(monkeypatch):
-    sink = make_telegram(buy_button_enabled=True)
+async def test_telegram_alert_shows_trade_buttons_with_presets(monkeypatch):
+    sink = make_telegram(buy_presets_sol=(0.05, 0.1))
     calls = []
 
     async def fake_get_json(path, params=None, *, cache_key=None, cache_ttl=None,
@@ -510,4 +522,5 @@ async def test_telegram_alert_buy_button_requires_flag(monkeypatch):
 
     monkeypatch.setattr(sink, "_get_json", fake_get_json)
     await sink.send(make_event())
-    assert "buy:" in str(calls[0]["reply_markup"])
+    data = str(calls[0]["reply_markup"])
+    assert "buy:" in data and "dump:" in data

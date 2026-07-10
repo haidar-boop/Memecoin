@@ -854,6 +854,53 @@ commands and double-record advisory feedback / re-journal dry-run intents.
 (short poll) before processing — a redeploy is now a no-op for input, and
 stale commands never re-fire (correct for a control bot).
 
+## 2026-07-10 — Project 6: live buy/dump from Telegram (operator-requested)
+
+The operator asked to buy and dump straight from Telegram. This crosses the
+line the project held from day one ("never AUTO-trades / decision-support
+only"), so the boundaries were drawn deliberately and confirmed with him:
+
+### The line that still holds
+
+The system still never AUTO-trades. Nothing initiates a trade without an
+explicit operator button/command. What changed is that an operator-tapped
+buy/dump can now actually execute, where before it only journaled a dry-run
+intent.
+
+### Custody: a dedicated hot wallet, never the main one
+
+For a buy to land in the operator's Phantom wallet, a Phantom-visible wallet
+must sign it. Fully-automatic execution (no per-trade approval) therefore
+requires the signing key on the droplet. Decision (confirmed with the
+operator): use a DEDICATED, freshly-created Phantom account funded with only
+pocket money, imported into Phantom so he can watch/withdraw it, and NEVER
+his main wallet. The blast radius of a server compromise is bounded to
+whatever he funds that one wallet with. He chose a ~$50 CAD ceiling.
+
+The key is read only from ``MEMEINTEL_EXECUTION_PRIVATE_KEY`` (env/.env on
+the droplet), never in code, git, logs, or chat (Rule 16); the RPC/api keys
+in the trading path are redacted from logs, and error text is scrubbed of
+the wallet pubkey.
+
+### Guardrails
+
+* ``live_enabled`` defaults OFF; with it off (or no key) every buy/dump
+  routes to the dry-run executor (signs nothing).
+* Per-trade cap ``max_buy_sol``; a single buy above it is refused before any
+  network call. The wallet balance is the ultimate cap (can't spend what it
+  doesn't hold), re-checked live before each buy.
+* One trade at a time (asyncio lock). No route / on-chain error / timeout are
+  all reported to the operator, never crash the listener.
+* Execution is Solana-only, via Jupiter (quote -> build swap tx -> sign with
+  solders -> submit via Helius RPC -> confirm). ``solders`` is imported lazily
+  so the scanner runs without it when live trading is off.
+
+### Dump = sell 100%
+
+The "dump button" sells the wallet's entire balance of that token back to
+SOL (the panic-exit the operator asked for), quoting the full position and
+refusing gracefully if no sell route exists right now.
+
 ## Notable implementation choices (Rule 19)
 
 - **Python 3.11 + asyncio** over Node.js (both allowed by spec): the

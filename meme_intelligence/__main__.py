@@ -33,7 +33,6 @@ from meme_intelligence.alerts.telegram_commands import (
     CommandContext,
     TelegramCommandListener,
 )
-from meme_intelligence.trading.execution import DryRunExecutor
 from meme_intelligence.analyzers.onchain_analyzer import OnChainAnalyzer, derive_onchain_profile
 from meme_intelligence.analyzers.security_analyzer import SecurityAnalyzer
 from meme_intelligence.analyzers.wallet_intelligence import sightings_from_assessment
@@ -180,6 +179,44 @@ def build_learning_service(settings: Settings):
     return LearningService(settings)
 
 
+def build_executor(settings: Settings, storage, jupiter_client):
+    """Pick the trade executor (Project 6): live when explicitly enabled AND a
+    trading key + Jupiter client + Helius RPC are all present; dry-run
+    otherwise. Returns (executor, rpc_client_or_None) — the RPC client is a
+    BaseCollector the caller must close."""
+    from meme_intelligence.trading.execution import DryRunExecutor
+
+    ex = settings.execution
+    if not (ex.live_enabled and settings.trading_private_key):
+        return DryRunExecutor(storage), None
+    if jupiter_client is None or not settings.helius_api_key:
+        print("Note: MEMEINTEL_EXECUTION_LIVE_ENABLED is on but a trading key, "
+              "Jupiter key, or Helius key is missing — buy/dump run in DRY RUN.")
+        return DryRunExecutor(storage), None
+    from meme_intelligence.trading.execution import LiveExecutor
+    from meme_intelligence.trading.solana_rpc import SolanaRpcClient
+
+    rpc = SolanaRpcClient(
+        settings.helius_api_key, rpc_url=settings.providers.helius_rpc_url,
+        rate_limiter=RateLimiter.per_minute(settings.providers.helius_requests_per_minute),
+        **_shared_collector_kwargs(settings),
+    )
+    try:
+        executor = LiveExecutor(
+            storage, jupiter_client=jupiter_client, rpc_client=rpc,
+            private_key_base58=settings.trading_private_key,
+            max_buy_sol=ex.max_buy_sol, slippage_bps=ex.slippage_bps,
+            priority_fee_max_lamports=ex.priority_fee_max_lamports,
+            confirm_timeout_seconds=ex.confirm_timeout_seconds,
+        )
+    except ValueError as exc:
+        print(f"Note: live trading disabled — {exc}. Buy/dump run in DRY RUN.")
+        return DryRunExecutor(storage), rpc
+    print(f"LIVE TRADING ARMED — trading wallet {executor.wallet_address}. "
+          f"Per-trade cap {ex.max_buy_sol:g} SOL.")
+    return executor, rpc
+
+
 def build_sinks(settings: Settings) -> list:
     """Console always; Telegram/Discord activate when their secrets exist (Part 29)."""
     sinks: list = [ConsoleSink()]
@@ -191,12 +228,14 @@ def build_sinks(settings: Settings) -> list:
         "min_priority": min_priority,
     }
     if settings.telegram_bot_token and settings.telegram_chat_id:
+        # Buy/Dump buttons appear only when the operator turned them on
+        # (Project 6); the amounts are the configured presets.
+        presets = (settings.execution.buy_preset_list()
+                   if settings.execution.buy_button_enabled else ())
         sinks.append(TelegramSink(
             settings.telegram_bot_token, settings.telegram_chat_id,
             routes=parse_routes(settings.alert_delivery.telegram_routes),
-            # Project 2 scaffold: shows [Buy (dry run)] only when the operator
-            # flipped the flag; there is no live executor either way.
-            buy_button_enabled=settings.execution.buy_button_enabled,
+            buy_presets_sol=presets,
             **shared,
         ))
     if settings.discord_webhook_url:
@@ -956,13 +995,16 @@ async def _cmd_monitor(args, settings) -> int:
             # its command context wraps the scanner's public methods.
             if settings.telegram_commands.enabled:
                 if settings.telegram_bot_token and settings.telegram_chat_id:
+                    executor, exec_rpc = build_executor(settings, storage, jupiter_client)
+                    if exec_rpc is not None:
+                        stack.push_async_callback(exec_rpc.close)
                     context = CommandContext(
                         storage=storage,
                         settings=settings,
                         status_provider=scanner.status_snapshot,
                         check_runner=scanner.check_token,
                         learning_service=learning_service,
-                        executor=DryRunExecutor(storage),
+                        executor=executor,
                     )
                     listener = TelegramCommandListener(
                         settings.telegram_bot_token, settings.telegram_chat_id,

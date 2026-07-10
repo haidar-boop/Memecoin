@@ -111,7 +111,8 @@ async def test_status_renders_snapshot():
                        "launches_tracked": 2, "learned": 3, "alerts": 1},
         "networks": ["solana"],
         "layers": {"wallet_intel": True, "ai": False, "learning": True,
-                   "pumpfun": False, "jupiter_probe": True, "buy_button": False},
+                   "pumpfun": False, "jupiter_probe": True, "buy_button": False,
+                   "trading_live": False},
         "db": {"tokens": 10, "alerts": 4, "watchlist": 3, "holdings": 1},
     }
     with Storage(":memory:", now_func=lambda: NOW) as storage:
@@ -120,7 +121,7 @@ async def test_status_renders_snapshot():
     text = sent_messages(calls)[0]["text"]
     assert "uptime 1h 1m" in text and "cycles 42" in text
     assert "3 analyzed" in text and "jupiter probe ON" in text
-    assert "buy button off" in text and "1 holdings" in text
+    assert "trading off" in text and "1 holdings" in text
 
 
 async def test_why_unknown_token_suggests_check():
@@ -323,34 +324,52 @@ async def test_malformed_feedback_payload_rejected():
 async def test_buy_with_flag_off_is_a_hard_noop():
     with Storage(":memory:", now_func=lambda: NOW) as storage:
         listener, calls = make_listener(storage)  # defaults: buy_button_enabled False
-        await listener._handle_update(callback_update(f"buy:{SOL_ADDR}"))
+        await listener._handle_update(callback_update(f"buy:{SOL_ADDR}:0.05"))
         acks = callback_answers(calls)
-        assert acks and "not enabled" in acks[0]["text"]
+        assert acks and "off" in acks[0]["text"].lower()
         assert sent_messages(calls) == []                       # no reply message
         assert storage.journal_entries(limit=10) == []          # nothing journaled
 
 
-async def test_buy_with_flag_on_is_dry_run_only():
+async def test_buy_button_on_routes_to_dry_run_when_not_live():
+    settings = make_settings(MEMEINTEL_EXECUTION_BUY_BUTTON_ENABLED="true")
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage, settings=settings)  # DryRunExecutor
+        await listener._handle_update(callback_update(f"buy:{SOL_ADDR}:0.05"))
+        replies = sent_messages(calls)
+        assert replies and "DRY RUN — no real trade executed" in replies[0]["text"]
+        assert "0.05 SOL" in replies[0]["text"]
+        journal = storage.journal_entries(limit=10)
+        assert journal and journal[0]["kind"] == "trade_intent"
+
+
+async def test_dump_button_off_is_refused():
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage)  # buttons off
+        await listener._handle_update(callback_update(f"dump:{SOL_ADDR}"))
+        assert sent_messages(calls) == []
+        acks = callback_answers(calls)
+        assert acks and "off" in acks[0]["text"].lower()
+
+
+async def test_dump_button_on_routes_to_dry_run_when_not_live():
     settings = make_settings(MEMEINTEL_EXECUTION_BUY_BUTTON_ENABLED="true")
     with Storage(":memory:", now_func=lambda: NOW) as storage:
         listener, calls = make_listener(storage, settings=settings)
-        await listener._handle_update(callback_update(f"buy:{SOL_ADDR}"))
+        await listener._handle_update(callback_update(f"dump:{SOL_ADDR}"))
         replies = sent_messages(calls)
-        assert replies and "DRY RUN — no real trade executed" in replies[0]["text"]
-        journal = storage.journal_entries(limit=10)
-        assert journal and journal[0]["kind"] == "trade_intent"
-        acks = callback_answers(calls)
-        assert acks and "Dry run" in acks[0]["text"]
+        assert replies and "DRY RUN" in replies[0]["text"]
 
 
-async def test_buy_dry_run_false_still_cannot_execute():
-    settings = make_settings(MEMEINTEL_EXECUTION_BUY_BUTTON_ENABLED="true",
-                             MEMEINTEL_EXECUTION_DRY_RUN="false")
+async def test_buy_command_parses_amount():
+    settings = make_settings(MEMEINTEL_EXECUTION_BUY_BUTTON_ENABLED="true")
     with Storage(":memory:", now_func=lambda: NOW) as storage:
         listener, calls = make_listener(storage, settings=settings)
-        await listener._handle_update(callback_update(f"buy:{SOL_ADDR}"))
-    text = sent_messages(calls)[0]["text"]
-    assert "DRY RUN" in text and "no effect" in text  # honesty over configuration
+        await listener._handle_update(message_update(f"/buy {SOL_ADDR} 0.1"))
+        assert "0.1 SOL" in sent_messages(calls)[0]["text"]
+        # A bad amount is rejected, not executed.
+        await listener._handle_update(message_update(f"/buy {SOL_ADDR} lots"))
+        assert "must be a number" in sent_messages(calls)[-1]["text"]
 
 
 # ---- Poll loop mechanics ----
