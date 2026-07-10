@@ -88,13 +88,20 @@ class AutomationRules:
         *,
         previous_score: float | None = None,
         ai_verification_inconclusive: bool = False,
+        deterministic_risk_veto: str | None = None,
     ) -> list[AlertEvent]:
         """``ai_verification_inconclusive`` — the caller ran AI verification
         but no usable judgment came back (discarded below the confidence
         floor, or the call failed). Without this flag a judgment of 15/100
         vanished entirely and fired the HIGH tier, while 22/100 attached and
         vetoed it — inverted protection. The scanner is the only caller that
-        knows verification ran, so it must say so."""
+        knows verification ran, so it must say so.
+
+        ``deterministic_risk_veto`` — a zero-cost check (rug engine, risk
+        alerts already firing) vetoed this token before any paid call. It
+        downgrades BOTH HIGH opportunity tiers (bug-hunt finding: the
+        fully-verified tier used to bypass every veto — a blacklisted
+        deployer with community data still fired HIGH, unchecked)."""
         # A dead token is a closed case (Part 29 Section 1 — alerts protect
         # decisions, and no entry/exit decision remains once liquidity has
         # collapsed): one MEDIUM post-mortem replaces the warning/drop pair,
@@ -111,7 +118,8 @@ class AutomationRules:
         events: list[AlertEvent] = []
         events.extend(self._emergency_rule(result))
         opportunity = self._opportunity_rule(
-            result, ai_verification_inconclusive=ai_verification_inconclusive)
+            result, ai_verification_inconclusive=ai_verification_inconclusive,
+            deterministic_risk_veto=deterministic_risk_veto)
         if opportunity is not None:
             events.append(opportunity)
         momentum = self._momentum_rule(result)
@@ -190,7 +198,8 @@ class AutomationRules:
 
     # IF gates pass THEN move to high-priority watchlist (Parts 2/13).
     def _opportunity_rule(self, result: PipelineResult, *,
-                          ai_verification_inconclusive: bool = False) -> AlertEvent | None:
+                          ai_verification_inconclusive: bool = False,
+                          deterministic_risk_veto: str | None = None) -> AlertEvent | None:
         if result.security.is_destructive:
             return None
 
@@ -212,17 +221,37 @@ class AutomationRules:
             return None
 
         scores = {name: value for name, (value, _) in gates.items()}
+        veto_caveat = ([f"deterministic risk veto: {deterministic_risk_veto}"]
+                       if deterministic_risk_veto else [])
         if not unverified:
+            # The fully-verified tier honors the deterministic vetoes too
+            # (depth floor, lukewarm AI, rug-engine/risk veto) — it used to
+            # bypass all of them (bug-hunt finding). It does NOT downgrade on
+            # a merely-unavailable AI: with every gate verified by data,
+            # deterministic evidence stands on its own (Rule 9).
+            full_caveats = self._strong_candidate_caveats(result) + veto_caveat
+            if not full_caveats:
+                return AlertEvent(
+                    priority=AlertPriority.HIGH,
+                    alert_type="high_priority_opportunity",
+                    token=result.pair.base_token,
+                    title=f"All review gates passed (score {result.master.final_score:.0f})",
+                    reasons=(f"classification: {result.master.classification.value}",),
+                    scores=scores,
+                    why_it_matters="Every measurable human-review gate passed with data — "
+                                   "the rare setup the scanner exists to find.",
+                    monitoring=("track holder growth and volume quality for continuation",),
+                )
             return AlertEvent(
-                priority=AlertPriority.HIGH,
-                alert_type="high_priority_opportunity",
+                priority=AlertPriority.MEDIUM,
+                alert_type="early_opportunity",
                 token=result.pair.base_token,
-                title=f"All review gates passed (score {result.master.final_score:.0f})",
-                reasons=(f"classification: {result.master.classification.value}",),
+                title=f"Provisional opportunity (score {result.master.final_score:.0f}) — "
+                      f"held back by vetoes",
+                reasons=(f"classification: {result.master.classification.value}",
+                         *full_caveats),
                 scores=scores,
-                why_it_matters="Every measurable human-review gate passed with data — "
-                               "the rare setup the scanner exists to find.",
-                monitoring=("track holder growth and volume quality for continuation",),
+                monitoring=("re-evaluate once the named vetoes clear",),
             )
 
         # Strong-candidate tier (Part 2 S4): a fresh launch whose ONLY
@@ -238,6 +267,7 @@ class AutomationRules:
                 and overall_score >= self._t.strong_candidate_overall):
             caveats = self._strong_candidate_caveats(
                 result, ai_verification_inconclusive=ai_verification_inconclusive)
+            caveats += veto_caveat
             if not caveats:
                 return AlertEvent(
                     priority=AlertPriority.HIGH,

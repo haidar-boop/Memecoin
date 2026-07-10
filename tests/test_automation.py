@@ -117,6 +117,26 @@ async def test_low_ai_confidence_vetoes_strong_candidate():
                for r in types["early_opportunity"].reasons)
 
 
+async def test_deterministic_veto_downgrades_fully_verified_tier():
+    """Bug-hunt: the fully-verified HIGH tier bypassed every veto — a
+    blacklisted deployer / rug-engine hit with community data still fired
+    HIGH, unchecked. The deterministic veto now downgrades it too."""
+    import dataclasses
+    from types import SimpleNamespace
+
+    result = await pipeline_result()
+    # Give it a community score so it clears the fully-verified tier.
+    verified = dataclasses.replace(
+        result, community=SimpleNamespace(overall_score=85.0, is_artificial=False,
+                                          findings=()))
+    events = make_rules().evaluate(
+        verified, deterministic_risk_veto="rug engine score 25 (deployer_blacklisted)")
+    types = {e.alert_type: e for e in events}
+    assert "high_priority_opportunity" not in types
+    assert "strong_candidate" not in types
+    assert any("deterministic risk veto" in r for r in types["early_opportunity"].reasons)
+
+
 async def test_inconclusive_ai_verification_vetoes_strong_candidate():
     """Bug-hunt regression: a judgment DISCARDED below the confidence floor
     left ai_judgment None, so a 15/100 judgment fired HIGH while 22/100

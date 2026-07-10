@@ -403,6 +403,7 @@ class ContinuousScanner:
         # the high-priority alert simply never fires (Rule 13 logs why).
         verify_key = (token.chain, token.address.lower())
         ai_inconclusive = self._ai_verified.get(verify_key, False)
+        deterministic_veto: str | None = None
         if (self._ai_verifier is not None and not result.security.is_destructive
                 and verify_key not in self._ai_verified):
             provisional = self._rules.evaluate(result, previous_score=previous_score)
@@ -412,13 +413,16 @@ class ContinuousScanner:
                 # the first. Every free deterministic signal must be clean
                 # before the API is asked for an opinion (Rule 10/11). A
                 # vetoed token is NOT cached as verified — if its risk clears
-                # on a later recheck, verification can still run then.
+                # on a later recheck, verification can still run then. The
+                # veto downgrades BOTH HIGH tiers via deterministic_risk_veto
+                # (bug-hunt finding: it used to ride the inconclusive flag,
+                # which the fully-verified tier ignored).
                 veto = self._ai_spend_veto(result, provisional, creator)
                 if veto is not None:
                     self._logger.info(
                         "AI verification skipped for %s: %s — credits saved; "
                         "alert downgraded", token.address, veto)
-                    ai_inconclusive = True  # strong-candidate tier downgrades
+                    deterministic_veto = veto
                 else:
                     self._logger.info("gate-passing candidate %s: running AI verification",
                                       token.address)
@@ -477,7 +481,8 @@ class ContinuousScanner:
                 self._storage.archive(token, reason)
 
         events = self._rules.evaluate(result, previous_score=previous_score,
-                                      ai_verification_inconclusive=ai_inconclusive)
+                                      ai_verification_inconclusive=ai_inconclusive,
+                                      deterministic_risk_veto=deterministic_veto)
         if result.ai_judgment is not None:
             events = [self._annotate_with_ai(event, result.ai_judgment)
                       for event in events]

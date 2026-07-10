@@ -627,7 +627,7 @@ class Storage:
         """Every alert with the master-score drift to the latest later
         snapshot (NULL drift when no re-assessment happened yet)."""
         rows = self._conn.execute(
-            """SELECT a.id, a.alert_type, a.priority, a.outcome,
+            """SELECT a.id, a.alert_type, a.priority, a.outcome, a.created_at,
                       (SELECT s.final_score FROM snapshots s
                        WHERE s.token_id = a.token_id AND s.created_at > a.created_at
                        ORDER BY s.created_at DESC LIMIT 1) - a.score_at_alert AS drift

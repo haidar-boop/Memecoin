@@ -211,6 +211,32 @@ def test_alert_outcomes_labeled(tmp_path):
         assert storage.alert_history()[0]["outcome"] == "useful"  # +15 drift
 
 
+def test_young_alert_not_labeled_until_mature(tmp_path):
+    """Bug-hunt: alert outcomes are PERMANENT, but were assigned from whatever
+    drift existed at the first backtest run — an alert fired minutes before
+    the cron got a permanent verdict from minutes of noise. The maturity gate
+    holds the label until alert_outcome_min_hours has passed."""
+    from tests.test_alert_delivery import make_event
+
+    with make_storage(tmp_path) as storage:  # storage now_func = NOW (T0+30h)
+        storage.record_snapshot(master(1, 70.0, Classification.WATCHLIST, T0),
+                                source="test", pair=pair(1, 1.0))
+        storage.record_alert(make_event(scores={"master": 70.0}, token=token(1)),
+                             source="test")  # stamped at NOW
+        storage.record_snapshot(
+            master(1, 85.0, Classification.STRONG_CANDIDATE, NOW + timedelta(hours=1)),
+            source="test", pair=pair(1, 1.5))
+        # Backtest runs 1h after the alert — too young for a permanent verdict.
+        labeled = label_alert_outcomes(storage, SETTINGS,
+                                       now_func=lambda: NOW + timedelta(hours=1))
+        assert labeled == 0
+        assert storage.alert_history()[0]["outcome"] is None
+        # A day later the same alert matures and is labeled.
+        labeled = label_alert_outcomes(storage, SETTINGS,
+                                       now_func=lambda: NOW + timedelta(hours=25))
+        assert labeled == 1
+
+
 # ---- Section 11 strategy journal, settings, rendering ----
 
 def test_strategy_change_recorded(tmp_path):

@@ -242,6 +242,20 @@ async def test_total_delivery_outage_does_not_permanently_lose_the_alert():
     assert key not in engine._last_sent
 
 
+def test_format_alert_sanitizes_injection_in_token_name():
+    """Bug-hunt: an on-chain token name with backticks/newlines broke out of
+    Discord's code fence and injected live markdown (incl. mention pings)."""
+    evil = TokenIdentity(chain="solana", address="Mint1",
+                         name="```@everyone\nCLICK", symbol="p​ump\n`x`")
+    text = format_alert(make_event(token=evil))
+    name_line = next(l for l in text.splitlines() if l.strip().startswith("Name:"))
+    assert "```" not in name_line
+    assert "\n" not in name_line.replace("Name:", "")
+    assert "@everyone" in name_line  # kept as inert text, just defanged of markdown
+    # The whole rendered message carries no stray backticks from identity.
+    assert text.count("`") == 0
+
+
 async def test_console_success_does_not_mask_failed_phone_delivery():
     """Bug-hunt: Telegram/Discord swallowed their delivery failures and the
     always-successful console counted as delivery — a lost phone alert was

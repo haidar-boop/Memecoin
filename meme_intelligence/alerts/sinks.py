@@ -72,6 +72,22 @@ def channel_for(event: AlertEvent) -> str:
     return ALERT_CHANNELS.get(event.alert_type, "reports")
 
 
+def _sanitize_identity(value: str | None, *, max_len: int = 64) -> str:
+    """Neutralize attacker-controlled token names/symbols (bug-hunt finding).
+
+    On-chain metadata is unbounded and arbitrary: a token literally named
+    with backticks + newlines broke out of Discord's code fence and injected
+    live markdown (incl. mention pings) into the owner's alert channel.
+    Non-printable characters and newlines are dropped, backticks neutralized,
+    and length capped; the contract address (validated charset) stays exact.
+    """
+    if not value:
+        return "unknown"
+    cleaned = "".join(ch for ch in value if ch.isprintable()).replace("`", "'")
+    cleaned = cleaned.strip()
+    return (cleaned[:max_len] + "…") if len(cleaned) > max_len else (cleaned or "unknown")
+
+
 def format_alert(event: AlertEvent) -> str:
     """Render the full Part 29 Section 7 message format."""
     lines = [
@@ -79,8 +95,8 @@ def format_alert(event: AlertEvent) -> str:
         event.alert_type.replace("_", " ").upper(),
         "",
         "Token",
-        f"  Name: {event.token.name or 'unknown'}",
-        f"  Symbol: {event.token.symbol or 'unknown'}",
+        f"  Name: {_sanitize_identity(event.token.name)}",
+        f"  Symbol: {_sanitize_identity(event.token.symbol)}",
         f"  Contract: {event.token.address}",
         f"  Chain: {event.token.chain}",
     ]
@@ -202,7 +218,13 @@ class DiscordSink(BaseCollector):
             # ?wait=true makes Discord return 200 + JSON instead of a bare 204.
             await self._get_json(
                 url + ("&wait=true" if "?" in url else "?wait=true"),
-                json_body={"content": f"```\n{format_alert(event)[:1900]}\n```"},
+                json_body={
+                    "content": f"```\n{format_alert(event)[:1900]}\n```",
+                    # Webhook default parses @everyone/@here from content —
+                    # alert text embeds on-chain metadata, so mentions are
+                    # disabled outright (bug-hunt finding).
+                    "allowed_mentions": {"parse": []},
+                },
             )
             self._logger.info("discord alert sent: %s %s", event.priority.value,
                               event.alert_type)

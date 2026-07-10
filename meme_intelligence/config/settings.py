@@ -539,6 +539,7 @@ class BacktestSettings:
     signal_high_score: float = 70.0          # "high" bucket for signal analysis (S6)
     signal_low_score: float = 50.0           # below this = "low" bucket
     alert_useful_drift_points: float = 10.0  # score drift that labels an alert useful (S12/29)
+    alert_outcome_min_hours: float = 24.0    # alerts younger than this stay unlabeled
     min_predictions_for_weights: int = 10    # weight experiments need a real sample (S1)
 
     def __post_init__(self) -> None:
@@ -561,7 +562,7 @@ class BacktestSettings:
         if self.signal_low_score >= self.signal_high_score:
             raise ConfigurationError("signal_low_score must be below signal_high_score")
         for name in ("survival_min_liquidity_usd", "alert_useful_drift_points",
-                     "min_predictions_for_weights"):
+                     "alert_outcome_min_hours", "min_predictions_for_weights"):
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
                 raise ConfigurationError(f"backtest setting '{name}' must be positive")

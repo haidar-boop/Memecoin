@@ -410,17 +410,32 @@ def failure_success_patterns(verdicts: list[PredictionVerdict],
 
 # ---- Alert outcome labeling (Part 29 S11 -> Part 24 S10) ----
 
-def label_alert_outcomes(storage, settings: BacktestSettings) -> int:
+def label_alert_outcomes(
+    storage, settings: BacktestSettings,
+    *, now_func: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+) -> int:
     """Fill ``alerts.outcome`` from measured score drift: opportunity-type
     alerts want positive drift (useful), risk-type alerts want negative
     drift (correct_warning); anything else is noise. Unmeasured alerts
-    stay unlabeled."""
+    stay unlabeled.
+
+    Maturity gate (bug-hunt finding): the label is PERMANENT (the outcome-
+    is-not-None guard never revisits it), but drift used to be judged from
+    whatever snapshot existed at the first backtest run — an alert fired
+    minutes before the cron was forever labeled from minutes of movement.
+    Alerts younger than ``alert_outcome_min_hours`` now stay unlabeled until
+    enough time has passed for the verdict to mean something (Rule 8).
+    """
     opportunity_types = {"high_priority_opportunity", "early_opportunity",
                          "momentum", "smart_money_accumulation"}
     labeled = 0
+    now = now_func()
+    min_age = timedelta(hours=settings.alert_outcome_min_hours)
     for row in storage.alerts_with_drift():
         if row["outcome"] is not None or row["drift"] is None:
             continue
+        if now - _parse_at(row["created_at"]) < min_age:
+            continue  # too young for a permanent verdict
         drift, kind = row["drift"], row["alert_type"]
         if kind in opportunity_types:
             outcome = "useful" if drift >= settings.alert_useful_drift_points else "noise"
