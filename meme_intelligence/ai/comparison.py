@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import dataclasses
 
+from meme_intelligence.core.enums import Classification
 from meme_intelligence.workflow.pipeline import PipelineResult
 
 _CATEGORY_ORDER = (
@@ -24,10 +25,17 @@ _COLUMN_WIDTH = 14
 
 
 def rank_results(results: list[PipelineResult]) -> list[PipelineResult]:
-    """Order results best-first per the comparison ranking rules."""
+    """Order results best-first per the comparison ranking rules.
+
+    Classification outranks the raw number: a decision-tree-REJECTED token
+    is classified Avoid with an EMPTY overrides tuple, so the overrides-only
+    sort let it top the ranking on a pretty score (bug-hunt finding) — but
+    an Avoid with a pretty number is still an Avoid.
+    """
     return sorted(
         results,
         key=lambda r: (
+            r.master.classification is not Classification.AVOID,  # Avoid sinks
             len(r.master.overrides) == 0,   # non-overridden tokens first
             r.master.final_score,
             r.master.coverage,

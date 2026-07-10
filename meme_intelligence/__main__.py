@@ -21,8 +21,14 @@ import asyncio
 import sys
 
 from meme_intelligence.ai.comparison import render_comparison
+from meme_intelligence.ai.reasoning import build_judgment_service
 from meme_intelligence.ai.report_generator import build_report
-from meme_intelligence.alerts.notification_engine import ConsoleSink, NotificationEngine
+from meme_intelligence.alerts.notification_engine import (
+    AlertEvent,
+    ConsoleSink,
+    NotificationEngine,
+)
+from meme_intelligence.alerts.sinks import DiscordSink, TelegramSink, parse_routes
 from meme_intelligence.analyzers.onchain_analyzer import OnChainAnalyzer, derive_onchain_profile
 from meme_intelligence.analyzers.security_analyzer import SecurityAnalyzer
 from meme_intelligence.analyzers.wallet_intelligence import sightings_from_assessment
@@ -34,7 +40,7 @@ from meme_intelligence.collectors.wallet_data import (
     HeliusClient,
     WalletDataService,
 )
-from meme_intelligence.core.enums import MarketRegime
+from meme_intelligence.core.enums import AlertPriority, MarketRegime, ResearchMode
 from meme_intelligence.database.storage import Storage
 from meme_intelligence.trading.trade_planner import TradePlanner
 from meme_intelligence.workflow.controller import ContinuousScanner
@@ -42,6 +48,7 @@ from meme_intelligence.workflow.daily_routine import DailyRoutine
 from meme_intelligence.workflow.pipeline import ResearchPipeline
 from meme_intelligence.workflow.watchlist_review import review_entries
 from meme_intelligence.collectors.market_data import DexScreenerClient, GeckoTerminalClient
+from meme_intelligence.collectors.pumpfun import PumpFunFrontendClient, PumpPortalClient
 from meme_intelligence.collectors.security_data import GoPlusClient
 from meme_intelligence.config.settings import Settings, get_settings
 from meme_intelligence.core.cache import TTLCache
@@ -88,8 +95,22 @@ def build_goplus(settings: Settings) -> GoPlusClient:
 
 def build_coingecko(settings: Settings) -> CoinGeckoClient:
     return CoinGeckoClient(
+        api_key=settings.coingecko_api_key,
         base_url=settings.providers.coingecko_base_url,
         rate_limiter=RateLimiter.per_minute(settings.providers.coingecko_requests_per_minute),
+        **_shared_collector_kwargs(settings),
+    )
+
+
+def build_pumpportal(settings: Settings) -> PumpPortalClient:
+    """Free PumpPortal launch-event stream (Part 32.5 Section 3)."""
+    return PumpPortalClient(settings.providers.pumpportal_ws_url)
+
+
+def build_pumpfun_frontend(settings: Settings) -> PumpFunFrontendClient:
+    return PumpFunFrontendClient(
+        base_url=settings.providers.pumpfun_base_url,
+        rate_limiter=RateLimiter.per_minute(settings.providers.pumpfun_requests_per_minute),
         **_shared_collector_kwargs(settings),
     )
 
@@ -140,6 +161,41 @@ def build_jupiter(settings: Settings) -> JupiterClient | None:
         rate_limiter=RateLimiter.per_minute(settings.providers.jupiter_requests_per_minute),
         **_shared_collector_kwargs(settings),
     )
+
+
+def build_learning_service(settings: Settings):
+    """Construct the self-learning mind layer (Section 10).
+
+    Imported lazily so the numpy/faiss/lightgbm stack is loaded only when the
+    ``mind`` command or the opt-in monitor hook actually needs it — every other
+    CLI command stays fast and dependency-light.
+    """
+    from meme_intelligence.learning.service import LearningService
+
+    return LearningService(settings)
+
+
+def build_sinks(settings: Settings) -> list:
+    """Console always; Telegram/Discord activate when their secrets exist (Part 29)."""
+    sinks: list = [ConsoleSink()]
+    min_priority = AlertPriority(settings.alert_delivery.external_min_priority)
+    shared = {
+        "rate_limiter": RateLimiter.per_minute(settings.alert_delivery.requests_per_minute),
+        "timeout_seconds": settings.http.timeout_seconds,
+        "retry_attempts": settings.http.retry_attempts,
+        "min_priority": min_priority,
+    }
+    if settings.telegram_bot_token and settings.telegram_chat_id:
+        sinks.append(TelegramSink(
+            settings.telegram_bot_token, settings.telegram_chat_id,
+            routes=parse_routes(settings.alert_delivery.telegram_routes), **shared,
+        ))
+    if settings.discord_webhook_url:
+        sinks.append(DiscordSink(
+            settings.discord_webhook_url,
+            routes=parse_routes(settings.alert_delivery.discord_routes), **shared,
+        ))
+    return sinks
 
 
 def _format_pair(pair: DexPair) -> str:
@@ -281,8 +337,9 @@ async def _cmd_plan(args, settings) -> int:
         return 1
     result, plan = gathered
 
-    for section in (result.security, result.onchain, result.token,
-                    result.momentum, result.risk, result.master):
+    for section in (result.security, result.onchain, result.token, result.foundation,
+                    result.narrative, result.momentum, result.risk,
+                    result.ai_judgment, result.master):
         if section is not None:
             print(section.summary() + "\n")
     print(plan.render())
@@ -294,24 +351,40 @@ async def _gather_assessments(args, settings):
     regime = MarketRegime(args.regime)
     wallet_service = build_wallet_service(settings)
     jupiter_client = build_jupiter(settings)
+    ai_service = None
+    if getattr(args, "ai", False):
+        ai_service = build_judgment_service(settings)
+        if ai_service is None:
+            return None, ("--ai requires MEMEINTEL_ANTHROPIC_API_KEY "
+                          "(set it in the environment or .env).")
     try:
         async with (
             build_dexscreener(settings) as dex,
             build_geckoterminal(settings) as gecko,
             build_goplus(settings) as goplus,
+            build_coingecko(settings) as coingecko,
         ):
             service = build_market_service(settings, dex, gecko)
             pair = await service.get_best_pair(args.address, chain=args.chain)
             if pair is None:
                 return None, f"No trading pairs found for {args.address}."
             pipeline = ResearchPipeline(settings, goplus, wallet_service=wallet_service,
-                                        jupiter_client=jupiter_client)
-            result = await pipeline.analyze_pair(pair, regime=regime)
+                                        jupiter_client=jupiter_client,
+                                        community_client=coingecko, ai_service=ai_service)
+            result = await pipeline.analyze_pair(
+                pair, regime=regime,
+                research_mode=ResearchMode(getattr(args, "ai_mode", "standard")),
+            )
     finally:
         if wallet_service is not None:
             await wallet_service.close()
         if jupiter_client is not None:
             await jupiter_client.close()
+        if ai_service is not None:
+            # The AsyncAnthropic client wraps its own httpx AsyncClient —
+            # close it like every other client this command opens (bug-hunt
+            # finding: the monitor path already did; this path leaked it).
+            await ai_service._client.close()
 
     if result is None:
         return None, (f"Security data unavailable for {args.address} on {pair.chain} "
@@ -333,15 +406,22 @@ async def _cmd_report(args, settings) -> int:
 
     report = build_report(
         result.pair, result.master, result.security,
-        onchain=result.onchain, token=result.token, momentum=result.momentum,
-        risk=result.risk, plan=plan,
+        onchain=result.onchain, token=result.token, narrative=result.narrative,
+        momentum=result.momentum, risk=result.risk, plan=plan,
     )
     print(report.text)
+    if result.foundation is not None:
+        print("\n" + result.foundation.summary())
     if result.wallet is not None:
         print("\n" + result.wallet.summary())
+    if result.ai_judgment is not None:
+        print("\n" + result.ai_judgment.summary())
 
     with Storage(settings.database.path) as storage:
-        storage.record_snapshot(result.master, source="report_cli")
+        storage.record_snapshot(
+            result.master, source="report_cli",
+            pair=result.pair, regime=args.regime,
+            opportunity_rank=result.opportunity.score if result.opportunity else None)
         if result.wallet is not None:
             # Sightings feed wallet track records for Part 24's learning loop.
             storage.record_wallet_sightings(
@@ -470,6 +550,119 @@ async def _cmd_compare(args, settings) -> int:
     return 0
 
 
+async def _cmd_backtest(args, settings) -> int:
+    """Backtesting & self-improvement report (Part 24); --refresh measures
+    due outcome windows (live price fetch for tokens without snapshots)."""
+    from meme_intelligence.analytics.backtesting import (
+        evaluate_predictions,
+        failure_success_patterns,
+        label_alert_outcomes,
+        performance_metrics,
+        refresh_outcomes,
+        render_backtest_report,
+        signal_performance,
+        weight_experiments,
+    )
+
+    # When the mind layer is enabled, measured outcomes also resolve its coins
+    # and fire instant learning (Section 1). Built lazily so the ML stack loads
+    # only for users who opted in.
+    learning_service = build_learning_service(settings) if settings.learning.enabled else None
+
+    with Storage(settings.database.path) as storage:
+        recorded = 0
+        if args.refresh:
+            async with (
+                build_dexscreener(settings) as dex,
+                build_geckoterminal(settings) as gecko,
+            ):
+                service = build_market_service(settings, dex, gecko)
+                recorded = await refresh_outcomes(
+                    storage, service, settings=settings.backtest,
+                    learning_service=learning_service)
+        else:
+            recorded = await refresh_outcomes(
+                storage, None, settings=settings.backtest,
+                learning_service=learning_service)
+        if learning_service is not None:
+            learning_service.persist()
+
+        labeled = label_alert_outcomes(storage, settings.backtest)
+        verdicts = evaluate_predictions(storage, settings.backtest)
+        if not verdicts:
+            print("No predictions have measurable outcomes yet.\n"
+                  "Keep `monitor` running (or re-run analyses later), then use\n"
+                  "`backtest --refresh` to measure due windows against live prices.")
+            return 0
+        metrics = performance_metrics(verdicts, settings.backtest)
+        print(render_backtest_report(
+            metrics,
+            signal_performance(verdicts, settings.backtest),
+            weight_experiments(verdicts, settings.backtest),
+            failure_success_patterns(verdicts, settings.backtest),
+            alerts_labeled=labeled,
+            outcomes_recorded=recorded,
+        ))
+    return 0
+
+
+async def _cmd_alerts(args, settings) -> int:
+    """Alert history + performance analysis (Part 29, Sections 11-12);
+    --test sends a test alert through every configured sink."""
+    if args.test:
+        from meme_intelligence.core.models import TokenIdentity
+
+        event = AlertEvent(
+            priority=AlertPriority.HIGH,
+            alert_type="high_priority_opportunity",
+            token=TokenIdentity(chain="test", address="TestTokenAddress",
+                                name="Delivery Test", symbol="TEST"),
+            title="Test alert — delivery check for every configured sink",
+            reasons=("this is a synthetic event; no token was analyzed",),
+            scores={"master": 88.0},
+            why_it_matters="If you can read this, alert delivery works.",
+            monitoring=("nothing — this is only a delivery test",),
+        )
+        sinks = build_sinks(settings)
+        engine = NotificationEngine(sinks, settings.alert_engine)
+        await engine.dispatch([event])
+        external = [type(s).__name__ for s in sinks[1:]]
+        print(f"\nTest alert dispatched to: console"
+              + (", " + ", ".join(external) if external else
+                 " only (no Telegram/Discord secrets configured)"))
+        for sink in sinks[1:]:
+            await sink.close()
+        return 0
+
+    with Storage(settings.database.path) as storage:
+        history = storage.alert_history(limit=args.limit)
+        performance = storage.alert_performance()
+
+    if not history:
+        print("No alerts recorded yet — history accumulates while `monitor` runs.")
+        return 0
+
+    print(f"Last {len(history)} alert(s):\n")
+    for row in history:
+        symbol = row["symbol"] or row["address"][:8]
+        score = f"{row['score_at_alert']:.0f}" if row["score_at_alert"] is not None else "?"
+        print(f"  {row['created_at'][:16]}  [{row['priority']:>8}] "
+              f"{row['alert_type']:<26} {symbol:<10} score {score}")
+
+    if performance:
+        print("\nAlert performance (score drift after alert, Part 29 Section 12):")
+        print("  positive drift after opportunity alerts = useful signal;")
+        print("  negative drift after risk alerts = the alert fired correctly.\n")
+        for row in performance:
+            drift = row["avg_score_drift"]
+            print(f"  {row['alert_type']:<26} n={row['alerts_measured']:<4} "
+                  f"avg drift {drift:+.1f}  improved {row['improved_count']}/{row['alerts_measured']}")
+    else:
+        print("\nNo re-assessments after alerts yet — performance analysis needs "
+              "follow-up snapshots (keep `monitor` running).")
+    return 0
+
+
 async def _cmd_watchlist(args, settings) -> int:
     """Watchlist command (Part 16, Section 8): show tracked tokens; --refresh re-scores."""
     with Storage(settings.database.path) as storage:
@@ -495,6 +688,22 @@ async def _cmd_watchlist(args, settings) -> int:
                 symbol = change.token.symbol or change.token.address[:8]
                 print(f"  - {symbol}: {change.change} ({change.detail})")
             print()
+
+        if getattr(args, "top", False):
+            ranked = storage.top_opportunities(limit=args.limit)
+            if not ranked:
+                print("No ranked opportunities yet. Run `daily` or `monitor` to populate.")
+                return 0
+            print(f"TOP OPPORTUNITIES (Part 28 §5 ranking — top {len(ranked)})")
+            for row in ranked:
+                symbol = row["symbol"] or row["address"][:8]
+                rank = f"{row['opportunity_rank']:.0f}" if row["opportunity_rank"] is not None else "?"
+                score = f"{row['last_score']:.0f}" if row["last_score"] is not None else "?"
+                print(f"  opportunity={rank:>3}  {symbol:>10} ({row['chain']}) "
+                      f"[{row['tier']}] master={score} class={row['last_classification'] or '?'}")
+                if row["thesis"]:
+                    print(f"{'':>16}thesis: {row['thesis']}")
+            return 0
 
         entries = storage.get_watchlist(include_archived=args.include_archived)
         if not entries:
@@ -553,8 +762,97 @@ async def _cmd_wallets(args, settings) -> int:
     return 0
 
 
+# A rug-risk score at/above this (0-100) makes `mind evaluate` exit with code 2,
+# mirroring the destructive-security convention of the `security` command.
+_MIND_DESTRUCTIVE_RUG_SCORE = 70
+
+
+def _fmt_opt(value, spec: str = ".2f") -> str:
+    """Format an optional metric: 'n/a' when there is no data (Rule 8)."""
+    return "n/a" if value is None else format(value, spec)
+
+
+async def _cmd_mind(args, settings) -> int:
+    """Self-learning mind layer: analog + model + rug verdict, or metrics (Section 10)."""
+    service = build_learning_service(settings)
+
+    if args.mind_command == "metrics":
+        metrics = service.get_learning_metrics(persist=False)
+        rug = metrics["rug"]
+        print("Mind-layer self-evaluation metrics")
+        print(f"  Resolved coins:        "
+              f"{metrics.get('resolved_coins_total', metrics['resolved_count'])}")
+        print(f"  Graded predictions:    {metrics['resolved_count']}")
+        print(f"  Overall accuracy:      {_fmt_opt(metrics['overall_accuracy'])}")
+        print(f"  Directional hit-rate:  {_fmt_opt(metrics['directional']['hit_rate'])} "
+              f"(n={metrics['directional']['samples']})")
+        print(f"  Rug precision/recall:  {_fmt_opt(rug['precision'])} / {_fmt_opt(rug['recall'])} "
+              f"(F1 {_fmt_opt(rug['f1'])}, {rug['actual_rugs']} actual rug(s))")
+        print(f"  Brier score:           {_fmt_opt(metrics['brier_score'])}")
+        print(f"  Analog memory size:    {metrics['analog_memory_size']}")
+        print(f"  Classifier ready:      {metrics['classifier_ready']}")
+        return 0
+
+    # mind evaluate <address>
+    async with build_dexscreener(settings) as dex, build_geckoterminal(settings) as gecko:
+        market = build_market_service(settings, dex, gecko)
+        pair = await market.get_best_pair(args.address, chain=args.chain)
+    if pair is None:
+        print(f"No tradable pair found for {args.address} on {args.chain}.")
+        return 1
+
+    profile = None
+    async with build_goplus(settings) as goplus:
+        try:
+            profile = await goplus.get_token_security(args.chain, args.address)
+        except CollectorError as exc:
+            print(f"(security data unavailable: {exc} — proceeding without it)")
+
+    from datetime import datetime, timezone
+    age_seconds = 0.0
+    if pair.pair_created_at is not None:
+        age_seconds = max(0.0, (datetime.now(timezone.utc)
+                                - pair.pair_created_at).total_seconds())
+    snapshot = {
+        "age_seconds": age_seconds,
+        "price_usd": pair.price_usd,
+        "liquidity_usd": pair.liquidity_usd,
+        "market_cap_usd": pair.market_cap,
+        "volume_1h_usd": pair.volume_1h,
+        "holder_count": profile.holder_count if profile else None,
+        "buys": pair.buys_1h,
+        "sells": pair.sells_1h,
+        "top10_holder_percent": profile.top10_holder_percent if profile else None,
+    }
+    verdict = service.evaluate_coin(
+        args.address, args.chain, [snapshot], security=profile,
+        creator=profile.creator_address if profile else None)
+    service.persist()
+
+    probs = verdict["final_probabilities"]
+    print(f"Mind-layer verdict for {args.address} ({args.chain})")
+    print("  Outcome probabilities: " + "  ".join(
+        f"{label}={probs.get(label, 0.0):.0%}" for label in ("pump", "flat", "dump", "rug")))
+    print(f"  Rug risk score:        {verdict['rug_risk_score']}/100")
+    print(f"  Rug signals fired:     {', '.join(verdict['rug_signals_fired']) or 'none'}")
+    print(f"  Matched archetype:     {verdict['matched_archetype'] or 'none'}")
+    print(f"  Novelty score:         {_fmt_opt(verdict['novelty_score'], '.2f')}")
+    print(f"  Model confidence:      {verdict['model_confidence']:.0%}")
+    print(f"  Learned sample size:   {verdict['sample_size']}")
+    if verdict["nearest_analogs"]:
+        print("  Nearest past analogs:")
+        for analog in verdict["nearest_analogs"]:
+            print(f"    - {analog['address']} ({analog['chain']}): "
+                  f"{analog['similarity']:.0%} similar, resolved as {analog['resolved_as']}")
+    else:
+        print("  Nearest past analogs:  none yet (memory still cold)")
+    # Treat a high rug-risk score as the destructive exit code, like `security`.
+    return 2 if verdict["rug_risk_score"] >= _MIND_DESTRUCTIVE_RUG_SCORE else 0
+
+
 async def _cmd_monitor(args, settings) -> int:
     """Run the continuous scanning loop (Part 13). Ctrl-C stops gracefully."""
+    import contextlib
     import dataclasses as _dc
     workflow = settings.workflow
     if args.network:
@@ -562,31 +860,92 @@ async def _cmd_monitor(args, settings) -> int:
     if args.interval:
         workflow = _dc.replace(workflow, monitor_interval_seconds=args.interval)
     settings = _dc.replace(settings, workflow=workflow)
+    if args.pumpfun:
+        settings = _dc.replace(
+            settings, pumpfun=_dc.replace(settings.pumpfun, enable_in_monitor=True))
+    if args.learn:
+        settings = _dc.replace(
+            settings, learning=_dc.replace(settings.learning, enable_in_monitor=True))
 
-    jupiter_client = build_jupiter(settings)
-    try:
-        async with (
-            build_geckoterminal(settings) as gecko,
-            build_goplus(settings) as goplus,
-            build_dexscreener(settings) as dex,
-        ):
-            with Storage(settings.database.path) as storage:
-                notifier = NotificationEngine([ConsoleSink()], settings.alert_engine)
-                scanner = ContinuousScanner(
-                    settings, storage, notifier,
-                    gecko_client=gecko, goplus_client=goplus,
-                    jupiter_client=jupiter_client,
-                    market_service=build_market_service(settings, dex, gecko),
-                    regime=MarketRegime(args.regime),
-                )
-                try:
-                    history = await scanner.run(max_cycles=args.cycles)
-                except KeyboardInterrupt:
-                    scanner.request_stop()
-                    history = []
-    finally:
+    async with contextlib.AsyncExitStack() as stack:
+        gecko = await stack.enter_async_context(build_geckoterminal(settings))
+        goplus = await stack.enter_async_context(build_goplus(settings))
+        dex = await stack.enter_async_context(build_dexscreener(settings))
+        coingecko = await stack.enter_async_context(build_coingecko(settings))
+        # Pump.fun launch discovery (Part 32.5 Section 3) is opt-in: it adds
+        # a WebSocket stream plus per-launch traction rechecks (Rule 11).
+        pumpportal = pumpfun = None
+        if settings.pumpfun.enable_in_monitor:
+            pumpportal = await stack.enter_async_context(build_pumpportal(settings))
+            pumpfun = await stack.enter_async_context(build_pumpfun_frontend(settings))
+        # Metered layers (Parts 17/23) join the loop only when their
+        # enable_in_monitor flag is set AND their keys exist; a set flag
+        # with missing keys is reported, not silently ignored (Rule 13).
+        wallet_service = ai_service = None
+        if settings.wallet.enable_in_monitor:
+            wallet_service = build_wallet_service(settings)
+            if wallet_service is None:
+                print("Note: MEMEINTEL_WALLET_ENABLE_IN_MONITOR is on but no "
+                      "MEMEINTEL_HELIUS_API_KEY / MEMEINTEL_BIRDEYE_API_KEY is set — "
+                      "smart-money analysis stays off.")
+            else:
+                stack.push_async_callback(wallet_service.close)
+        if settings.ai.enable_in_monitor or settings.ai.verify_opportunities:
+            ai_service = build_judgment_service(settings)
+            if ai_service is None and settings.ai.enable_in_monitor:
+                # verify_opportunities is on by default, so only complain
+                # when the user explicitly asked for per-token judging.
+                print("Note: MEMEINTEL_AI_ENABLE_IN_MONITOR is on but "
+                      "MEMEINTEL_ANTHROPIC_API_KEY is not set — AI judgments stay off.")
+            elif ai_service is not None:
+                # AsyncAnthropic wraps its own httpx client; close it on
+                # shutdown like every other HTTP client this command opens.
+                stack.push_async_callback(ai_service._client.close)
+
+        # Self-learning mind layer (Section 10): opt-in via --learn or
+        # MEMEINTEL_LEARNING_ENABLE_IN_MONITOR. Its state is flushed to disk on
+        # shutdown so learning compounds across restarts (Rule 7).
+        learning_service = None
+        if settings.learning.enable_in_monitor:
+            learning_service = build_learning_service(settings)
+            stack.callback(learning_service.persist)
+
+        alert_sinks = build_sinks(settings)
+        # Telegram/DiscordSink each hold an aiohttp session (BaseCollector);
+        # ConsoleSink (always sinks[0]) doesn't and has no close(). Without
+        # this, the monitor's session leaked for the process lifetime —
+        # harmless at hard process exit, but real for --cycles runs or any
+        # future long-lived host of this command (bug-hunt finding).
+        for sink in alert_sinks[1:]:
+            stack.push_async_callback(sink.close)
+
+        # Live Jupiter round-trip sell test (Project 1): joins the loop
+        # whenever a key is configured — same "no key = feature off"
+        # pattern as the other keyed collectors.
+        jupiter_client = build_jupiter(settings)
         if jupiter_client is not None:
-            await jupiter_client.close()
+            stack.push_async_callback(jupiter_client.close)
+
+        with Storage(settings.database.path) as storage:
+            notifier = NotificationEngine(alert_sinks, settings.alert_engine)
+            scanner = ContinuousScanner(
+                settings, storage, notifier,
+                gecko_client=gecko, goplus_client=goplus,
+                jupiter_client=jupiter_client,
+                market_service=build_market_service(settings, dex, gecko),
+                community_client=coingecko,
+                pumpportal_client=pumpportal,
+                pumpfun_client=pumpfun,
+                wallet_service=wallet_service,
+                ai_service=ai_service,
+                learning_service=learning_service,
+                regime=MarketRegime(args.regime),
+            )
+            try:
+                history = await scanner.run(max_cycles=args.cycles)
+            except KeyboardInterrupt:
+                scanner.request_stop()
+                history = []
 
     analyzed = sum(s.analyzed for s in history)
     alerts = sum(len(s.alerts) for s in history)
@@ -609,9 +968,12 @@ async def _run(args: argparse.Namespace) -> int:
         "quick": _cmd_quick,
         "compare": _cmd_compare,
         "watchlist": _cmd_watchlist,
+        "alerts": _cmd_alerts,
+        "backtest": _cmd_backtest,
         "wallets": _cmd_wallets,
         "daily": _cmd_daily,
         "monitor": _cmd_monitor,
+        "mind": _cmd_mind,
     }[args.command]
     return await handler(args, settings)
 
@@ -646,6 +1008,11 @@ def main(argv: list[str] | None = None) -> int:
 
     plan = sub.add_parser("plan", help="full research pass + trade plan for one token")
     plan.add_argument("address")
+    plan.add_argument("--ai", action="store_true",
+                      help="run the AI reasoning layer (needs MEMEINTEL_ANTHROPIC_API_KEY)")
+    plan.add_argument("--ai-mode", default="standard", dest="ai_mode",
+                      choices=[m.value for m in ResearchMode],
+                      help="AI research mode (Part 23 Section 10)")
     plan.add_argument("--chain", default=None, help="filter to one chain id (e.g. solana)")
     plan.add_argument("--regime", default="unknown",
                       choices=["bull", "neutral", "bear", "unknown"],
@@ -653,6 +1020,11 @@ def main(argv: list[str] | None = None) -> int:
 
     report = sub.add_parser("report", help="canonical intelligence report for one token")
     report.add_argument("address")
+    report.add_argument("--ai", action="store_true",
+                        help="run the AI reasoning layer (needs MEMEINTEL_ANTHROPIC_API_KEY)")
+    report.add_argument("--ai-mode", default="standard", dest="ai_mode",
+                        choices=[m.value for m in ResearchMode],
+                        help="AI research mode (Part 23 Section 10)")
     report.add_argument("--chain", default=None, help="filter to one chain id (e.g. solana)")
     report.add_argument("--regime", default="unknown",
                         choices=["bull", "neutral", "bear", "unknown"])
@@ -670,9 +1042,23 @@ def main(argv: list[str] | None = None) -> int:
     compare.add_argument("--regime", default="unknown",
                          choices=["bull", "neutral", "bear", "unknown"])
 
+    backtest = sub.add_parser("backtest",
+                              help="prediction accuracy + self-improvement report (Part 24)")
+    backtest.add_argument("--refresh", action="store_true",
+                          help="measure due outcome windows via live market data")
+
+    alerts = sub.add_parser("alerts", help="alert history + performance; --test checks delivery")
+    alerts.add_argument("--limit", type=int, default=20)
+    alerts.add_argument("--test", action="store_true",
+                        help="send a synthetic alert through every configured sink")
+
     watchlist = sub.add_parser("watchlist", help="show tracked tokens; --refresh re-scores")
     watchlist.add_argument("--refresh", action="store_true")
     watchlist.add_argument("--include-archived", action="store_true")
+    watchlist.add_argument("--top", action="store_true",
+                           help="rank tracked tokens by opportunity score (Part 28 §5)")
+    watchlist.add_argument("--limit", type=int, default=10,
+                           help="number of ranked opportunities to show with --top")
 
     wallets = sub.add_parser("wallets", help="smart money & whale intelligence (Part 17)")
     wallets.add_argument("address")
@@ -692,6 +1078,22 @@ def main(argv: list[str] | None = None) -> int:
                          help="seconds between cycles (default from settings)")
     monitor.add_argument("--regime", default="unknown",
                          choices=["bull", "neutral", "bear", "unknown"])
+    monitor.add_argument("--pumpfun", action="store_true",
+                         help="also watch pump.fun launches via the free "
+                              "PumpPortal stream (Part 32.5)")
+    monitor.add_argument("--learn", action="store_true",
+                         help="feed analyzed coins into the self-learning mind "
+                              "layer as the scanner runs")
+
+    # Self-learning mind layer: analog + model + rug reasoning (Section 10).
+    mind = sub.add_parser("mind", help="self-learning mind layer (evaluate / metrics)")
+    mind_sub = mind.add_subparsers(dest="mind_command", required=True)
+    mind_eval = mind_sub.add_parser(
+        "evaluate", help="analog + model + rug verdict for one token")
+    mind_eval.add_argument("address")
+    mind_eval.add_argument("--chain", default="solana", help="chain id (default solana)")
+    mind_sub.add_parser(
+        "metrics", help="self-evaluation metrics over resolved predictions")
 
     args = parser.parse_args(argv)
     if getattr(args, "network", None) is None and args.command in ("discover", "scan"):

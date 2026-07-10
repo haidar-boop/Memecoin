@@ -1,0 +1,22 @@
+[Unit]
+Description=Meme Coin Intelligence — continuous scanner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__REPO_DIR__
+Environment=PYTHONUNBUFFERED=1
+ExecStart=__REPO_DIR__/.venv/bin/python -m meme_intelligence monitor --pumpfun
+Restart=always
+RestartSec=10
+# Belt-and-suspenders on top of the app's own exponential backoff (Rule 7):
+# if the process itself dies outright, systemd brings it back.
+StartLimitIntervalSec=0
+
+# Modest resource ceiling — this workload never needs much (Rule 12).
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target

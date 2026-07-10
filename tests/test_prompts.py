@@ -80,3 +80,25 @@ def test_generated_reports_are_compliant():
 def test_every_banned_phrase_is_detectable():
     for phrase in BANNED_PHRASES:
         assert check_language(f"analysts say {phrase} today") == [phrase]
+
+
+def test_negation_does_not_leak_across_sentences():
+    """Bug-hunt: 'not' in a PREVIOUS sentence/bullet whitelisted the next
+    clause's opening hype claim."""
+    assert check_language("Liquidity is not locked.\nGuaranteed strong meme.") == ["guaranteed"]
+    assert check_language("Community is organic, not botted. Guaranteed viral.") == ["guaranteed"]
+
+
+def test_no_doubt_is_not_a_negation():
+    assert check_language("There is no doubt this will pump hard.") == ["will pump"]
+
+
+def test_no_risk_noun_phrases_are_cautionary_not_hype():
+    """Bug-hunt: 'no risk assessment/data' is disclaiming language the prompt
+    DEMANDS; flagging it discarded whole paid judgments."""
+    assert check_language("Snapshot contains no risk assessment data.") == []
+    assert check_language("There are no risk signals available.") == []
+    # A bare hype 'no risk' still violates.
+    assert check_language("This trade carries no risk.") == ["no risk"]
+    # And real negated disclaimers still pass.
+    assert check_language("This is not guaranteed and is not risk free.") == []

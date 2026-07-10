@@ -50,6 +50,7 @@ class BaseCollector:
         retry_base_delay: float = 0.5,
         retry_max_delay: float = 8.0,
         session: aiohttp.ClientSession | None = None,
+        redact: tuple[str, ...] = (),
     ) -> None:
         self.name = name
         self._base_url = base_url.rstrip("/")
@@ -62,6 +63,15 @@ class BaseCollector:
         self._session = session
         self._owns_session = session is None
         self._logger = get_logger(f"collectors.{name}")
+        # Secrets embedded in the request URL/path (bot tokens, webhook URLs)
+        # that must never reach a log line, even inside an error message
+        # (Rule 16) — every raised error is scrubbed of these substrings.
+        self._redact = tuple(value for value in redact if value)
+
+    def _scrub(self, text: str) -> str:
+        for value in self._redact:
+            text = text.replace(value, "***REDACTED***")
+        return text
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -122,6 +132,7 @@ class BaseCollector:
         async def _request() -> Any:
             await self._rate_limiter.acquire()
             session = await self._get_session()
+            display_url = self._scrub(url)
             try:
                 request = (
                     session.post(url, params=params, headers=headers, json=json_body)
@@ -130,10 +141,19 @@ class BaseCollector:
                 )
                 async with request as response:
                     if response.status == 429:
-                        raise RateLimitedError(f"{self.name}: rate limited (429) on {url}")
+                        retry_after = None
+                        try:
+                            header = response.headers.get("Retry-After")
+                            if header is not None:
+                                retry_after = max(0.0, min(120.0, float(header)))
+                        except (TypeError, ValueError):
+                            retry_after = None  # HTTP-date form or junk: ignore
+                        raise RateLimitedError(
+                            f"{self.name}: rate limited (429) on {display_url}",
+                            retry_after_seconds=retry_after)
                     if response.status >= 500:
                         raise TransientCollectorError(
-                            f"{self.name}: server error {response.status} on {url}"
+                            f"{self.name}: server error {response.status} on {display_url}"
                         )
                     if response.status != 200:
                         if response.status in error_status_as_json:
@@ -141,20 +161,26 @@ class BaseCollector:
                                 return await response.json(content_type=None)
                             except (aiohttp.ContentTypeError, ValueError) as exc:
                                 raise CollectorError(
-                                    f"{self.name}: invalid JSON from {url}: {exc}"
+                                    f"{self.name}: invalid JSON from {display_url}: {exc}"
                                 ) from exc
-                        body = (await response.text())[:_ERROR_BODY_PREVIEW]
+                        body = self._scrub((await response.text())[:_ERROR_BODY_PREVIEW])
                         raise CollectorError(
-                            f"{self.name}: unexpected status {response.status} on {url}: {body}"
+                            f"{self.name}: unexpected status {response.status} "
+                            f"on {display_url}: {body}",
+                            status_code=response.status,
                         )
                     try:
                         return await response.json(content_type=None)
                     except (aiohttp.ContentTypeError, ValueError) as exc:
-                        raise CollectorError(f"{self.name}: invalid JSON from {url}: {exc}") from exc
+                        raise CollectorError(
+                            f"{self.name}: invalid JSON from {display_url}: {exc}"
+                        ) from exc
             except asyncio.TimeoutError as exc:
-                raise TransientCollectorError(f"{self.name}: timeout on {url}") from exc
+                raise TransientCollectorError(f"{self.name}: timeout on {display_url}") from exc
             except aiohttp.ClientError as exc:
-                raise TransientCollectorError(f"{self.name}: network error on {url}: {exc}") from exc
+                raise TransientCollectorError(
+                    f"{self.name}: network error on {display_url}: {self._scrub(str(exc))}"
+                ) from exc
 
         data = await retry_async(
             _request,

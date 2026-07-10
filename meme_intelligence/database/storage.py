@@ -7,9 +7,13 @@ compared against outcomes. SQLite keeps operations simple and reliable
 server database can replace it behind the same interface.
 
 The API is synchronous — local SQLite operations are sub-millisecond and
-the CLI flows call them between network awaits. The continuous scanner
-controller will wrap calls in a thread executor if profiling ever shows
-contention.
+the CLI flows call them between network awaits, all from the single
+asyncio event loop thread. The connection is opened with the default
+``check_same_thread=True``, so a ``Storage`` instance may only ever be
+used from the thread that created it — do NOT wrap calls in
+``run_in_executor``/a thread pool without first passing
+``check_same_thread=False`` and adding your own serialization, or every
+call from the executor thread raises immediately.
 """
 
 from __future__ import annotations
@@ -91,7 +95,58 @@ CREATE TABLE IF NOT EXISTS wallet_sightings (
 );
 CREATE INDEX IF NOT EXISTS idx_sightings_wallet ON wallet_sightings(wallet, seen_at);
 CREATE INDEX IF NOT EXISTS idx_sightings_token ON wallet_sightings(token_id);
+
+-- Alert history (Part 29 Section 11): every delivered alert, joinable
+-- against later snapshots so Section 12 / Part 24 can measure which
+-- alerts were useful and which were noise.
+CREATE TABLE IF NOT EXISTS alerts (
+    id INTEGER PRIMARY KEY,
+    token_id INTEGER NOT NULL REFERENCES tokens(id),
+    created_at TEXT NOT NULL,
+    priority TEXT NOT NULL,
+    alert_type TEXT NOT NULL,
+    title TEXT NOT NULL,
+    reasons TEXT NOT NULL,       -- JSON array
+    scores TEXT NOT NULL,        -- JSON object
+    score_at_alert REAL,         -- master score when the alert fired
+    source TEXT NOT NULL,
+    outcome TEXT                 -- filled by performance analysis (Part 24)
+);
+CREATE INDEX IF NOT EXISTS idx_alerts_token ON alerts(token_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_alerts_type ON alerts(alert_type, created_at);
+
+-- Measured outcomes per prediction (Part 24, Sections 2-3): one row per
+-- (prediction snapshot, time window), joining what the framework said
+-- with what the market then did.
+CREATE TABLE IF NOT EXISTS outcomes (
+    id INTEGER PRIMARY KEY,
+    snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
+    token_id INTEGER NOT NULL REFERENCES tokens(id),
+    window_hours REAL NOT NULL,
+    target_at TEXT NOT NULL,     -- prediction time + window
+    measured_at TEXT NOT NULL,   -- when the measurement actually happened
+    price_usd REAL,
+    price_change_percent REAL,   -- vs price at prediction time
+    liquidity_usd REAL,
+    survived INTEGER,            -- liquidity above the survival floor (1/0), NULL unknown
+    source TEXT NOT NULL,        -- snapshot / live_fetch
+    UNIQUE (snapshot_id, window_hours)
+);
+CREATE INDEX IF NOT EXISTS idx_outcomes_token ON outcomes(token_id, window_hours);
 """
+
+# Columns added to existing tables after their first release; applied by
+# Storage._migrate() so databases created by earlier builds keep working
+# (Rule 18 — extend, never break).
+_MIGRATIONS = {
+    "snapshots": (
+        ("price_usd", "REAL"),       # market facts at prediction time (Part 24 S2)
+        ("liquidity_usd", "REAL"),
+        ("market_cap", "REAL"),
+        ("regime", "TEXT"),          # market condition bucketing (Part 24 S9)
+        ("opportunity_rank", "REAL"),  # Part 28 S5 watchlist opportunity ranking
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -130,10 +185,41 @@ class Storage:
         self._logger = get_logger("database.storage")
         if path != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(path)
+        # timeout + WAL + busy_timeout: the 24/7 monitor and the scheduled
+        # jobs (daily routine, backtest refresh) share this database file.
+        # WAL lets readers and the writer coexist, and the busy timeout
+        # makes a second writer wait politely instead of raising
+        # "database is locked" (Rule 7). On :memory: databases WAL is a
+        # harmless no-op (sqlite keeps "memory" journaling).
+        self._conn = sqlite3.connect(path, timeout=30.0)
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA busy_timeout=30000")
         self._conn.executescript(_SCHEMA)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Add post-release columns to tables from older databases (Rule 18)."""
+        for table, columns in _MIGRATIONS.items():
+            existing = {row["name"] for row in
+                        self._conn.execute(f"PRAGMA table_info({table})")}
+            for name, sql_type in columns:
+                if name not in existing:
+                    try:
+                        self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}")
+                        self._logger.info("migrated %s: added column %s", table, name)
+                    except sqlite3.OperationalError as exc:
+                        # Two processes sharing this database (the monitor
+                        # and a cron job) can both start up against a
+                        # pre-upgrade file at once, both see the column
+                        # missing, and both attempt this ALTER TABLE — the
+                        # loser hits "duplicate column name", not a real
+                        # failure (Rule 7: the migration already happened).
+                        if "duplicate column" not in str(exc).lower():
+                            raise
+                        self._logger.info(
+                            "%s.%s already migrated by a concurrent process", table, name)
 
     def close(self) -> None:
         self._conn.close()
@@ -166,13 +252,22 @@ class Storage:
 
     # ---- Assessment snapshots (feeds Part 24 backtesting) ----
 
-    def record_snapshot(self, assessment: MasterAssessment, source: str) -> int:
+    def record_snapshot(
+        self,
+        assessment: MasterAssessment,
+        source: str,
+        *,
+        pair=None,          # DexPair: market facts at prediction time (Part 24 S2)
+        regime: str | None = None,  # market condition bucket (Part 24 S9)
+        opportunity_rank: float | None = None,  # Part 28 S5 watchlist ranking
+    ) -> int:
         token_id = self.upsert_token(assessment.token)
         cursor = self._conn.execute(
             """INSERT INTO snapshots
                (token_id, created_at, final_score, classification, confidence,
-                coverage, category_scores, overrides, source)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                coverage, category_scores, overrides, source,
+                price_usd, liquidity_usd, market_cap, regime, opportunity_rank)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 token_id,
                 assessment.generated_at.isoformat(),
@@ -183,6 +278,11 @@ class Storage:
                 json.dumps(dataclasses.asdict(assessment.category_scores)),
                 json.dumps(list(assessment.overrides)),
                 source,
+                pair.price_usd if pair is not None else None,
+                pair.liquidity_usd if pair is not None else None,
+                pair.market_cap if pair is not None else None,
+                regime,
+                opportunity_rank,
             ),
         )
         self._conn.commit()
@@ -208,7 +308,17 @@ class Storage:
                    FROM watchlist w JOIN tokens t ON t.id = w.token_id"""
         if not include_archived:
             query += " WHERE w.tier != 'archived'"
-        query += " ORDER BY w.tier, w.last_score DESC"
+        # `ORDER BY w.tier` sorts the raw TEXT alphabetically, putting
+        # 'archived' before every 'tier_N_*' value ('a' < 't') — with
+        # include_archived=True, archived (lowest priority) entries sorted
+        # ahead of tier_1 (highest priority). Rank explicitly instead.
+        query += """ ORDER BY CASE w.tier
+                         WHEN 'tier_1_high_priority' THEN 1
+                         WHEN 'tier_2_developing' THEN 2
+                         WHEN 'tier_3_research_only' THEN 3
+                         WHEN 'archived' THEN 4
+                         ELSE 5
+                     END, w.last_score DESC"""
         rows = self._conn.execute(query).fetchall()
         return [
             WatchlistEntry(
@@ -223,6 +333,27 @@ class Storage:
             )
             for row in rows
         ]
+
+    def top_opportunities(self, limit: int = 10) -> list[dict]:
+        """Active watchlist tokens ranked by their latest opportunity rank
+        (Part 28 Sections 5-6 — 'which are the strongest available
+        opportunities right now?'). Archived tokens are excluded; a token
+        whose latest snapshot predates the opportunity-rank feature (NULL)
+        sorts last rather than being dropped, so nothing silently vanishes.
+        """
+        rows = self._conn.execute(
+            """SELECT t.chain, t.address, t.symbol, t.name,
+                      w.tier, w.thesis, w.last_score, w.last_classification,
+                      (SELECT s.opportunity_rank FROM snapshots s
+                       WHERE s.token_id = w.token_id
+                       ORDER BY s.created_at DESC LIMIT 1) AS opportunity_rank
+               FROM watchlist w JOIN tokens t ON t.id = w.token_id
+               WHERE w.tier != 'archived'
+               ORDER BY opportunity_rank IS NULL, opportunity_rank DESC
+               LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def update_watchlist(
         self,
@@ -241,27 +372,33 @@ class Storage:
         ).fetchone()
 
         classification_value = classification.value if classification else None
+        # A separate SELECT-then-INSERT/UPDATE had a race window between
+        # two processes sharing this database (the 24/7 monitor and the
+        # daily/backtest cron jobs, now that Storage runs in WAL mode):
+        # both could see "no existing row" for the same brand-new token
+        # and both attempt INSERT, the second raising IntegrityError on
+        # the token_id primary key. A single UPSERT is atomic — the write
+        # itself can no longer race, even though the human-readable
+        # change description below is best-effort (rare cosmetic staleness
+        # under true concurrency, never a crash).
+        self._conn.execute(
+            """INSERT INTO watchlist
+               (token_id, tier, thesis, added_at, updated_at, last_score, last_classification)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(token_id) DO UPDATE SET
+                   tier = excluded.tier,
+                   thesis = COALESCE(excluded.thesis, watchlist.thesis),
+                   updated_at = excluded.updated_at,
+                   last_score = COALESCE(excluded.last_score, watchlist.last_score),
+                   last_classification =
+                       COALESCE(excluded.last_classification, watchlist.last_classification)""",
+            (token_id, tier.value, thesis, now, now, score, classification_value),
+        )
         if existing is None:
-            self._conn.execute(
-                """INSERT INTO watchlist
-                   (token_id, tier, thesis, added_at, updated_at, last_score, last_classification)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (token_id, tier.value, thesis, now, now, score, classification_value),
-            )
             change = WatchlistChange(token, "added", tier,
                                      f"added at {tier.value}" + (f" (score {score:.0f})" if score is not None else ""))
         else:
             old_tier = WatchlistTier(existing["tier"])
-            # COALESCE keeps the last known score/classification when an
-            # update (e.g. archival) carries none — history feeds learning.
-            self._conn.execute(
-                """UPDATE watchlist SET tier = ?, thesis = COALESCE(?, thesis),
-                       updated_at = ?,
-                       last_score = COALESCE(?, last_score),
-                       last_classification = COALESCE(?, last_classification)
-                   WHERE token_id = ?""",
-                (tier.value, thesis, now, score, classification_value, token_id),
-            )
             if old_tier is not tier:
                 change = WatchlistChange(token, "tier_changed", tier,
                                          f"{old_tier.value} -> {tier.value}")
@@ -367,4 +504,172 @@ class Storage:
                    ORDER BY j.id DESC LIMIT ?""",
                 (token.chain, token.address, limit),
             ).fetchall()
+        return [dict(row) for row in rows]
+
+    # ---- Alert history & performance (Part 29, Sections 11-12) ----
+
+    # Preference order for the one representative score stamped on an alert.
+    # 'or' on the raw dict values would treat a legitimate 0.0 score as
+    # missing (falsy); explicit None checks below avoid that, and checking
+    # every key AutomationRules actually uses means risk-only alert types
+    # (emergency_review, whale_exit, ...) get a real score instead of a
+    # permanent NULL that silently excludes them from alert_performance()
+    # and alerts_with_drift() (Rule 8).
+    _SCORE_KEY_PREFERENCE = ("master", "overall", "security", "smart_money",
+                             "community", "momentum")
+
+    @classmethod
+    def _score_at_alert(cls, scores: dict) -> float | None:
+        for key in cls._SCORE_KEY_PREFERENCE:
+            value = scores.get(key)
+            if value is not None:
+                return value
+        return None
+
+    def record_alert(self, event, source: str) -> int:
+        """Persist one delivered alert (Part 29, Section 11).
+
+        ``event`` is an :class:`~meme_intelligence.alerts.notification_engine.AlertEvent`
+        (duck-typed to avoid an alerts->database->alerts import cycle).
+        """
+        token_id = self.upsert_token(event.token)
+        cursor = self._conn.execute(
+            """INSERT INTO alerts
+               (token_id, created_at, priority, alert_type, title, reasons,
+                scores, score_at_alert, source)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (token_id, self._now().isoformat(), event.priority.value,
+             event.alert_type, event.title, json.dumps(list(event.reasons)),
+             json.dumps({k: v for k, v in event.scores.items()}),
+             self._score_at_alert(event.scores),
+             source),
+        )
+        self._conn.commit()
+        return int(cursor.lastrowid)
+
+    def alert_history(self, token: TokenIdentity | None = None, limit: int = 50) -> list[dict]:
+        """Recent alerts, newest first (Part 29, Section 11)."""
+        if token is None:
+            rows = self._conn.execute(
+                """SELECT a.id, a.created_at, a.priority, a.alert_type, a.title,
+                          a.score_at_alert, a.outcome, t.chain, t.address, t.symbol
+                   FROM alerts a JOIN tokens t ON t.id = a.token_id
+                   ORDER BY a.id DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                """SELECT a.id, a.created_at, a.priority, a.alert_type, a.title,
+                          a.score_at_alert, a.outcome, t.chain, t.address, t.symbol
+                   FROM alerts a JOIN tokens t ON t.id = a.token_id
+                   WHERE t.chain = ? AND t.address = ?
+                   ORDER BY a.id DESC LIMIT ?""",
+                (token.chain, token.address, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    # ---- Prediction outcomes (Part 24, Sections 2-3) ----
+
+    def predictions(self, *, with_price_only: bool = True) -> list[dict]:
+        """The FIRST snapshot per token — the moment the framework made its
+        call (Part 24 S3). Later snapshots are re-assessments, not new
+        predictions. ``with_price_only`` keeps rows measurable (a prediction
+        without a stored price cannot have a price outcome — honest gap)."""
+        price_filter = "AND s.price_usd IS NOT NULL" if with_price_only else ""
+        rows = self._conn.execute(
+            f"""SELECT s.id AS snapshot_id, s.token_id, s.created_at, s.final_score,
+                       s.classification, s.confidence, s.coverage, s.category_scores,
+                       s.price_usd, s.liquidity_usd, s.regime,
+                       t.chain, t.address, t.symbol
+                FROM snapshots s
+                JOIN tokens t ON t.id = s.token_id
+                WHERE s.id = (SELECT MIN(s2.id) FROM snapshots s2
+                              WHERE s2.token_id = s.token_id)
+                {price_filter}
+                ORDER BY s.created_at""",
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def snapshots_for_token(self, token_id: int) -> list[dict]:
+        rows = self._conn.execute(
+            """SELECT id, created_at, final_score, price_usd, liquidity_usd
+               FROM snapshots WHERE token_id = ? ORDER BY created_at""",
+            (token_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def record_outcome(
+        self, *, snapshot_id: int, token_id: int, window_hours: float,
+        target_at: str, measured_at: str, price_usd: float | None,
+        price_change_percent: float | None, liquidity_usd: float | None,
+        survived: bool | None, source: str,
+    ) -> None:
+        """Insert one measured outcome; re-measuring a window is a no-op."""
+        self._conn.execute(
+            """INSERT OR IGNORE INTO outcomes
+               (snapshot_id, token_id, window_hours, target_at, measured_at,
+                price_usd, price_change_percent, liquidity_usd, survived, source)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (snapshot_id, token_id, window_hours, target_at, measured_at,
+             price_usd, price_change_percent, liquidity_usd,
+             None if survived is None else int(survived), source),
+        )
+        self._conn.commit()
+
+    def outcomes_for_snapshot(self, snapshot_id: int) -> dict[float, dict]:
+        rows = self._conn.execute(
+            "SELECT * FROM outcomes WHERE snapshot_id = ? ORDER BY window_hours",
+            (snapshot_id,),
+        ).fetchall()
+        return {row["window_hours"]: dict(row) for row in rows}
+
+    def alerts_with_drift(self) -> list[dict]:
+        """Every alert with the master-score drift to the latest later
+        snapshot (NULL drift when no re-assessment happened yet)."""
+        rows = self._conn.execute(
+            """SELECT a.id, a.alert_type, a.priority, a.outcome, a.created_at,
+                      (SELECT s.final_score FROM snapshots s
+                       WHERE s.token_id = a.token_id AND s.created_at > a.created_at
+                       ORDER BY s.created_at DESC LIMIT 1) - a.score_at_alert AS drift
+               FROM alerts a
+               WHERE a.score_at_alert IS NOT NULL
+               ORDER BY a.id""",
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def set_alert_outcome(self, alert_id: int, outcome: str) -> None:
+        """Label an alert after measurement (Part 29 S11 / Part 24 S10)."""
+        self._conn.execute("UPDATE alerts SET outcome = ? WHERE id = ?",
+                           (outcome, alert_id))
+        self._conn.commit()
+
+    def alert_performance(self, *, min_followups: int = 1) -> list[dict]:
+        """Per-alert-type outcome measurement (Part 29, Section 12).
+
+        For every alert, the token's master score at alert time is compared
+        with its latest snapshot afterwards. Positive average drift means
+        the alert type tends to precede improvement (useful); near zero
+        means noise; negative means it precedes deterioration — which for
+        risk alerts is the alert WORKING. Interpretation stays with the
+        reader; this reports the measurements (Rule 8).
+        """
+        rows = self._conn.execute(
+            """SELECT a.alert_type,
+                      COUNT(*) AS alerts_measured,
+                      AVG(s.final_score - a.score_at_alert) AS avg_score_drift,
+                      SUM(CASE WHEN s.final_score > a.score_at_alert THEN 1 ELSE 0 END)
+                          AS improved_count
+               FROM alerts a
+               JOIN tokens t ON t.id = a.token_id
+               JOIN snapshots s ON s.id = (
+                   SELECT s2.id FROM snapshots s2
+                   WHERE s2.token_id = a.token_id AND s2.created_at > a.created_at
+                   ORDER BY s2.created_at DESC LIMIT 1
+               )
+               WHERE a.score_at_alert IS NOT NULL
+               GROUP BY a.alert_type
+               HAVING COUNT(*) >= ?
+               ORDER BY alerts_measured DESC""",
+            (min_followups,),
+        ).fetchall()
         return [dict(row) for row in rows]

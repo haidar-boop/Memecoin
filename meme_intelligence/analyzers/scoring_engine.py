@@ -359,4 +359,7 @@ class ScoringEngine:
                 available += weight_map[name]
         if available == 0.0:
             raise InsufficientDataError("no category scores available for master assessment")
-        return weighted_sum / available, available
+        # Clamp: float renormalization can overshoot to 100.00000000000001 on
+        # boundary-valid all-100 inputs, and classify() then raised ValueError,
+        # aborting the whole cycle/routine (bug-hunt finding, reproduced).
+        return min(100.0, max(0.0, weighted_sum / available)), available

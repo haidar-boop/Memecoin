@@ -16,7 +16,7 @@ human operator.
 | Part 2 — Scanning infrastructure & data architecture | Rate limiting, TTL cache, retry/backoff, provider failover pool, base collector, DexScreener client | ✅ Built |
 | Part 3 — Discovery engine | GeckoTerminal new-pool client, discovery engine with hard filters, dedupe, Discovery Score, rejection tracking | ✅ Built |
 | Part 4 — Rug detection & security analysis | GoPlus client (EVM + Solana), security analyzer with graded risk taxonomy, destructive-risk overrides, confidence/coverage reporting | ✅ Built |
-| Part 5 — Foundation & community intelligence | Community analyzer (engagement/growth/loyalty/creativity/dev-relationship) with fake-community detection; foundation score combiner | ✅ Built (engines; social collectors need API keys) |
+| Part 5 — Foundation & community intelligence | Community analyzer (engagement/growth/loyalty/creativity/dev-relationship) with fake-community detection; foundation score combiner | ✅ Built (free CoinGecko community data live: telegram/sentiment/reddit; Twitter-depth aggregator deferred) |
 | Part 6 — On-chain intelligence & wallet behavior | On-chain analyzer (holder health, volume quality, buy/sell pressure, phase classification) running today on market+security data; smart-money/whale/flow slots ready for wallet collectors | ✅ Built (partial data sources) |
 | Part 7 — Token evaluation & market structure | Token analyzer: market-cap staging, FDV dilution, liquidity/volume-to-mcap ratios, supply concentration, valuation classification, competition percentile helper | ✅ Built |
 | Part 8 — Trading strategy & execution framework | Trade planner: trade score, setup classification, conviction + sizing guidance, entry checklist, required confirmations, invalidation conditions, FOMO questions — plans only, never orders | ✅ Built |
@@ -31,7 +31,11 @@ human operator.
 | Part 16 — AI execution rules & operating instructions | Canonical analyst system prompt (for the LLM layer) + banned-language guard enforced on all generated reports; quick/compare/watchlist commands; alert "watch next" guidance; shared watchlist reviewer | ✅ Built |
 | Part 17 — Smart money & whale intelligence | Helius + Birdeye collectors (top holders resolved to owners, trades, transfers), wallet analyzer (whale classification, accumulation verdict, exchange flow lower-bounds, smart-money score), wallet sightings DB + reputation formula, 3 new alert types, wallets command; enriches the on-chain score | ✅ Built (Solana; track records accumulate via Part 24) |
 | Part 18 — Advanced rug detection & scam prevention | Continuous contract-change monitoring: security facts persisted per token and diffed on every re-analysis (honeypot appearing / ownership un-renounced / mint authority / LP unlock → CRITICAL; blacklist/pause/tax hikes → HIGH; concentration creep / holder drain → MEDIUM); promotion-and-exit pattern detector | ✅ Built (deep dev-history indexing deferred — needs a data source we don't have) |
-| Parts 19+ — Narrative engine, full alert intelligence, dashboard, backtesting | — | ⏳ Upcoming |
+| Part 19 — Narrative intelligence & viral potential | Viral score (memorability/shareability/emotional impact/cultural timing/participation, 5×20%); narrative intelligence score (meme strength/timing/viral potential/creativity/long-term, 5×20%) feeding the master framework's 15% narrative category; category + life-cycle stage classification; sentiment; three narrative risk factors → Low/Medium/High; viral catalysts; evidence-derived strengths/weaknesses; community-engine cross-fill for participation/creativity | ✅ Built (judgment slots await the AI layer / social collectors — engine reports partial coverage honestly) |
+| Part 23 — AI agent integration & intelligence pipeline | LLM reasoning layer (Claude, structured outputs): one validated judgment call fills the foundation/narrative qualitative slots + bull/bear reasoning + confidence; structured Section-3 snapshots (never raw data); layered validation (schema → ranges → banned-language guard → confidence floor); research modes (fast/standard/deep); runs post-pipeline only, never on destructive tokens, degrades to deterministic evidence on any failure; `report --ai` / `plan --ai` | ✅ Built (live-verified; memory/feedback loop lands with Part 24) |
+| Part 29 — Real-time alert intelligence & notification | Telegram bot + Discord webhook sinks (channel-category routing, min-priority noise control, Section 7 message format with why-it-matters/evidence/risk); Section 10 dispatch ranking (impact/confidence/urgency/novelty); alert history DB + per-type performance measurement (score drift after alert); community-fed opportunity gate + fake-community alert; `alerts` CLI with `--test` delivery check | ✅ Built (add a bot token / webhook to activate delivery) |
+| Part 24 — Backtesting & self-improvement | Outcome tracking (1h/24h/7d/30d windows from stored snapshots or live fetch; token death recorded); prediction grading with honest undetermined; Section 4 metrics split by classification/regime/confidence; per-signal performance; weight experiments (report-only under the Part 31 lock); failure/success signal patterns; alert-outcome labeling; strategy-change journal; `backtest [--refresh]` CLI | ✅ Built (judgments mature as the scanner accumulates outcomes) |
+| Parts 20+ — Dashboard, remaining consolidation parts | — | ⏳ Upcoming |
 
 ## Project structure
 
@@ -66,23 +70,28 @@ meme_intelligence/
 │   ├── token_analyzer.py      # token structure: staging, dilution, ratios
 │   ├── risk_analyzer.py       # risk score + portfolio limits + emergencies
 │   ├── momentum_analyzer.py   # momentum lenses, entry zones, preferred action
+│   ├── narrative_analyzer.py  # Part 19: viral score, narrative score, stage, catalysts
 │   ├── wallet_intelligence.py # whales, accumulation, smart-money score, reputation
 │   ├── security_monitor.py    # Part 18: security-fact diffs, change severities
 │   └── scoring_engine.py      # master score: overrides, decision tree, weights
 ├── trading/
 │   └── trade_planner.py    # trade plans: checklist, sizing guidance, invalidations
 ├── alerts/
-│   └── notification_engine.py # automation rules + alert dispatch with cooldown
+│   ├── notification_engine.py # automation rules + ranked dispatch with cooldown
+│   └── sinks.py            # Part 29: Telegram/Discord delivery + Section 7 format
 ├── database/
 │   └── storage.py          # SQLite: tokens, snapshots, watchlist, journal
 ├── workflow/
 │   ├── pipeline.py         # shared per-token analysis chain (one implementation)
 │   ├── daily_routine.py    # Part 11 daily research-desk orchestration
 │   └── controller.py       # Part 13 continuous 24/7 scanning loop
+├── analytics/
+│   └── backtesting.py      # Part 24: outcomes, grading, metrics, experiments
 ├── ai/
 │   ├── report_generator.py # Part 12 canonical intelligence report
 │   ├── comparison.py       # Part 16 multi-token comparison + ranking
-│   └── prompts.py          # analyst system prompt + banned-language guard
+│   ├── prompts.py          # analyst system prompt + banned-language guard
+│   └── reasoning.py        # Part 23: LLM judgment service (structured outputs)
 tests/                      # pytest suite (unit tests, no network required)
 ```
 
@@ -97,11 +106,14 @@ python -m meme_intelligence security <address> --chain solana  # rug/security ch
 python -m meme_intelligence scan --network solana --top 5    # discovery -> security -> on-chain
 python -m meme_intelligence plan <address> --chain ethereum --regime neutral  # full pass + trade plan
 python -m meme_intelligence report <address> --chain ethereum  # canonical intelligence report
+python -m meme_intelligence report <address> --chain solana --ai  # + AI reasoning layer (Part 23)
 python -m meme_intelligence quick <address> --chain solana    # Level 1 fast scan
 python -m meme_intelligence compare ethereum:0xPEPE solana:WIFADDR  # table + ranking
 python -m meme_intelligence watchlist --refresh               # show / re-score tracked tokens
 python -m meme_intelligence daily                             # full daily routine + watchlist
 python -m meme_intelligence monitor --cycles 5 --interval 30  # continuous scanner + alerts
+python -m meme_intelligence alerts --test                      # check alert delivery setup
+python -m meme_intelligence backtest --refresh                 # measure outcomes, grade predictions
 ```
 
 Configuration is entirely environment-driven — see `.env.example` for every
@@ -147,11 +159,11 @@ environment.
 1. ~~Foundation: config, models, collectors~~ ✅
 2. ~~Discovery engine~~ ✅
 3. ~~Security analysis engine (rug detection, honeypot, holder concentration)~~ ✅
-4. ~~Community / on-chain / foundation analyzers~~ ✅ (social + wallet
-   collectors pending API keys — engines run on partial data honestly)
+4. ~~Community / on-chain / foundation analyzers~~ ✅ (free CoinGecko
+   community data live; Twitter-depth aggregator deferred until earned)
 5. ~~Token structure analyzer + trade planner~~ ✅
 6. ~~Risk management framework + master scoring engine~~ ✅
 7. ~~Daily workflow + database + report template~~ ✅
 8. ~~Momentum analyzer + continuous scanner + automation rules~~ ✅
-9. Narrative engine, Telegram/Discord sinks, dashboard
-10. AI/LLM integration for qualitative judgments, backtesting loop
+9. ~~Narrative engine, Telegram/Discord sinks~~ ✅ (dashboard still pending)
+10. ~~AI/LLM integration for qualitative judgments, backtesting loop~~ ✅

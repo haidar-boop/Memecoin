@@ -113,10 +113,34 @@ BANNED_PHRASES: tuple[str, ...] = (
     "no risk",
 )
 
+# "no risk assessment/data/analysis..." is a cautionary statement ABOUT
+# missing information — exactly the disclaiming language the system prompt
+# demands — not a hype claim. Without this lookahead, each such phrase
+# discarded an entire (paid) AI judgment (bug-hunt finding).
+_NO_RISK_NOUN_EXCEPTIONS = (
+    r"(?!\s+(?:assessment|data|analysis|score|signal|signals|flag|flags|"
+    r"control|controls|information|profile)\b)"
+)
+
 _BANNED_PATTERNS = [
-    re.compile(r"\b" + re.escape(phrase).replace(r"\ ", r"\s+") + r"\b", re.IGNORECASE)
+    re.compile(
+        r"\b" + re.escape(phrase).replace(r"\ ", r"\s+") + r"\b"
+        + (_NO_RISK_NOUN_EXCEPTIONS if phrase == "no risk" else ""),
+        re.IGNORECASE)
     for phrase in BANNED_PHRASES
 ]
+
+# A negation immediately before a match flips its meaning: "not guaranteed"
+# and "no guarantee against a rug pull" are cautionary disclosures, the
+# opposite of the hype claims these phrases exist to catch. The system
+# prompt explicitly asks for this disclaiming language ("always mention
+# possible losses"), so without this guard, honest AI judgments get
+# discarded wholesale on a false positive.
+_NEGATION_WINDOW_CHARS = 40
+_NEGATION_WORDS = {
+    "not", "no", "never", "nothing", "without", "n't",
+    "isn't", "doesn't", "won't", "can't", "cannot", "hardly",
+}
 
 
 def check_language(text: str) -> list[str]:
@@ -128,6 +152,19 @@ def check_language(text: str) -> list[str]:
     """
     violations: list[str] = []
     for phrase, pattern in zip(BANNED_PHRASES, _BANNED_PATTERNS):
-        if pattern.search(text):
+        for match in pattern.finditer(text):
+            preceding = text[max(0, match.start() - _NEGATION_WINDOW_CHARS):match.start()]
+            # A negation only whitelists a match within the SAME clause: the
+            # old window leaked across sentence/bullet boundaries, so a bear
+            # bullet ending "...is not locked" whitelisted the next bullet's
+            # opening "Guaranteed..." (bug-hunt finding). Also, "no doubt" is
+            # an INTENSIFIER, not a negation of the claim that follows.
+            preceding = re.split(r"[.!?\n;]", preceding)[-1]
+            preceding = re.sub(r"\b(?:no|without)\s+(?:doubt|question)\b", "",
+                               preceding, flags=re.IGNORECASE)
+            preceding_words = re.findall(r"[\w']+", preceding.lower())
+            if any(word in _NEGATION_WORDS for word in preceding_words[-4:]):
+                continue
             violations.append(phrase)
+            break
     return violations

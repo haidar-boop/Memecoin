@@ -19,8 +19,11 @@ sinks arrive with the Part 29 build.
 
 from __future__ import annotations
 
+import dataclasses
+import math
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Callable, Protocol
 
 from meme_intelligence.analyzers.risk_analyzer import emergency_flags
@@ -29,6 +32,70 @@ from meme_intelligence.core.enums import AccumulationVerdict, AlertPriority, Ent
 from meme_intelligence.core.logging_setup import get_logger
 from meme_intelligence.core.models import TokenIdentity
 from meme_intelligence.workflow.pipeline import PipelineResult
+
+# Gates a fresh launch may legitimately leave unverified and still earn a
+# HIGH "strong candidate" alert: community data comes from CoinGecko,
+# which does not list pump.fun-era tokens for days. Every other gate
+# (overall/security/on-chain/liquidity) must have data and pass — only
+# this one may be missing (Rule 8: the gap is surfaced, not assumed).
+_STRONG_CANDIDATE_ALLOWED_UNVERIFIED = frozenset({"community"})
+
+# ---- Interest gate (Part 29 Section 1: alerts protect decisions) ----
+#
+# The system never trades, and the operator only hears about a token when it
+# earns a HIGH opportunity alert. Every other tracked token is internal
+# research state — so a HIGH risk warning / score drop / emergency on one of
+# those protects no decision the operator could possibly have made. Live
+# failure mode this closes: dying pump.fun garbage (liquidity a few $k, one
+# wallet holding 65–97%) sat above the token-death floor and re-warned the
+# phone every recheck as HIGH "RISK WARNING" / "SCORE DROP REVIEW" spam.
+#
+# Alert types that RECOMMEND a token to the operator — receiving one means
+# the operator may have acted, so protective alerts stay at full priority
+# afterwards. MEDIUM early_opportunity is deliberately excluded: it is a
+# provisional research note, not a recommendation, and most dying garbage
+# passed through it on the way down.
+INTEREST_ALERT_TYPES = frozenset({"high_priority_opportunity", "strong_candidate"})
+
+# Alert types that exist to PROTECT a holder/decision rather than surface a
+# new opportunity. On a token with no operator interest they demote to LOW:
+# still printed by the console and recorded in history (Rule 13), but below
+# the external sinks' minimum priority, so the phone never buzzes for them.
+_PROTECTIVE_ALERT_TYPES = frozenset({
+    "emergency_review", "risk_warning", "score_drop_review", "token_death",
+    "whale_exit", "insider_risk", "community_fake", "security_change",
+})
+
+_NO_INTEREST_NOTE = ("informational only: this token never earned an "
+                     "opportunity alert, so no operator decision is exposed "
+                     "to it (interest gate)")
+
+
+def gate_events_by_interest(
+    events: list["AlertEvent"], *, operator_interest: bool, enabled: bool = True,
+) -> list["AlertEvent"]:
+    """Demote protective alerts to LOW when the operator was never pointed
+    at this token (see the interest-gate rationale above).
+
+    A HIGH opportunity alert in the SAME batch grants interest immediately —
+    contradictory signals on a token being recommended right now must both
+    arrive at full priority. Idempotent: already-LOW events pass untouched.
+    """
+    if not enabled or operator_interest:
+        return events
+    if any(e.alert_type in INTEREST_ALERT_TYPES
+           and e.priority is AlertPriority.HIGH for e in events):
+        return events
+    gated: list[AlertEvent] = []
+    for event in events:
+        if (event.alert_type in _PROTECTIVE_ALERT_TYPES
+                and event.priority is not AlertPriority.LOW):
+            gated.append(dataclasses.replace(
+                event, priority=AlertPriority.LOW,
+                reasons=event.reasons + (_NO_INTEREST_NOTE,)))
+        else:
+            gated.append(event)
+    return gated
 
 
 @dataclass(frozen=True)
@@ -44,11 +111,15 @@ class AlertEvent:
     reasons: tuple[str, ...]
     scores: dict[str, float | None] = field(default_factory=dict)
     monitoring: tuple[str, ...] = ()  # recommended next checks
+    why_it_matters: str = ""          # potential impact (Part 29, Section 7)
+    detected_at: datetime | None = None  # stamped at dispatch when unset
 
     def render(self) -> str:
         symbol = self.token.symbol or self.token.address[:8]
         lines = [f"[{self.priority.value.upper()}] {self.alert_type}: {symbol} ({self.token.chain})",
                  f"  {self.title}"]
+        if self.why_it_matters:
+            lines.append(f"  why it matters: {self.why_it_matters}")
         for reason in self.reasons:
             lines.append(f"  - {reason}")
         if self.scores:
@@ -73,20 +144,94 @@ class AutomationRules:
         result: PipelineResult,
         *,
         previous_score: float | None = None,
+        ai_verification_inconclusive: bool = False,
+        deterministic_risk_veto: str | None = None,
+        operator_interest: bool = True,
     ) -> list[AlertEvent]:
+        """``ai_verification_inconclusive`` — the caller ran AI verification
+        but no usable judgment came back (discarded below the confidence
+        floor, or the call failed). Without this flag a judgment of 15/100
+        vanished entirely and fired the HIGH tier, while 22/100 attached and
+        vetoed it — inverted protection. The scanner is the only caller that
+        knows verification ran, so it must say so.
+
+        ``deterministic_risk_veto`` — a zero-cost check (rug engine, risk
+        alerts already firing) vetoed this token before any paid call. It
+        downgrades BOTH HIGH opportunity tiers (bug-hunt finding: the
+        fully-verified tier used to bypass every veto — a blacklisted
+        deployer with community data still fired HIGH, unchecked).
+
+        ``operator_interest`` — whether the operator was ever POINTED at this
+        token (a HIGH opportunity alert was delivered for it). When False,
+        protective alerts demote to LOW via the interest gate (see
+        :func:`gate_events_by_interest`); the default True preserves full
+        priority for every caller that does not track alert history."""
+        # A dead token is a closed case (Part 29 Section 1 — alerts protect
+        # decisions, and no entry/exit decision remains once liquidity has
+        # collapsed): one MEDIUM post-mortem replaces the warning/drop pair,
+        # and opportunity/momentum/accumulation signals on the corpse are
+        # pump artifacts, not information. Only a confirmed destructive
+        # finding still matters — anyone already holding needs to know.
+        death = self._token_death_rule(result, previous_score)
+        if death is not None:
+            events = [event for event in self._emergency_rule(result)
+                      if event.priority is AlertPriority.CRITICAL]
+            events.append(death)
+            return gate_events_by_interest(
+                events, operator_interest=operator_interest,
+                enabled=self._s.risk_alerts_require_interest)
+
         events: list[AlertEvent] = []
         events.extend(self._emergency_rule(result))
-        opportunity = self._opportunity_rule(result)
+        opportunity = self._opportunity_rule(
+            result, ai_verification_inconclusive=ai_verification_inconclusive,
+            deterministic_risk_veto=deterministic_risk_veto)
         if opportunity is not None:
             events.append(opportunity)
         momentum = self._momentum_rule(result)
         if momentum is not None:
             events.append(momentum)
         events.extend(self._smart_money_rules(result))
+        community = self._community_rule(result)
+        if community is not None:
+            events.append(community)
         drop = self._score_drop_rule(result, previous_score)
         if drop is not None:
             events.append(drop)
-        return events
+        return gate_events_by_interest(
+            events, operator_interest=operator_interest,
+            enabled=self._s.risk_alerts_require_interest)
+
+    # IF liquidity has collapsed below the dead floor THEN the failure is a
+    # completed event, not a warning — emit one post-mortem (Part 29 S1).
+    def _token_death_rule(self, result: PipelineResult,
+                          previous_score: float | None) -> AlertEvent | None:
+        liquidity = result.pair.liquidity_usd
+        # Unknown liquidity is NOT death — absence of data never becomes a
+        # conclusion (Rule 8). NaN must bail out here too: `nan >= floor`
+        # is always False (same hazard as `nan <= 0` elsewhere), so without
+        # the explicit isfinite check a NaN liquidity value fell through
+        # to "dead" instead of being excluded, misclassifying a token with
+        # simply-unmeasurable liquidity and suppressing every real alert.
+        if liquidity is None or not math.isfinite(liquidity) or liquidity >= self._s.dead_liquidity_usd:
+            return None
+        reasons = [f"liquidity collapsed to ${liquidity:,.0f} "
+                   f"(dead floor ${self._s.dead_liquidity_usd:,.0f})"]
+        if previous_score is not None:
+            reasons.append(f"score history: {previous_score:.0f} -> "
+                           f"{result.master.final_score:.0f}")
+        return AlertEvent(
+            priority=AlertPriority.MEDIUM,
+            alert_type="token_death",
+            token=result.pair.base_token,
+            title="Token appears dead: liquidity has collapsed",
+            reasons=tuple(reasons),
+            scores={"master": result.master.final_score},
+            why_it_matters="A completed rug/abandonment closes the case: the "
+                           "outcome is recorded for performance grading, and "
+                           "no further tracking is useful.",
+            monitoring=("none — archived from active tracking",),
+        )
 
     # IF destructive risk appears THEN trigger emergency review (Part 13 Section 7).
     def _emergency_rule(self, result: PipelineResult) -> list[AlertEvent]:
@@ -99,7 +244,10 @@ class AutomationRules:
                 token=result.pair.base_token,
                 title="Destructive risk detected — do not enter; review any exposure now",
                 reasons=tuple(critical),
-                scores={"security": result.security.overall_score},
+                scores={"security": result.security.overall_score,
+                        "master": result.master.final_score},
+                why_it_matters="Destructive findings invalidate the opportunity outright; "
+                               "capital in this token is at immediate structural risk.",
                 monitoring=("verify LP status and contract permissions immediately",
                             "if holding, decide exit before anything else"),
             ))
@@ -110,13 +258,16 @@ class AutomationRules:
                 token=result.pair.base_token,
                 title="Serious risk indicators appeared",
                 reasons=tuple(high[:4]),
-                scores={"security": result.security.overall_score},
+                scores={"security": result.security.overall_score,
+                        "master": result.master.final_score},
                 monitoring=("watch liquidity and top-holder movements closely",),
             ))
         return events
 
     # IF gates pass THEN move to high-priority watchlist (Parts 2/13).
-    def _opportunity_rule(self, result: PipelineResult) -> AlertEvent | None:
+    def _opportunity_rule(self, result: PipelineResult, *,
+                          ai_verification_inconclusive: bool = False,
+                          deterministic_risk_veto: str | None = None) -> AlertEvent | None:
         if result.security.is_destructive:
             return None
 
@@ -125,7 +276,10 @@ class AutomationRules:
             "security": (result.security.overall_score, self._t.security),
             "onchain": (result.onchain.overall_score if result.onchain else None, self._t.onchain),
             "liquidity": (result.security.sub_scores.get("liquidity"), self._t.liquidity),
-            "community": (None, self._t.community),  # collector pending; stays unverified
+            # Live since the community collector landed; unlisted tokens
+            # still report None and stay honestly unverified (Rule 8).
+            "community": (result.community.overall_score if result.community else None,
+                          self._t.community),
         }
 
         unverified = [name for name, (value, _) in gates.items() if value is None]
@@ -135,16 +289,71 @@ class AutomationRules:
             return None
 
         scores = {name: value for name, (value, _) in gates.items()}
+        veto_caveat = ([f"deterministic risk veto: {deterministic_risk_veto}"]
+                       if deterministic_risk_veto else [])
         if not unverified:
+            # The fully-verified tier honors the deterministic vetoes too
+            # (depth floor, lukewarm AI, rug-engine/risk veto) — it used to
+            # bypass all of them (bug-hunt finding). It does NOT downgrade on
+            # a merely-unavailable AI: with every gate verified by data,
+            # deterministic evidence stands on its own (Rule 9).
+            full_caveats = self._strong_candidate_caveats(result) + veto_caveat
+            if not full_caveats:
+                return AlertEvent(
+                    priority=AlertPriority.HIGH,
+                    alert_type="high_priority_opportunity",
+                    token=result.pair.base_token,
+                    title=f"All review gates passed (score {result.master.final_score:.0f})",
+                    reasons=(f"classification: {result.master.classification.value}",),
+                    scores=scores,
+                    why_it_matters="Every measurable human-review gate passed with data — "
+                                   "the rare setup the scanner exists to find.",
+                    monitoring=("track holder growth and volume quality for continuation",),
+                )
             return AlertEvent(
-                priority=AlertPriority.HIGH,
-                alert_type="high_priority_opportunity",
+                priority=AlertPriority.MEDIUM,
+                alert_type="early_opportunity",
                 token=result.pair.base_token,
-                title=f"All review gates passed (score {result.master.final_score:.0f})",
-                reasons=(f"classification: {result.master.classification.value}",),
+                title=f"Provisional opportunity (score {result.master.final_score:.0f}) — "
+                      f"held back by vetoes",
+                reasons=(f"classification: {result.master.classification.value}",
+                         *full_caveats),
                 scores=scores,
-                monitoring=("track holder growth and volume quality for continuation",),
+                monitoring=("re-evaluate once the named vetoes clear",),
             )
+
+        # Strong-candidate tier (Part 2 S4): a fresh launch whose ONLY
+        # unverified gate is community (no CoinGecko listing yet) but which
+        # clears a raised overall bar with every measurable gate passing
+        # still earns a HIGH alert — otherwise a genuinely strong pump.fun-
+        # era launch is permanently capped at MEDIUM and hidden behind a
+        # HIGH delivery filter. The missing gate is named, never assumed
+        # passed (Rule 8), so this stays honest confirmation-with-a-caveat.
+        overall_score = result.master.final_score
+        caveats: list[str] = []
+        if (set(unverified) <= _STRONG_CANDIDATE_ALLOWED_UNVERIFIED
+                and overall_score >= self._t.strong_candidate_overall):
+            caveats = self._strong_candidate_caveats(
+                result, ai_verification_inconclusive=ai_verification_inconclusive)
+            caveats += veto_caveat
+            if not caveats:
+                return AlertEvent(
+                    priority=AlertPriority.HIGH,
+                    alert_type="strong_candidate",
+                    token=result.pair.base_token,
+                    title=f"Strong candidate (score {overall_score:.0f}) — "
+                          f"community unverified",
+                    reasons=(f"classification: {result.master.classification.value}",
+                             "every measurable gate passed strongly; "
+                             "community data not yet available (Rule 8)"),
+                    scores=scores,
+                    why_it_matters="A fresh launch clearing security, on-chain and "
+                                   "liquidity strongly — the early setup worth watching, "
+                                   "pending community confirmation.",
+                    monitoring=("confirm community traction before sizing any position",
+                                "watch holder growth and volume quality for continuation"),
+                )
+
         return AlertEvent(
             priority=AlertPriority.MEDIUM,
             alert_type="early_opportunity",
@@ -152,11 +361,48 @@ class AutomationRules:
             title=f"Provisional opportunity (score {result.master.final_score:.0f}) — "
                   f"unverified gates: {', '.join(unverified)}",
             reasons=(f"classification: {result.master.classification.value}",
-                     "unverified categories are NOT confirmation (Part 31 Section 6)"),
+                     "unverified categories are NOT confirmation (Part 31 Section 6)",
+                     *caveats),
             scores=scores,
             monitoring=tuple(f"verify the {name} gate before sizing any position"
                              for name in unverified),
         )
+
+    def _strong_candidate_caveats(self, result: PipelineResult, *,
+                                  ai_verification_inconclusive: bool = False) -> list[str]:
+        """Vetoes keeping a gate-passing fresh launch out of the HIGH tier.
+
+        Two live failure modes both produced HIGH alerts on junk: the
+        "liquidity" gate scores lock safety, not DEPTH, so a ~$16k pool
+        (trivially manipulable) cleared every gate; and a lukewarm AI
+        verification rode along as a footnote instead of counting. Each veto
+        downgrades the alert to MEDIUM with the reason named (Rule 8), so a
+        HIGH-filtered phone never sees it. Unknown liquidity vetoes too —
+        unverified depth is not depth.
+        """
+        caveats: list[str] = []
+        liquidity = result.pair.liquidity_usd
+        floor = self._t.strong_candidate_min_liquidity_usd
+        if liquidity is None or not math.isfinite(liquidity) or liquidity < floor:
+            shown = (f"${liquidity:,.0f}" if liquidity is not None
+                     and math.isfinite(liquidity) else "unknown")
+            caveats.append(f"liquidity depth {shown} is below the strong-candidate "
+                           f"floor (${floor:,.0f}) — thin pools are easily manipulated")
+        judgment = result.ai_judgment
+        if (judgment is not None
+                and judgment.confidence < self._t.strong_candidate_min_ai_confidence):
+            caveats.append(
+                f"AI verification confidence {judgment.confidence:.0f}/100 is below "
+                f"the strong-candidate floor "
+                f"({self._t.strong_candidate_min_ai_confidence:.0f})")
+        elif ai_verification_inconclusive:
+            # Verification ran but no usable judgment survived (discarded
+            # below the confidence floor, or the call failed). That is even
+            # LESS confirmation than a lukewarm judgment — without this, a
+            # 15/100 judgment vanished and fired HIGH while 22/100 vetoed.
+            caveats.append("AI verification ran but produced no usable judgment "
+                           "— treated as unconfirmed, not as a pass (Rule 8)")
+        return caveats
 
     # IF momentum accelerates through the gate in a sane entry zone THEN
     # surface it (Part 15 Section 5 — momentum alert).
@@ -224,9 +470,12 @@ class AutomationRules:
                 title=f"{wallet.whales_selling} whale(s) selling"
                       + (f"; net flow ${wallet.whale_net_flow_usd:,.0f}"
                          if wallet.whale_net_flow_usd is not None else ""),
+                why_it_matters="Large-holder distribution can absorb all organic demand "
+                               "and often precedes sharp drawdowns.",
                 reasons=tuple(f"{w.owner[:8]}… {w.percent:.1f}% [{w.classification.value}]"
                               for w in wallet.whales[:4]),
-                scores={"smart_money": wallet.overall_score},
+                scores={"smart_money": wallet.overall_score,
+                        "master": result.master.final_score},
                 monitoring=("check exchange inflows and holder-count trend next",),
             ))
 
@@ -237,10 +486,31 @@ class AutomationRules:
                 token=result.pair.base_token,
                 title="Artificial accumulation pattern detected",
                 reasons=tuple(f.message for f in wallet.findings[:3]),
-                scores={"smart_money": wallet.overall_score},
+                scores={"smart_money": wallet.overall_score,
+                        "master": result.master.final_score},
                 monitoring=("treat volume and holder growth as untrustworthy until this clears",),
             ))
         return events
+
+    # Community alert (Part 29, Section 3): a confirmed-fake community is a
+    # decision-changing event — the master score already forces Avoid, and
+    # this surfaces WHY to anyone tracking the token.
+    def _community_rule(self, result: PipelineResult) -> AlertEvent | None:
+        community = result.community
+        if community is None or not community.is_artificial:
+            return None
+        return AlertEvent(
+            priority=AlertPriority.HIGH,
+            alert_type="community_fake",
+            token=result.pair.base_token,
+            title="Community engagement is artificial",
+            reasons=tuple(f.message for f in community.findings[:4]),
+            scores={"community": community.overall_score,
+                    "master": result.master.final_score},
+            why_it_matters="Fake communities exist to exit on real buyers; social "
+                           "traction cannot be trusted as demand evidence here.",
+            monitoring=("treat all social signals for this token as untrustworthy",),
+        )
 
     # IF the score drops sharply vs the last snapshot THEN review (Part 13 Section 7).
     def _score_drop_rule(self, result: PipelineResult,
@@ -263,11 +533,16 @@ class AutomationRules:
         )
 
 
-def events_from_security_changes(token: TokenIdentity, changes) -> list[AlertEvent]:
+def events_from_security_changes(
+    token: TokenIdentity, changes, *, master_score: float | None = None,
+) -> list[AlertEvent]:
     """Convert detected security-fact changes into alert events (Part 18, Section 10).
 
     Changes arrive worst-first; one event is emitted per severity level so
-    a critical change is never buried inside a medium digest.
+    a critical change is never buried inside a medium digest. ``master_score``
+    is the master assessment score at detection time, so these alerts are
+    not permanently excluded from Part 29's score-drift performance
+    measurement (Rule 8/13 — the score existed, it just wasn't threaded through).
     """
     by_severity: dict[AlertPriority, list] = {}
     for change in changes:
@@ -293,9 +568,34 @@ def events_from_security_changes(token: TokenIdentity, changes) -> list[AlertEve
             token=token,
             title=titles.get(severity, "Security facts changed"),
             reasons=tuple(c.message for c in group[:5]),
+            scores={"master": master_score} if master_score is not None else {},
             monitoring=monitoring.get(severity, ()),
         ))
     return events
+
+
+# Alert ranking components (Part 29, Section 10). The spec fixes the
+# weights (impact 40 / confidence 30 / urgency 20 / novelty 10); the
+# component scales are documented implementation choices: impact and
+# urgency derive from the priority level (Section 2 defines priority AS
+# the impact/urgency grading), confidence from evidence density, novelty
+# from whether this token+type was alerted before.
+_RANK_WEIGHTS = {"impact": 0.40, "confidence": 0.30, "urgency": 0.20, "novelty": 0.10}
+_IMPACT_POINTS = {AlertPriority.CRITICAL: 100.0, AlertPriority.HIGH: 75.0,
+                  AlertPriority.MEDIUM: 50.0, AlertPriority.LOW: 25.0}
+_URGENCY_POINTS = {AlertPriority.CRITICAL: 100.0, AlertPriority.HIGH: 70.0,
+                   AlertPriority.MEDIUM: 40.0, AlertPriority.LOW: 10.0}
+
+
+def rank_alert(event: AlertEvent, *, is_novel: bool) -> float:
+    """0-100 dispatch rank (Part 29, Section 10). Higher ranks send first."""
+    confidence = min(100.0, 30.0 + 20.0 * len(event.reasons))
+    return (
+        _RANK_WEIGHTS["impact"] * _IMPACT_POINTS[event.priority]
+        + _RANK_WEIGHTS["confidence"] * confidence
+        + _RANK_WEIGHTS["urgency"] * _URGENCY_POINTS[event.priority]
+        + _RANK_WEIGHTS["novelty"] * (100.0 if is_novel else 25.0)
+    )
 
 
 class AlertSink(Protocol):
@@ -305,13 +605,19 @@ class AlertSink(Protocol):
 class ConsoleSink:
     """Prints alerts to stdout and the log (default sink until Part 29)."""
 
+    # A local log, not a delivery target: when external sinks (Telegram/
+    # Discord) are configured, the console's unconditional success must not
+    # make a lost phone alert count as delivered (see dispatch()).
+    external = False
+
     def __init__(self):
         self._logger = get_logger("alerts.console")
 
-    async def send(self, event: AlertEvent) -> None:
+    async def send(self, event: AlertEvent) -> bool:
         print(event.render())
         self._logger.info("alert dispatched: %s %s %s",
                           event.priority.value, event.alert_type, event.token.address)
+        return True
 
 
 class NotificationEngine:
@@ -333,18 +639,83 @@ class NotificationEngine:
         self._logger = get_logger("alerts.engine")
 
     async def dispatch(self, events: list[AlertEvent]) -> list[AlertEvent]:
-        """Send events not in cooldown; returns those actually delivered."""
-        delivered: list[AlertEvent] = []
+        """Send events not in cooldown; returns those actually delivered.
+
+        Events are ranked before sending (Part 29 Section 10) so the most
+        decision-relevant alert always arrives first, and each is stamped
+        with its detection time for the Section 7 message format.
+        """
         now = self._time()
-        for event in events:
-            key = (event.token.chain, event.token.address.lower(), event.alert_type)
+
+        def key_of(event: AlertEvent) -> tuple[str, str, str, str]:
+            # Priority is part of the cooldown key: events_from_security_changes
+            # deliberately emits one event per severity for the same
+            # alert_type, and a lower-priority alert's cooldown must never
+            # suppress a later higher-priority one for the same token/type
+            # (a CRITICAL rug warning silently eaten by an earlier MEDIUM
+            # drift alert would be a permanent, unrecoverable loss — Rule 13).
+            return (event.token.chain, event.token.address.lower(),
+                    event.alert_type, event.priority.value)
+
+        # Evict cooldown entries that have expired: once older than the
+        # cooldown they can never suppress anything, so keeping them is pure
+        # memory growth in the weeks-long monitor process (bug-hunt finding).
+        # A just-expired key is treated as novel again anyway, so pruning is
+        # behaviour-preserving.
+        if len(self._last_sent) > 256:
+            self._last_sent = {k: t for k, t in self._last_sent.items()
+                               if now - t < self._cooldown}
+
+        ranked = sorted(
+            events,
+            key=lambda e: rank_alert(e, is_novel=key_of(e) not in self._last_sent),
+            reverse=True,
+        )
+
+        delivered: list[AlertEvent] = []
+        for event in ranked:
+            key = key_of(event)
             last = self._last_sent.get(key)
             if last is not None and now - last < self._cooldown:
                 self._logger.debug("alert suppressed by cooldown: %s %s",
                                    event.alert_type, event.token.address)
                 continue
-            self._last_sent[key] = now
+            if event.detected_at is None:
+                event = dataclasses.replace(event, detected_at=datetime.now(timezone.utc))
+            # Per-sink isolation: one sink raising must not abort the rest
+            # of this event's sinks NOR every remaining event in the batch
+            # (previously an unhandled exception from one sink propagated
+            # out of dispatch() entirely). Cooldown is stamped only after
+            # at least one sink actually delivered — stamping it
+            # unconditionally beforehand meant a total delivery outage
+            # (e.g. Telegram down) permanently lost the alert instead of
+            # letting it retry once the cooldown window elapsed (Rule 7).
+            # Delivery accounting (bug-hunt finding): sinks used to swallow
+            # their failures, and the always-successful console made a LOST
+            # phone alert count as delivered — cooldown stamped, recorded in
+            # history, never retried. Now a sink returns True (delivered),
+            # False (failed), or None (filtered / legacy sink, treated as
+            # success for compatibility); and when any EXTERNAL sink is
+            # configured, only external sinks decide delivery — the console
+            # is a log, not the operator's phone.
+            has_external = any(getattr(s, "external", False) for s in self._sinks)
+            any_delivered = False
             for sink in self._sinks:
-                await sink.send(event)
-            delivered.append(event)
+                try:
+                    outcome = await sink.send(event)
+                except Exception as exc:  # noqa: BLE001 — one sink's bug must not sink the batch
+                    outcome = False
+                    self._logger.error("sink %s failed to deliver %s alert for %s: %s",
+                                       type(sink).__name__, event.alert_type,
+                                       event.token.address, exc)
+                counts = getattr(sink, "external", False) or not has_external
+                if counts and outcome is not False:
+                    any_delivered = True
+            if any_delivered:
+                self._last_sent[key] = now
+                delivered.append(event)
+            else:
+                self._logger.warning(
+                    "all sinks failed for %s %s; not marking delivered (will retry)",
+                    event.alert_type, event.token.address)
         return delivered

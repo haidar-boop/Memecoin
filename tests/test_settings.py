@@ -36,6 +36,29 @@ def test_security_sub_weights_sum_to_one():
     assert w.contract + w.liquidity + w.distribution + w.developer + w.manipulation == pytest.approx(1.0)
 
 
+def test_security_sub_weights_match_part_33_section_11():
+    """Lock the values to Part 33 Section 11's literal weighting (Rule 1) so
+    the earlier undocumented drift (liquidity 0.25 / developer 0.15) can't
+    silently recur."""
+    w = SecuritySubWeights()
+    assert (w.contract, w.liquidity, w.developer, w.distribution, w.manipulation) == (
+        0.25, 0.20, 0.20, 0.20, 0.15)
+
+
+def test_opportunity_weights_match_part_28_section_5():
+    from meme_intelligence.config.settings import OpportunityWeights
+    w = OpportunityWeights()
+    assert (w.growth_potential, w.momentum, w.foundation, w.risk, w.timing) == (
+        0.30, 0.25, 0.20, 0.15, 0.10)
+
+
+def test_opportunity_weights_loaded_from_env():
+    settings = Settings.from_env(env={"MEMEINTEL_OPPORTUNITY_WEIGHTS_GROWTH_POTENTIAL": "0.40",
+                                      "MEMEINTEL_OPPORTUNITY_WEIGHTS_MOMENTUM": "0.15"})
+    assert settings.opportunity_weights.growth_potential == 0.40
+    assert settings.opportunity_weights.momentum == 0.15
+
+
 def test_invalid_weight_sum_rejected():
     with pytest.raises(ConfigurationError, match="must sum to 1.0"):
         ScoringWeights(security=0.50)  # breaks the sum
@@ -122,3 +145,76 @@ def test_env_picks_up_jupiter_api_key_and_probe_amount():
     settings = Settings.from_env(env=env)
     assert settings.jupiter_api_key == "test-jupiter-key"
     assert settings.liquidity_probe.probe_sol_amount == pytest.approx(0.5)
+
+
+# ---- Bug-hunt fixes: NaN-blind validation, bool parsing (Rule 6/8) ----
+
+def test_nan_rejected_by_positivity_validation():
+    """`nan <= 0` is always False, so a naive check lets NaN slip through."""
+    with pytest.raises(ConfigurationError):
+        from meme_intelligence.config.settings import ScanIntervals
+        ScanIntervals(ultra_fast=float("nan"))
+
+
+def test_nan_rejected_by_weight_sum_check():
+    with pytest.raises(ConfigurationError, match="must sum to 1.0"):
+        ScoringWeights(security=float("nan"))
+
+
+def test_nan_rejected_by_http_settings():
+    from meme_intelligence.config.settings import HttpSettings
+    with pytest.raises(ConfigurationError):
+        HttpSettings(timeout_seconds=float("nan"))
+
+
+def test_http_settings_validates_previously_unchecked_fields():
+    from meme_intelligence.config.settings import HttpSettings
+    with pytest.raises(ConfigurationError):
+        HttpSettings(cache_ttl_seconds=-1.0)
+    with pytest.raises(ConfigurationError):
+        HttpSettings(cache_max_entries=0)
+    with pytest.raises(ConfigurationError):
+        HttpSettings(retry_base_delay=10.0, retry_max_delay=1.0)
+
+
+def test_wallet_dominance_usd_now_validated():
+    from meme_intelligence.config.settings import WalletIntelSettings
+    with pytest.raises(ConfigurationError):
+        WalletIntelSettings(min_buy_volume_for_dominance_usd=-1.0)
+
+
+def test_provider_cooldown_now_validated():
+    from meme_intelligence.config.settings import ProviderSettings
+    with pytest.raises(ConfigurationError):
+        ProviderSettings(cooldown_seconds=0.0)
+
+
+def test_bool_env_rejects_unrecognized_string_instead_of_silently_false():
+    """A typo like 'treu' previously became False silently."""
+    with pytest.raises(ConfigurationError):
+        Settings.from_env(env={"MEMEINTEL_AI_ENABLE_IN_MONITOR": "treu"})
+
+
+def test_bool_env_still_accepts_common_spellings():
+    for value in ("1", "true", "TRUE", "yes", "on"):
+        settings = Settings.from_env(env={"MEMEINTEL_AI_ENABLE_IN_MONITOR": value})
+        assert settings.ai.enable_in_monitor is True
+    for value in ("0", "false", "no", "off"):
+        settings = Settings.from_env(env={"MEMEINTEL_AI_ENABLE_IN_MONITOR": value})
+        assert settings.ai.enable_in_monitor is False
+
+
+def test_copycat_veto_settings_validate_and_load():
+    """The copycat screen is configurable (Rule 17): thresholds must be
+    positive, and the enable switch parses as a real boolean."""
+    from meme_intelligence.config.settings import Settings
+
+    with pytest.raises(ConfigurationError, match="copycat_liquidity_ratio"):
+        Settings.from_env(env={"MEMEINTEL_ALERTS_COPYCAT_LIQUIDITY_RATIO": "-1"})
+    with pytest.raises(ConfigurationError, match="copycat_min_liquidity_usd"):
+        Settings.from_env(env={"MEMEINTEL_ALERTS_COPYCAT_MIN_LIQUIDITY_USD": "0"})
+
+    defaults = Settings.from_env(env={})
+    assert defaults.alerts.copycat_veto_enabled is True
+    off = Settings.from_env(env={"MEMEINTEL_ALERTS_COPYCAT_VETO_ENABLED": "false"})
+    assert off.alerts.copycat_veto_enabled is False

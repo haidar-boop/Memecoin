@@ -23,43 +23,73 @@ to the genuinely new material within it.
 
 | File | Part | Title | New-functionality estimate |
 |---|---|---|---|
-| PART_19_NARRATIVE_INTELLIGENCE.md | 19 | Narrative Intelligence & Viral Potential Prediction Engine | High — no narrative engine exists yet |
+| PART_19_NARRATIVE_INTELLIGENCE.md | 19 | Narrative Intelligence & Viral Potential Prediction Engine | ✅ **Built** — `analyzers/narrative_analyzer.py` (see `../STATUS.md`); judgment slots await the AI layer |
 | PART_20_MASTER_PROMPT_ASSEMBLY.md | 20 | Complete Master Prompt Assembly & Final Deployment Instructions | Low — consolidates Parts 1–19; scoring/report format already built |
 | PART_21_TECHNICAL_INFRASTRUCTURE.md | 21 | Technical Infrastructure Blueprint & Anti-Throttling Architecture | Low — architecture already built; deployment/hosting guidance is new |
 | PART_22_BOT_DEVELOPMENT_BLUEPRINT.md | 22 | Bot Development Blueprint & Software Architecture | Low — folder structure/module split already matches this |
-| PART_23_AI_AGENT_INTEGRATION.md | 23 | AI Agent Integration Blueprint & Intelligence Pipeline | High — no LLM calling code exists yet |
-| PART_24_BACKTESTING.md | 24 | Backtesting, Performance Tracking & AI Self-Improvement System | High — no outcome-tracking/backtesting loop exists yet |
+| PART_23_AI_AGENT_INTEGRATION.md | 23 | AI Agent Integration Blueprint & Intelligence Pipeline | ✅ **Built** — `ai/reasoning.py`, live-verified (see `../STATUS.md`); §7-8 memory/feedback land with Part 24 |
+| PART_24_BACKTESTING.md | 24 | Backtesting, Performance Tracking & AI Self-Improvement System | ✅ **Built** — `analytics/backtesting.py` (see `../STATUS.md`); metrics mature as the scanner accumulates outcomes |
 | PART_25_RISK_MANAGEMENT_UPSIDE.md | 25 | Professional Risk Management & High-Upside Opportunity Framework | Medium — risk doctrine already incorporated; explicit opportunity-ranking formula not separately implemented |
 | PART_26_MOMENTUM_DETECTION.md | 26 | Advanced Entry Signal & Momentum Detection Engine | Low — momentum analyzer already built in Part 14 against this doctrine |
 | PART_27_LAUNCH_SCANNER.md | 27 | Automated Token Discovery & Early Launch Scanner | Low — discovery engine already built; first-5-minute/first-hour framing is new |
 | PART_28_PORTFOLIO_MANAGEMENT.md | 28 | Portfolio Management, Tracking & Opportunity Rotation System | Medium — watchlist tiers/thesis tracking exist; explicit rotation ranking formula does not |
-| PART_29_ALERT_INTELLIGENCE.md | 29 | Real-Time Alert Intelligence & Notification System | Medium — alert engine exists; Telegram/Discord sinks and alert-history-performance tracking do not |
+| PART_29_ALERT_INTELLIGENCE.md | 29 | Real-Time Alert Intelligence & Notification System | ✅ **Built** — `alerts/sinks.py`, alert history + performance (see `../STATUS.md`); add a bot token/webhook to activate delivery |
 | PART_30_SYSTEM_OPTIMIZATION.md | 30 | Complete System Optimization & Final Professional Deployment Framework | Low — consolidation part |
 | PART_31_IMPLEMENTATION_BLUEPRINT_AND_CONSISTENCY_LOCK.md | 31 | Implementation Blueprint for AI Coding Agents + Framework Consistency Lock | Already applied — this is the part that determined current scoring weights |
 | PART_32_DATA_SOURCE_BLUEPRINT.md | 32 | Data Source & API Integration Blueprint | Low — architecture already built |
-| PART_32_5_MULTI_SOURCE_DISCOVERY.md | 32.5 | Multi-Source Discovery & Anti-Throttling Architecture | Medium — Pump.fun integration specifically is not built |
+| PART_32_5_MULTI_SOURCE_DISCOVERY.md | 32.5 | Multi-Source Discovery & Anti-Throttling Architecture | ✅ **Built** — §3 Pump.fun launch funnel (`collectors/pumpfun.py`, `scanners/launch_monitor.py`); the rest was already satisfied by Parts 13/15/21 (see `../STATUS.md`) |
 | PART_33_SECURITY_RUG_DETECTION_ENGINE.md | 33 | Security & Rug Detection Intelligence Engine | Already applied — this determined current security sub-weights |
 
 ## Suggested build order
 
 Given what's already built, the genuinely high-value next targets are:
 
-1. **Part 19** (Narrative Intelligence) — fills the last empty slot in the
-   master score (`narrative`); no live blocker, can build the structural
-   scoring layer now and wire an LLM judgment input later
-2. **Part 23 + Part 22 §4** (AI Agent Integration) — once an Anthropic key
-   exists, this turns the qualitative slots already wired throughout the
-   codebase (`FoundationInputs`, narrative score, bull/bear prose) from
-   heuristic/absent into real AI judgments
-3. **Part 29** (Alert Intelligence) — Telegram/Discord sinks; small,
-   contained, immediately useful once a bot token exists
-4. **Part 24** (Backtesting) — highest long-term value, but needs weeks
-   of accumulated snapshot data to be meaningful; the data collection
-   side is already running
-5. **Part 32.5's Pump.fun integration** — a genuinely new discovery
-   source, additive to the existing `DiscoveryEngine`
+1. ~~**Part 19** (Narrative Intelligence)~~ — ✅ built: the structural
+   scoring layer fills the master score's `narrative` slot; the LLM
+   judgment input wires in with Part 23
+2. ~~**Part 23 + Part 22 §4** (AI Agent Integration)~~ — ✅ built and
+   verified against the live API: the qualitative slots
+   (`FoundationInputs`, `NarrativeInputs`, bull/bear reasoning) are now
+   real AI judgments via `report --ai` / `plan --ai`
+3. ~~**Part 29** (Alert Intelligence)~~ — ✅ built: Telegram/Discord
+   sinks, §7 format, §10 ranking, alert history + performance; delivery
+   activates when a bot token/webhook lands in `.env`
+4. ~~**Part 24** (Backtesting)~~ — ✅ built: outcome windows, prediction
+   grading, §4 metrics, signal analysis, weight experiments (report-only
+   under the Part 31 lock); judgments mature as data accumulates
+5. ~~**Part 32.5's Pump.fun integration**~~ — ✅ built: free keyless
+   PumpPortal launch stream -> basic filtering -> traction gates ->
+   independent market confirmation -> the normal pipeline; opt-in via
+   `monitor --pumpfun`
 
 Parts 20, 21, 22 (minus §4), 25, 26, 27, 28, 30, 31, 32, 33 are lower
 priority since they're substantially already reflected in the codebase —
 treat them as a verification pass (does the current implementation
 actually satisfy this text?) rather than a from-scratch build.
+
+## Verification pass — completed 2026-07-09
+
+All of Parts 20-33 were read against the code. Results:
+
+- **Satisfied, no work needed:** Parts 20, 22, 26, 30, 31, 32. (Part 31's
+  locked scoring weights match the code exactly; the momentum, data-
+  source and consolidation parts are fully covered. Documented deviations
+  — e.g. Part 20 §3's weights superseded by the Part 31 lock — are
+  intentional and recorded in `../DECISIONS_LOG.md`.)
+- **Part 33 — corrected:** §11's security sub-weights (Liquidity /20,
+  Developer /20) did not match the shipped code (Liquidity 0.25 /
+  Developer 0.15), an undocumented drift. Code aligned to the literal
+  spec (Rule 1) and locked with a test; `DECISIONS_LOG.md` item 2
+  corrected.
+- **Part 28 — built:** §5/§6 Opportunity Ranking implemented
+  (`analyzers/opportunity_ranker.py`) — an upside-tilted watchlist
+  attention-ranking (Growth 30 / Momentum 25 / Foundation 20 / Risk 15 /
+  Timing 10) that is deliberately separate from the Part 31-locked master
+  score. Persisted per snapshot; surfaced via `watchlist --top`.
+- **Part 25 §10** (a near-identical opportunity-rating with different
+  weights) is treated as satisfied by the Part 28 ranking above, per the
+  owner's direction to consolidate overlapping formulas.
+- **Genuinely deferred (documented, not spec-compliance failures):** the
+  web/monitoring **dashboard** (Part 21 §10 / 22 / 27 §12 / 28 §11) —
+  the system is CLI + Telegram; Part 27 §10 **creator-track-record
+  intelligence** — blocked on a data source neither current API provides.

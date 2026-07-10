@@ -17,6 +17,8 @@ wallet layer only runs on demand (Rule 10/11).
 
 from __future__ import annotations
 
+import hashlib
+import math
 from datetime import datetime, timezone
 from typing import Any
 
@@ -46,11 +48,45 @@ def _to_float(value: Any) -> float | None:
         return None
 
 
+def _token_amount(value: Any) -> float | None:
+    """UI-denominated amount from a Solana token-amount object.
+
+    ``uiAmount`` is deprecated/nullable in the RPC spec, while the raw
+    ``amount`` + ``decimals`` are always present — a null ``uiAmount``
+    previously nulled the supply and dropped every holding (bug-hunt
+    finding). Fall back through uiAmountString and amount/10**decimals.
+    """
+    if not isinstance(value, dict):
+        return None
+    amount = _to_float(value.get("uiAmount"))
+    if amount is not None:
+        return amount
+    amount = _to_float(value.get("uiAmountString"))
+    if amount is not None:
+        return amount
+    raw = _to_float(value.get("amount"))
+    decimals = _to_int(value.get("decimals"))
+    if raw is not None and decimals is not None and 0 <= decimals <= 30:
+        return raw / (10 ** decimals)
+    return None
+
+
+def _to_int(value: Any) -> int | None:
+    """Parse a count field that providers sometimes send as a decimal
+    string (e.g. "1234.0") — int() rejects those directly, so go through
+    float first."""
+    parsed = _to_float(value)
+    return int(parsed) if parsed is not None else None
+
+
 def _from_unix(value: Any) -> datetime | None:
     ts = _to_float(value)
-    if ts is None or ts <= 0:
+    if ts is None or not math.isfinite(ts) or ts <= 0:
         return None
-    return datetime.fromtimestamp(ts, tz=timezone.utc)
+    try:
+        return datetime.fromtimestamp(ts, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 class HeliusClient(BaseCollector):
@@ -62,6 +98,11 @@ class HeliusClient(BaseCollector):
             raise ValueError("HeliusClient requires an API key")
         kwargs.setdefault("name", "helius")
         kwargs.setdefault("base_url", rpc_url)
+        # The key is embedded directly in the RPC request path (Helius has
+        # no header-auth option), so it must be scrubbed from any raised
+        # error message the same way Telegram/Discord credentials are
+        # (Rule 16) — otherwise a timeout/429/5xx logs it in plaintext.
+        kwargs.setdefault("redact", (api_key,))
         super().__init__(**kwargs)
         self._api_key = api_key
         self._api_url = api_url.rstrip("/")
@@ -92,7 +133,7 @@ class HeliusClient(BaseCollector):
             "getTokenSupply", [mint],
             cache_key=f"helius:supply:{mint}", cache_ttl=300.0,
         )
-        supply = _to_float(((supply_result or {}).get("value") or {}).get("uiAmount"))
+        supply = _token_amount(((supply_result or {}).get("value") or {}))
 
         largest = await self._rpc(
             "getTokenLargestAccounts", [mint],
@@ -103,27 +144,42 @@ class HeliusClient(BaseCollector):
             return []
 
         token_accounts = [a.get("address") for a in accounts[:limit] if a.get("address")]
+        # Content-derived cache key (bug-hunt finding, independently confirmed
+        # twice): keying by len() alone let a STALE owners response — cached a
+        # rate-limiter-wait after the largest-accounts response, so their TTL
+        # windows are offset — be zipped against a FRESH account list whose
+        # top-20 membership had changed, attributing balances to the wrong
+        # wallets (fabricated whale data, Rule 8).
+        accounts_fingerprint = hashlib.sha1(
+            ",".join(token_accounts).encode()).hexdigest()
         owners_result = await self._rpc(
             "getMultipleAccounts", [token_accounts, {"encoding": "jsonParsed"}],
-            cache_key=f"helius:owners:{mint}:{len(token_accounts)}", cache_ttl=120.0,
+            cache_key=f"helius:owners:{mint}:{accounts_fingerprint}", cache_ttl=120.0,
         )
         owner_infos = (owners_result or {}).get("value") or []
 
-        holdings: list[WalletHolding] = []
+        # Aggregate by OWNER (the docstring's contract): a whale split across
+        # several token accounts (associated + auxiliary) previously appeared
+        # as several small independent holders, so 2x3% never crossed the 5%
+        # risk-whale line and concentration was understated (bug-hunt finding).
+        by_owner: dict[str, float] = {}
         for account, info in zip(accounts, owner_infos):
-            ui_amount = _to_float(account.get("uiAmount"))
+            ui_amount = _token_amount(account)
             owner = None
             if isinstance(info, dict):
                 owner = (((info.get("data") or {}).get("parsed") or {})
                          .get("info") or {}).get("owner")
-            if not owner or owner in _BURN_OWNERS:
+            if not owner or owner in _BURN_OWNERS or ui_amount is None:
                 continue
-            percent = None
-            if ui_amount is not None and supply and supply > 0:
-                percent = 100.0 * ui_amount / supply
-            if percent is None:
-                continue
-            holdings.append(WalletHolding(owner=owner, percent=percent, ui_amount=ui_amount))
+            by_owner[owner] = by_owner.get(owner, 0.0) + ui_amount
+
+        if not supply or supply <= 0:
+            return []
+        holdings = [
+            WalletHolding(owner=owner, percent=100.0 * amount / supply, ui_amount=amount)
+            for owner, amount in by_owner.items()
+        ]
+        holdings.sort(key=lambda h: h.percent, reverse=True)
         return holdings
 
     async def get_recent_transfers(self, mint: str, limit: int = 50) -> list[TokenTransfer]:
@@ -187,9 +243,8 @@ class BirdeyeClient(BaseCollector):
             cache_key=f"birdeye:overview:{mint}", cache_ttl=120.0,
         )
         return {
-            "holder_count": int(data["holder"]) if _to_float(data.get("holder")) is not None else None,
-            "unique_wallets_24h": (int(data["uniqueWallet24h"])
-                                   if _to_float(data.get("uniqueWallet24h")) is not None else None),
+            "holder_count": _to_int(data.get("holder")),
+            "unique_wallets_24h": _to_int(data.get("uniqueWallet24h")),
         }
 
     async def get_recent_trades(self, mint: str, limit: int = 50) -> list[TokenTrade]:
@@ -271,24 +326,49 @@ class WalletDataService:
         holder_count = unique_wallets = None
 
         if self._helius is not None:
+            # Two independent calls: a get_recent_transfers failure must
+            # not erase the "helius" source tag (or the already-fetched
+            # holders) earned by a successful get_top_holders — the
+            # combined try previously discarded both on a partial failure,
+            # leaving real Helius holder data returned with no source
+            # attribution (Rule 8: the caller can no longer tell where it
+            # came from).
+            helius_contributed = False
             try:
                 holders = tuple(await self._helius.get_top_holders(
                     token.address, limit=self._holders_limit))
+                helius_contributed = True
+            except CollectorError:
+                pass
+            try:
                 transfers = tuple(await self._helius.get_recent_transfers(
                     token.address, limit=self._trades_limit))
-                sources.append("helius")
+                helius_contributed = True
             except CollectorError:
                 pass
+            if helius_contributed:
+                sources.append("helius")
         if self._birdeye is not None:
+            # Same per-call isolation as the Helius block above (bug-hunt
+            # finding: the combined try discarded an already-fetched overview
+            # — holder_count, unique_wallets — whenever the trades call
+            # failed, and dropped the "birdeye" source tag with it).
+            birdeye_contributed = False
             try:
                 overview = await self._birdeye.get_token_overview(token.address)
-                trades = tuple(await self._birdeye.get_recent_trades(
-                    token.address, limit=self._trades_limit))
                 holder_count = overview.get("holder_count")
                 unique_wallets = overview.get("unique_wallets_24h")
-                sources.append("birdeye")
+                birdeye_contributed = True
             except CollectorError:
                 pass
+            try:
+                trades = tuple(await self._birdeye.get_recent_trades(
+                    token.address, limit=self._trades_limit))
+                birdeye_contributed = True
+            except CollectorError:
+                pass
+            if birdeye_contributed:
+                sources.append("birdeye")
 
         return WalletIntelData(
             token=token,

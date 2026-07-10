@@ -52,7 +52,11 @@ async def review_entries(
     """
     changes: list[WatchlistChange] = []
     reviewed = 0
-    for entry in storage.get_watchlist():
+    # Least-recently-updated first: with the default tier/score ordering the
+    # per-run limit re-reviewed the same top-N forever and starved everything
+    # below (never re-assessed, never archived). Reviews bump updated_at, so
+    # this ordering rotates the limit through the whole watchlist.
+    for entry in sorted(storage.get_watchlist(), key=lambda e: e.updated_at):
         if reviewed >= limit:
             break
         if entry.token.address.lower() in skip:
@@ -75,7 +79,13 @@ async def review_entries(
         if result is None:
             continue
         reviewed += 1
-        storage.record_snapshot(result.master, source=snapshot_source)
+        storage.record_snapshot(
+            result.master, source=snapshot_source, pair=result.pair,
+            # The only recorder that dropped the regime — review-created
+            # predictions landed in Part 24's "unknown" regime bucket even
+            # though the regime was known at analysis time (bug-hunt finding).
+            regime=regime.value if regime is not MarketRegime.UNKNOWN else None,
+            opportunity_rank=result.opportunity.score if result.opportunity else None)
         if on_result is not None:
             await on_result(result)
 
