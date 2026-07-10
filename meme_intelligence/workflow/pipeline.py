@@ -273,12 +273,18 @@ class ResearchPipeline:
         # default to UNKNOWN/() rather than None, so they are never "empty"
         # by an asdict-values None-check and would make that check a no-op.
         ni = judgment.narrative_inputs
+        # Gate STRICTLY on the numeric 0-100 judgment slots — the only fields
+        # that can anchor a score. Opening on flags/summary/catalysts let an
+        # all-null judgment carrying just a stage guess mint a 90/100
+        # narrative category (stage -> cultural_timing 90 -> viral_potential
+        # 90) with zero actual narrative judgment, RAISING the master score
+        # (bug-hunt finding, reproduced). Risk flags and the summary still
+        # ride along once a real slot exists.
         has_narrative_evidence = any(v is not None for v in (
-            ni.narrative_summary, ni.memorability, ni.shareability, ni.emotional_impact,
+            ni.memorability, ni.shareability, ni.emotional_impact,
             ni.cultural_timing, ni.community_participation, ni.meme_strength,
             ni.community_creativity, ni.long_term_strength,
-            ni.short_term_hype_risk, ni.trend_dependency_risk, ni.copycat_risk,
-        )) or bool(ni.catalysts)
+        ))
         if narrative is None and has_narrative_evidence:  # explicit analyst inputs always win
             try:
                 narrative = self._narrative.assess(

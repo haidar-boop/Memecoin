@@ -30,7 +30,18 @@ class TransientCollectorError(CollectorError):
 
 
 class RateLimitedError(TransientCollectorError):
-    """The provider throttled us (HTTP 429). Retry with backoff or fail over."""
+    """The provider throttled us (HTTP 429). Retry with backoff or fail over.
+
+    ``retry_after_seconds`` carries the provider's Retry-After hint when one
+    was sent; the retry loop sleeps at least that long instead of hammering a
+    provider that just said "back off" (Rule 11 — bug-hunt finding: 4 hits in
+    ~4s inside the throttle window).
+    """
+
+    def __init__(self, message: str, status_code: int | None = 429,
+                 retry_after_seconds: float | None = None) -> None:
+        super().__init__(message, status_code)
+        self.retry_after_seconds = retry_after_seconds
 
 
 class AllProvidersFailedError(MemeIntelError):

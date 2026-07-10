@@ -81,6 +81,10 @@ async def review_entries(
         reviewed += 1
         storage.record_snapshot(
             result.master, source=snapshot_source, pair=result.pair,
+            # The only recorder that dropped the regime — review-created
+            # predictions landed in Part 24's "unknown" regime bucket even
+            # though the regime was known at analysis time (bug-hunt finding).
+            regime=regime.value if regime is not MarketRegime.UNKNOWN else None,
             opportunity_rank=result.opportunity.score if result.opportunity else None)
         if on_result is not None:
             await on_result(result)

@@ -134,7 +134,16 @@ class BaseCollector:
                 )
                 async with request as response:
                     if response.status == 429:
-                        raise RateLimitedError(f"{self.name}: rate limited (429) on {display_url}")
+                        retry_after = None
+                        try:
+                            header = response.headers.get("Retry-After")
+                            if header is not None:
+                                retry_after = max(0.0, min(120.0, float(header)))
+                        except (TypeError, ValueError):
+                            retry_after = None  # HTTP-date form or junk: ignore
+                        raise RateLimitedError(
+                            f"{self.name}: rate limited (429) on {display_url}",
+                            retry_after_seconds=retry_after)
                     if response.status >= 500:
                         raise TransientCollectorError(
                             f"{self.name}: server error {response.status} on {display_url}"

@@ -112,13 +112,18 @@ async def test_huge_pair_created_at_does_not_crash_the_batch(monkeypatch):
 
 
 async def test_malformed_entry_skipped_not_fatal(client):
-    pairs = await client.get_token_pairs("anything")
-    assert len(pairs) == 2  # third fixture entry silently skipped (and logged)
+    # The malformed third entry is skipped during parsing (logged); the
+    # base-token filter then keeps only pairs whose BASE is the queried token
+    # (quote-side pairs describe the counterparty — bug-hunt finding).
+    pairs = await client.get_token_pairs("BaseAddr1")
+    assert len(pairs) == 1
+    assert pairs[0].base_token.address == "BaseAddr1"
 
 
 async def test_chain_filter(client):
-    pairs = await client.get_token_pairs("anything", chain="base")
+    pairs = await client.get_token_pairs("BaseAddr2", chain="base")
     assert [p.chain for p in pairs] == ["base"]
+    assert await client.get_token_pairs("BaseAddr2", chain="solana") == []
 
 
 async def test_search_uses_query_param(client):

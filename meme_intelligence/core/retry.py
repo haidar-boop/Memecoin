@@ -45,6 +45,12 @@ async def retry_async(
             delay = min(max_delay, base_delay * 2 ** (attempt - 1))
             delay *= 1.0 + random.uniform(-jitter, jitter)
             delay = max(0.0, delay)
+            # A provider that answered 429 with a Retry-After hint said
+            # exactly how long to back off — retrying sooner just burns the
+            # retry budget extending the throttle (Rule 11, bug-hunt finding).
+            hint = getattr(exc, "retry_after_seconds", None)
+            if hint is not None:
+                delay = max(delay, hint)
             if logger is not None:
                 logger.warning(
                     "transient failure (attempt %d/%d), retrying in %.2fs: %s",

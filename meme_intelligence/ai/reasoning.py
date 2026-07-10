@@ -466,5 +466,10 @@ def build_judgment_service(settings) -> AIJudgmentService | None:
             "MEMEINTEL_ANTHROPIC_API_KEY is set but the 'anthropic' package is "
             "not installed — run: pip install anthropic"
         ) from exc
-    client = AsyncAnthropic(api_key=settings.anthropic_api_key)
+    # max_retries=0: the SDK's silent internal retries bypass our RateLimiter
+    # (one limiter token could cost 3 wire requests during a 429 storm) and
+    # stack up to 3x timeout_seconds of blocking per judge() call (bug-hunt
+    # finding). The layer already degrades gracefully on failure (Rule 9),
+    # so a failed call is simply a discarded judgment.
+    client = AsyncAnthropic(api_key=settings.anthropic_api_key, max_retries=0)
     return AIJudgmentService(settings.ai, client)

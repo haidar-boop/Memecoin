@@ -13,7 +13,11 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
 
-from meme_intelligence.core.errors import AllProvidersFailedError, CollectorError
+from meme_intelligence.core.errors import (
+    AllProvidersFailedError,
+    CollectorError,
+    TransientCollectorError,
+)
 
 
 @dataclass
@@ -101,9 +105,24 @@ class ProviderPool:
 
             try:
                 result = await getattr(provider, method)(*args, **kwargs)
-            except CollectorError as exc:
+            except TransientCollectorError as exc:
+                # Provider-level trouble (5xx/timeout/network/429 after
+                # retries) — counts toward the cooldown threshold.
                 causes[name] = exc
                 self._record_failure(name, state, method, exc)
+                continue
+            except CollectorError as exc:
+                # Permanent, item-specific errors (a 404 for a token this
+                # provider simply hasn't indexed, a missing required kwarg)
+                # say nothing about the provider's HEALTH. Counting them put
+                # a healthy provider on cooldown after 3 fresh unindexed
+                # tokens in a row, blacking out the whole pool for every
+                # token (bug-hunt finding). Fail over, record the cause,
+                # leave health untouched.
+                causes[name] = exc
+                state.total_failures += 1
+                self._logger.info("provider '%s' has no data for '%s': %s",
+                                  name, method, exc)
                 continue
 
             if state.consecutive_failures:

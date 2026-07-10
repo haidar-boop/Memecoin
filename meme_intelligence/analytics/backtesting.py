@@ -426,8 +426,12 @@ def label_alert_outcomes(
     Alerts younger than ``alert_outcome_min_hours`` now stay unlabeled until
     enough time has passed for the verdict to mean something (Rule 8).
     """
-    opportunity_types = {"high_priority_opportunity", "early_opportunity",
-                         "momentum", "smart_money_accumulation"}
+    # strong_candidate was missing here, so that HIGH opportunity tier was
+    # graded by the RISK rule — its labels were exactly inverted, permanently
+    # (bug-hunt finding).
+    opportunity_types = {"high_priority_opportunity", "strong_candidate",
+                         "early_opportunity", "momentum",
+                         "smart_money_accumulation"}
     labeled = 0
     now = now_func()
     min_age = timedelta(hours=settings.alert_outcome_min_hours)

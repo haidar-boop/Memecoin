@@ -238,3 +238,80 @@ async def test_backtester_marks_dead_token_as_rug():
     await refresh_outcomes(storage, None, settings=BacktestSettings(),
                            learning_service=learning, now_func=lambda: NOW)
     assert learning.calls[0][4] is True  # is_rug
+
+
+# ---- Final-hunt regression tests (parsing / pool / grading / AI guards) ----
+
+async def test_get_token_pairs_drops_quote_side_pairs():
+    """Bug-hunt: pairs where the queried token is the QUOTE side describe the
+    counterparty token — keeping them let get_best_pair analyze/alert under
+    the wrong token entirely."""
+    from meme_intelligence.collectors.market_data import DexScreenerClient
+
+    client = DexScreenerClient.__new__(DexScreenerClient)
+
+    async def fake_get_json(*a, **k):
+        def p(base_addr, quote_addr, liq):
+            return {"chainId": "solana", "pairAddress": f"pool{base_addr}",
+                    "baseToken": {"address": base_addr, "symbol": "B"},
+                    "quoteToken": {"address": quote_addr, "symbol": "Q"},
+                    "liquidity": {"usd": liq}}
+        return {"pairs": [p("TOK", "SOL", 50_000),      # queried token is base
+                          p("OTHER", "TOK", 80_000)]}   # queried token is QUOTE
+    client._get_json = fake_get_json
+    import logging
+    client._logger = logging.getLogger("t")
+    client.name = "dexscreener"
+
+    pairs = await client.get_token_pairs("TOK")
+    assert [p.base_token.address for p in pairs] == ["TOK"]
+
+
+def test_geckoterminal_chain_canonicalized():
+    """Bug-hunt: GT network ids (eth, polygon_pos) leaked into DexPair.chain,
+    breaking cross-provider verification and CoinGecko lookups off-Solana."""
+    from meme_intelligence.collectors.market_data import GeckoTerminalClient
+
+    item = {"attributes": {"address": "PoolX", "name": "X / WETH",
+                           "reserve_in_usd": "1000"},
+            "relationships": {"base_token": {"data": {"id": "eth_0xabc"}}}}
+    pair = GeckoTerminalClient._parse_pool(item)
+    assert pair.chain == "ethereum"
+    assert pair.base_token.chain == "ethereum"
+
+
+async def test_permanent_404_does_not_poison_provider_health():
+    """Bug-hunt: 3 unindexed-token 404s in a row put a HEALTHY provider on
+    cooldown, blacking out the whole pool for every token."""
+    from meme_intelligence.core.errors import CollectorError, TransientCollectorError
+    from meme_intelligence.core.provider_pool import ProviderPool
+
+    class NotIndexed:
+        name = "gecko"
+        async def get_token_pairs(self, addr, chain=None):
+            raise CollectorError("404 not indexed", status_code=404)
+
+    class Down:
+        name = "dex"
+        async def get_token_pairs(self, addr, chain=None):
+            raise TransientCollectorError("boom")
+
+    pool = ProviderPool([NotIndexed(), Down()], failure_threshold=3)
+    for _ in range(5):
+        try:
+            await pool.call("get_token_pairs", "X")
+        except Exception:
+            pass
+    health = {h.name: h for h in pool.health()}
+    assert health["gecko"].healthy is True      # 404s never cool it down
+    assert health["dex"].healthy is False        # real outage still does
+
+
+def test_helius_token_amount_falls_back_when_uiamount_null():
+    from meme_intelligence.collectors.wallet_data import _token_amount
+
+    assert _token_amount({"uiAmount": None, "amount": "1000000000",
+                          "decimals": 6}) == 1000.0
+    assert _token_amount({"uiAmount": None, "uiAmountString": "42.5"}) == 42.5
+    assert _token_amount({"uiAmount": 7.0}) == 7.0
+    assert _token_amount("junk") is None

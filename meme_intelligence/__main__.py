@@ -363,6 +363,11 @@ async def _gather_assessments(args, settings):
     finally:
         if wallet_service is not None:
             await wallet_service.close()
+        if ai_service is not None:
+            # The AsyncAnthropic client wraps its own httpx AsyncClient —
+            # close it like every other client this command opens (bug-hunt
+            # finding: the monitor path already did; this path leaked it).
+            await ai_service._client.close()
 
     if result is None:
         return None, (f"Security data unavailable for {args.address} on {pair.chain} "

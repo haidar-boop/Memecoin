@@ -94,6 +94,15 @@ class DexScreenerClient(BaseCollector):
             cache_key=f"dexscreener:tokens:{token_address.lower()}",
         )
         pairs = self._parse_pairs(payload)
+        # The endpoint returns every pair the token PARTICIPATES in — including
+        # pairs where it is the QUOTE side, which normalize with the OTHER
+        # token as base_token. Keeping those let get_best_pair hand the
+        # pipeline a pair describing a different token entirely: its price,
+        # volumes, and even the address the result is keyed under would all
+        # belong to the counterparty (bug-hunt finding). Keep only pairs where
+        # the queried token really is the base.
+        wanted = token_address.lower()
+        pairs = [p for p in pairs if p.base_token.address.lower() == wanted]
         if chain is not None:
             pairs = [p for p in pairs if p.chain == chain]
         return pairs
@@ -234,7 +243,12 @@ class GeckoTerminalClient(BaseCollector):
             cache_key=f"geckoterminal:token_pools:{network}:{token_address.lower()}",
             cache_ttl=30.0,
         )
-        return self._parse_pools(payload)
+        pools = self._parse_pools(payload)
+        # Same base-vs-quote guard as DexScreenerClient.get_token_pairs: pools
+        # where the queried token is the QUOTE side describe the counterparty
+        # token, not the one asked about (bug-hunt finding).
+        wanted = token_address.lower()
+        return [p for p in pools if p.base_token.address.lower() == wanted]
 
     def _parse_pools(self, payload: Any) -> list[DexPair]:
         """Normalize a GeckoTerminal JSON:API response into ``DexPair`` models."""
@@ -263,6 +277,12 @@ class GeckoTerminalClient(BaseCollector):
         network, _, base_address = base_id.partition("_")
         if not network or not base_address:
             raise KeyError(f"unparseable base token id: {base_id!r}")
+        # GeckoTerminal uses its own network vocabulary (eth, polygon_pos,
+        # avax, ...). Emit the CANONICAL chain id instead, or every downstream
+        # consumer breaks off-Solana: DexScreener cross-verification filters
+        # on p.chain == "eth" and matches nothing, and the CoinGecko platform
+        # lookup misses — silently disabling both (bug-hunt finding).
+        network = from_geckoterminal_network(network)
 
         # attributes["name"] looks like "WIF / SOL"; the left side is the base symbol.
         pool_name = attrs.get("name") or ""
@@ -455,3 +475,12 @@ _GECKOTERMINAL_NETWORK_ALIASES = {
 
 def to_geckoterminal_network(chain: str) -> str:
     return _GECKOTERMINAL_NETWORK_ALIASES.get(chain, chain)
+
+
+# Reverse map: GeckoTerminal network id -> the canonical chain vocabulary the
+# rest of the system speaks (DexScreener-style ids, _COINGECKO_PLATFORMS keys).
+_GECKOTERMINAL_NETWORK_CANONICAL = {v: k for k, v in _GECKOTERMINAL_NETWORK_ALIASES.items()}
+
+
+def from_geckoterminal_network(network: str) -> str:
+    return _GECKOTERMINAL_NETWORK_CANONICAL.get(network, network)
