@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -30,6 +31,20 @@ from meme_intelligence.analyzers.scoring_engine import MasterAssessment
 from meme_intelligence.core.enums import Classification, WatchlistTier
 from meme_intelligence.core.logging_setup import get_logger
 from meme_intelligence.core.models import TokenIdentity
+
+# SQL identifiers (table/column/type) cannot be bound as ``?`` parameters, so
+# the few places that must interpolate them are restricted to this safe
+# charset. Every value that reaches these paths is an internal constant
+# (``_MIGRATIONS`` keys, module-literal query fragments), never user input —
+# this guard makes that guarantee explicit and enforced (defense in depth).
+_SAFE_SQL_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_ ]*$")
+
+
+def _safe_identifier(value: str) -> str:
+    """Return ``value`` if it is a safe SQL identifier/type, else raise."""
+    if not _SAFE_SQL_IDENTIFIER.match(value):
+        raise ValueError(f"unsafe SQL identifier: {value!r}")
+    return value
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS tokens (
@@ -234,12 +249,21 @@ class Storage:
     def _migrate(self) -> None:
         """Add post-release columns to tables from older databases (Rule 18)."""
         for table, columns in _MIGRATIONS.items():
+            safe_table = _safe_identifier(table)
+            # SQL identifiers (table/column/type) cannot be bound as ? params;
+            # every value here is an internal _MIGRATIONS constant, additionally
+            # charset-validated by _safe_identifier above — safe by construction.
             existing = {row["name"] for row in
-                        self._conn.execute(f"PRAGMA table_info({table})")}
+                        # nosemgrep
+                        self._conn.execute(f"PRAGMA table_info({safe_table})")}
             for name, sql_type in columns:
                 if name not in existing:
+                    safe_name = _safe_identifier(name)
+                    safe_type = _safe_identifier(sql_type)
                     try:
-                        self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}")
+                        # nosemgrep
+                        self._conn.execute(
+                            f"ALTER TABLE {safe_table} ADD COLUMN {safe_name} {safe_type}")
                         self._logger.info("migrated %s: added column %s", table, name)
                     except sqlite3.OperationalError as exc:
                         # Two processes sharing this database (the monitor
@@ -684,19 +708,22 @@ class Storage:
                               token.symbol or token.address, token.chain)
         return released
 
+    _HOLDINGS_SELECT = (
+        "SELECT t.chain, t.address, t.symbol, t.name, "
+        "       h.acquired_at, h.released_at, h.active, h.note, "
+        "       (SELECT s.final_score FROM snapshots s "
+        "        WHERE s.token_id = h.token_id "
+        "        ORDER BY s.created_at DESC LIMIT 1) AS last_score "
+        "FROM holdings h JOIN tokens t ON t.id = h.token_id"
+    )
+
     def get_holdings(self, active_only: bool = True) -> list[dict]:
         """Holdings joined with token identity + latest known master score."""
-        where = "WHERE h.active = 1" if active_only else ""
-        rows = self._conn.execute(
-            f"""SELECT t.chain, t.address, t.symbol, t.name,
-                       h.acquired_at, h.released_at, h.active, h.note,
-                       (SELECT s.final_score FROM snapshots s
-                        WHERE s.token_id = h.token_id
-                        ORDER BY s.created_at DESC LIMIT 1) AS last_score
-                FROM holdings h JOIN tokens t ON t.id = h.token_id
-                {where}
-                ORDER BY h.acquired_at DESC""",
-        ).fetchall()
+        if active_only:
+            sql = self._HOLDINGS_SELECT + " WHERE h.active = 1 ORDER BY h.acquired_at DESC"
+        else:
+            sql = self._HOLDINGS_SELECT + " ORDER BY h.acquired_at DESC"
+        rows = self._conn.execute(sql).fetchall()
         return [dict(row) for row in rows]
 
     def is_holding(self, token: TokenIdentity) -> bool:
@@ -705,21 +732,15 @@ class Storage:
         have its chain inferred reliably — so a hold set under a guessed
         chain must still be recognized when the scanner sees the real one.
         Address formats don't collide across Solana (base58) and EVM (0x)."""
-        return self._exists_by_address(
-            "holdings h JOIN tokens t ON t.id = h.token_id AND h.active = 1",
-            token.address)
-
-    def _exists_by_address(self, from_join: str, address: str) -> bool:
-        """True when any row of the given table exists for ``address`` on any
-        chain (exact match; 0x addresses also matched case-insensitively)."""
         row = self._conn.execute(
-            f"SELECT 1 FROM {from_join} WHERE t.address = ? LIMIT 1", (address,)
+            "SELECT 1 FROM holdings h JOIN tokens t ON t.id = h.token_id "
+            "WHERE h.active = 1 AND t.address = ? LIMIT 1", (token.address,)
         ).fetchone()
-        if row is None and address.lower().startswith("0x"):
+        if row is None and token.address.lower().startswith("0x"):
             row = self._conn.execute(
-                f"SELECT 1 FROM {from_join} WHERE lower(t.address) = lower(?) LIMIT 1",
-                (address,),
-            ).fetchone()
+                "SELECT 1 FROM holdings h JOIN tokens t ON t.id = h.token_id "
+                "WHERE h.active = 1 AND lower(t.address) = lower(?) LIMIT 1",
+                (token.address,)).fetchone()
         return row is not None
 
     # ---- Muted tokens (Project 2) ----
@@ -754,8 +775,15 @@ class Storage:
         """Muted by ADDRESS, on any chain (Project 2 fix) — same reasoning as
         :meth:`is_holding`: a mute set under an inferred chain must still
         suppress alerts when the scanner analyzes the token on its real one."""
-        return self._exists_by_address(
-            "muted_tokens m JOIN tokens t ON t.id = m.token_id", token.address)
+        row = self._conn.execute(
+            "SELECT 1 FROM muted_tokens m JOIN tokens t ON t.id = m.token_id "
+            "WHERE t.address = ? LIMIT 1", (token.address,)
+        ).fetchone()
+        if row is None and token.address.lower().startswith("0x"):
+            row = self._conn.execute(
+                "SELECT 1 FROM muted_tokens m JOIN tokens t ON t.id = m.token_id "
+                "WHERE lower(t.address) = lower(?) LIMIT 1", (token.address,)).fetchone()
+        return row is not None
 
     def muted_list(self) -> list[dict]:
         rows = self._conn.execute(
@@ -808,19 +836,21 @@ class Storage:
         call (Part 24 S3). Later snapshots are re-assessments, not new
         predictions. ``with_price_only`` keeps rows measurable (a prediction
         without a stored price cannot have a price outcome — honest gap)."""
-        price_filter = "AND s.price_usd IS NOT NULL" if with_price_only else ""
-        rows = self._conn.execute(
-            f"""SELECT s.id AS snapshot_id, s.token_id, s.created_at, s.final_score,
-                       s.classification, s.confidence, s.coverage, s.category_scores,
-                       s.price_usd, s.liquidity_usd, s.regime,
-                       t.chain, t.address, t.symbol
-                FROM snapshots s
-                JOIN tokens t ON t.id = s.token_id
-                WHERE s.id = (SELECT MIN(s2.id) FROM snapshots s2
-                              WHERE s2.token_id = s.token_id)
-                {price_filter}
-                ORDER BY s.created_at""",
-        ).fetchall()
+        base = (
+            "SELECT s.id AS snapshot_id, s.token_id, s.created_at, s.final_score, "
+            "       s.classification, s.confidence, s.coverage, s.category_scores, "
+            "       s.price_usd, s.liquidity_usd, s.regime, "
+            "       t.chain, t.address, t.symbol "
+            "FROM snapshots s "
+            "JOIN tokens t ON t.id = s.token_id "
+            "WHERE s.id = (SELECT MIN(s2.id) FROM snapshots s2 "
+            "              WHERE s2.token_id = s.token_id)"
+        )
+        if with_price_only:
+            sql = base + " AND s.price_usd IS NOT NULL ORDER BY s.created_at"
+        else:
+            sql = base + " ORDER BY s.created_at"
+        rows = self._conn.execute(sql).fetchall()
         return [dict(row) for row in rows]
 
     def snapshots_for_token(self, token_id: int) -> list[dict]:

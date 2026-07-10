@@ -150,7 +150,9 @@ class HeliusClient(BaseCollector):
         # windows are offset — be zipped against a FRESH account list whose
         # top-20 membership had changed, attributing balances to the wrong
         # wallets (fabricated whale data, Rule 8).
-        accounts_fingerprint = hashlib.sha1(
+        # sha256 (not for security — just a stable cache-key fingerprint of the
+        # account list; sha256 keeps static analysers happy about hash choice).
+        accounts_fingerprint = hashlib.sha256(
             ",".join(token_accounts).encode()).hexdigest()
         owners_result = await self._rpc(
             "getMultipleAccounts", [token_accounts, {"encoding": "jsonParsed"}],
