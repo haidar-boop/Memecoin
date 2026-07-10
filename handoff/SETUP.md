@@ -10,7 +10,7 @@
 ```bash
 git clone https://github.com/haidar-boop/Memecoin.git
 cd Memecoin
-git checkout claude/large-prompt-review-l49wp1
+git checkout claude/memecoin-onboarding-yrvjbg
 
 python3 -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
