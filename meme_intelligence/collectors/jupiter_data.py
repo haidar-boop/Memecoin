@@ -63,8 +63,15 @@ class JupiterClient(BaseCollector):
 
     async def _quote(
         self, input_mint: str, output_mint: str, amount: int, slippage_bps: int,
+        *, use_cache: bool = True,
     ) -> dict[str, Any] | None:
-        """One quote call; returns ``None`` when Jupiter reports no route exists."""
+        """One quote call; returns ``None`` when Jupiter reports no route exists.
+
+        ``use_cache`` MUST be False for live trading: a signed on-chain swap
+        must be built from a quote fetched at trade time, never a cached one up
+        to 45s stale (the cache is fine for the read-only liquidity probe)."""
+        cache_key = (f"jupiter:quote:{input_mint}:{output_mint}:{amount}:{slippage_bps}"
+                     if use_cache else None)
         payload = await self._get_json(
             "swap/v1/quote",
             params={
@@ -74,8 +81,8 @@ class JupiterClient(BaseCollector):
                 "slippageBps": str(slippage_bps),
             },
             headers=self._headers,
-            cache_key=f"jupiter:quote:{input_mint}:{output_mint}:{amount}:{slippage_bps}",
-            cache_ttl=45.0,
+            cache_key=cache_key,
+            cache_ttl=45.0 if use_cache else None,
             error_status_as_json=_ROUTING_ERROR_STATUSES,
         )
         if not isinstance(payload, dict):
@@ -90,23 +97,29 @@ class JupiterClient(BaseCollector):
         return None
 
     async def get_quote(self, input_mint: str, output_mint: str, amount: int,
-                        slippage_bps: int) -> dict[str, Any] | None:
+                        slippage_bps: int, *, use_cache: bool = True) -> dict[str, Any] | None:
         """Public quote for one swap direction (used by the live executor).
 
         Returns the full quote response dict, or ``None`` when Jupiter reports
-        no route exists (never confused with an API failure)."""
-        return await self._quote(input_mint, output_mint, amount, slippage_bps)
+        no route exists (never confused with an API failure). Live trades pass
+        ``use_cache=False`` so every signed swap uses a trade-time quote."""
+        return await self._quote(input_mint, output_mint, amount, slippage_bps,
+                                 use_cache=use_cache)
 
     async def build_swap_transaction(
         self, quote_response: dict, user_public_key: str, *,
         priority_fee_max_lamports: int = 1_000_000,
+        max_slippage_bps: int = 500,
     ) -> str:
         """POST /swap/v1/swap: turn a quote into a base64 transaction to sign.
 
-        Uses dynamic compute-unit limit and dynamic slippage (Jupiter tunes
-        both for landing/protection), caps the priority fee, and wraps/unwraps
-        SOL automatically. The returned transaction is unsigned — the caller
-        signs it with the trading wallet and submits it (Project 6)."""
+        Slippage is bounded by ``max_slippage_bps``: dynamic slippage is used
+        for good landing, but capped so the SIGNED transaction can never
+        tolerate more slippage than the operator configured (a bare
+        ``dynamicSlippage: true`` would let Jupiter fill a thin meme pool
+        20-50% below quote — money-safety fix). Caps the priority fee and
+        wraps/unwraps SOL automatically. The returned transaction is unsigned —
+        the caller signs it with the trading wallet and submits it (Project 6)."""
         if not user_public_key:
             raise ValueError("build_swap_transaction requires a user public key")
         payload = await self._get_json(
@@ -117,7 +130,7 @@ class JupiterClient(BaseCollector):
                 "userPublicKey": user_public_key,
                 "wrapAndUnwrapSol": True,
                 "dynamicComputeUnitLimit": True,
-                "dynamicSlippage": True,
+                "dynamicSlippage": {"maxBps": int(max_slippage_bps)},
                 "prioritizationFeeLamports": {
                     "priorityLevelWithMaxLamports": {
                         "maxLamports": int(priority_fee_max_lamports),

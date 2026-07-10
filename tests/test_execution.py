@@ -9,6 +9,7 @@ import base64
 
 import pytest
 
+from meme_intelligence.collectors.jupiter_data import SOL_MINT
 from meme_intelligence.database.storage import Storage
 from meme_intelligence.trading.execution import (
     DryRunExecutor,
@@ -49,35 +50,47 @@ class FakeJupiter:
         self.swap_b64 = swap_b64
         self.calls = []
 
-    async def get_quote(self, input_mint, output_mint, amount, slippage_bps):
-        self.calls.append(("quote", input_mint, output_mint, amount))
+    async def get_quote(self, input_mint, output_mint, amount, slippage_bps, *, use_cache=True):
+        self.calls.append(("quote", input_mint, output_mint, amount, use_cache))
         return self.quote
 
     async def build_swap_transaction(self, quote, user_public_key, *,
-                                     priority_fee_max_lamports=0):
-        self.calls.append(("build", user_public_key))
+                                     priority_fee_max_lamports=0, max_slippage_bps=500):
+        self.calls.append(("build", user_public_key, max_slippage_bps))
         return self.swap_b64
 
 
 class FakeRpc:
-    def __init__(self, *, sol=0, token=0, sig="SIG123", status="confirmed"):
+    def __init__(self, *, sol=0, token=0, sig="SIG123", status="confirmed",
+                 send_raises=False, confirm_raises=False):
         self.sol = sol
         self.token = token
         self.sig = sig
         self.status = status
+        self.send_raises = send_raises
+        self.confirm_raises = confirm_raises
         self.sent = []
 
     async def get_sol_balance_lamports(self, owner):
+        from meme_intelligence.core.errors import CollectorError
+        if self.sol == "raise":
+            raise CollectorError("balance rpc down")
         return self.sol
 
     async def get_token_balance_raw(self, owner, mint):
         return self.token
 
     async def send_raw_transaction(self, signed_base64):
+        from meme_intelligence.core.errors import CollectorError
+        if self.send_raises:
+            raise CollectorError("send rpc error")
         self.sent.append(signed_base64)
         return self.sig
 
     async def signature_status(self, signature):
+        from meme_intelligence.core.errors import CollectorError
+        if self.confirm_raises:
+            raise CollectorError("confirm rpc error")
         if self.status is None:
             return None
         if self.status == "err":
@@ -150,25 +163,69 @@ async def test_buy_no_route_spends_nothing():
         assert rpc.sent == []                            # never built or sent a tx
 
 
-async def test_buy_onchain_failure_is_reported_not_raised():
+async def test_buy_onchain_revert_is_reported_as_safe_to_retry():
     kp = new_keypair()
     jup = FakeJupiter(quote={"outAmount": "500000"}, swap_b64=swap_tx_b64(kp))
-    rpc = FakeRpc(sol=5 * LAMPORTS, status="err")        # tx lands with an error
+    rpc = FakeRpc(sol=5 * LAMPORTS, status="err")        # tx lands but reverts
     with Storage(":memory:", now_func=lambda: NOW) as storage:
         ex = make_live(storage, kp, jupiter=jup, rpc=rpc)
         msg = await ex.execute_buy(intent(0.1))
-        assert "Buy failed" in msg
+        assert "did NOT go through on-chain" in msg and "safe to retry" in msg
 
 
-async def test_buy_confirmation_timeout_reports_pending():
+async def test_buy_confirmation_timeout_reports_pending_with_signature():
     kp = new_keypair()
     jup = FakeJupiter(quote={"outAmount": "500000"}, swap_b64=swap_tx_b64(kp))
-    rpc = FakeRpc(sol=5 * LAMPORTS, status=None)         # never confirms
+    rpc = FakeRpc(sol=5 * LAMPORTS, sig="PENDSIG", status=None)  # never confirms
     with Storage(":memory:", now_func=lambda: NOW) as storage:
         ex = make_live(storage, kp, jupiter=jup, rpc=rpc)
         msg = await ex.execute_buy(intent(0.1))
-        assert "confirmation pending" in msg
+        assert "pending" in msg and "Do NOT retry" in msg
+        assert "PENDSIG" in msg                          # signature never hidden
         assert len(rpc.sent) == 1                        # it WAS submitted
+
+
+async def test_confirm_phase_rpc_error_never_hides_the_signature():
+    """The double-spend fix: a broadcast tx whose confirmation RPC errors must
+    be reported as 'submitted, unknown — do NOT retry' WITH its signature, not
+    as an outright failure that invites a second buy."""
+    kp = new_keypair()
+    jup = FakeJupiter(quote={"outAmount": "500000"}, swap_b64=swap_tx_b64(kp))
+    rpc = FakeRpc(sol=5 * LAMPORTS, sig="LANDEDSIG", confirm_raises=True)
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        ex = make_live(storage, kp, jupiter=jup, rpc=rpc)
+        msg = await ex.execute_buy(intent(0.1))
+        assert "could not be confirmed" in msg and "Do NOT" in msg
+        assert "LANDEDSIG" in msg                        # signature surfaced, not hidden
+        assert "failed" not in msg.lower()               # never labelled an outright failure
+        assert len(rpc.sent) == 1
+        # The broadcast tx is journaled even though confirmation failed.
+        journal = storage.journal_entries(limit=5)
+        assert journal and journal[0]["kind"] == "trade_buy"
+
+
+async def test_submission_error_warns_it_may_have_gone_through():
+    kp = new_keypair()
+    jup = FakeJupiter(quote={"outAmount": "500000"}, swap_b64=swap_tx_b64(kp))
+    rpc = FakeRpc(sol=5 * LAMPORTS, send_raises=True)
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        ex = make_live(storage, kp, jupiter=jup, rpc=rpc)
+        msg = await ex.execute_buy(intent(0.1))
+        assert "may not have gone through" in msg and "Do NOT retry blindly" in msg
+
+
+async def test_live_trade_bounds_slippage_to_configured_cap():
+    kp = new_keypair()
+    jup = FakeJupiter(quote={"outAmount": "500000"}, swap_b64=swap_tx_b64(kp))
+    rpc = FakeRpc(sol=5 * LAMPORTS)
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        ex = make_live(storage, kp, jupiter=jup, rpc=rpc)
+        await ex.execute_buy(intent(0.1))
+        # The quote is fetched FRESH (use_cache=False) and the swap is capped at
+        # the operator's slippage (500 bps here) — no unbounded dynamic slippage.
+        assert ("quote", SOL_MINT, MINT, 100_000_000, False) in jup.calls
+        build_calls = [c for c in jup.calls if c[0] == "build"]
+        assert build_calls and build_calls[0][2] == 500  # max_slippage_bps passed
 
 
 async def test_dump_happy_path():
@@ -179,9 +236,8 @@ async def test_dump_happy_path():
         ex = make_live(storage, kp, jupiter=jup, rpc=rpc)
         msg = await ex.execute_sell_all(MINT)
         assert "DUMP confirmed" in msg and "DUMPSIG" in msg
-        # It sold the FULL token balance.
-        assert ("quote", MINT, __import__("meme_intelligence.collectors.jupiter_data",
-                fromlist=["SOL_MINT"]).SOL_MINT, 750_000) in jup.calls
+        # It sold the FULL token balance, from a fresh (uncached) quote.
+        assert ("quote", MINT, SOL_MINT, 750_000, False) in jup.calls
 
 
 async def test_dump_nothing_to_sell():

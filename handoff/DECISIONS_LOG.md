@@ -901,6 +901,33 @@ The "dump button" sells the wallet's entire balance of that token back to
 SOL (the panic-exit the operator asked for), quoting the full position and
 refusing gracefully if no sell route exists right now.
 
+## 2026-07-10 — Adversarial review of Project 6 (live trading): six fixes
+
+A three-lens money-safety review (each finding independently verified,
+6/6 confirmed) hardened the live executor before it was ever armed:
+
+* **Double-spend on confirmation error (HIGH).** A buy whose transaction was
+  already broadcast but whose confirmation RPC then hiccupped was reported as
+  "Buy failed — retry", hiding the signature and inviting a second buy. Now
+  the rule is absolute: once `send` returns a signature the tx is journaled
+  and the signature is always surfaced; a confirmation-phase error returns
+  "submitted, unknown — do NOT retry, verify on Solscan", a genuine on-chain
+  revert returns "did not go through, only the fee was spent — safe to retry",
+  and a submission error returns "may not have gone through — do NOT retry
+  blindly". Failures that provably spent nothing (cap, balance, no-route,
+  build/sign) still say so.
+* **Unbounded slippage (HIGH).** `dynamicSlippage: true` let Jupiter fill a
+  thin meme pool 20-50% below quote regardless of the configured
+  `slippage_bps`. Changed to `dynamicSlippage: {maxBps: slippage_bps}` so the
+  operator's setting is a real hard cap on the signed transaction.
+* **Stale cached quote (MEDIUM).** Live swaps were built from the probe's
+  shared 45s-cached quote. The executor now fetches quotes with
+  `use_cache=False`, so every signed swap uses a trade-time quote.
+* **Crash-on-missing-solders (LOW).** `build_executor` only caught
+  `ValueError`, so an ImportError (solders absent/broken) would crash the
+  scanner at startup. It now catches any construction failure and falls back
+  to dry-run.
+
 ## Notable implementation choices (Rule 19)
 
 - **Python 3.11 + asyncio** over Node.js (both allowed by spec): the

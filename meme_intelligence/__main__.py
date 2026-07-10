@@ -209,8 +209,12 @@ def build_executor(settings: Settings, storage, jupiter_client):
             priority_fee_max_lamports=ex.priority_fee_max_lamports,
             confirm_timeout_seconds=ex.confirm_timeout_seconds,
         )
-    except ValueError as exc:
+    except Exception as exc:  # noqa: BLE001 — bad key OR missing/broken solders (ImportError)
+        # A broken trading layer must degrade to dry-run, never crash the
+        # 24/7 scanner (Rule 7). ValueError = bad key; ImportError = solders
+        # absent/ABI-broken; anything else is still not worth killing the loop.
         print(f"Note: live trading disabled — {exc}. Buy/dump run in DRY RUN.")
+        from meme_intelligence.trading.execution import DryRunExecutor
         return DryRunExecutor(storage), rpc
     print(f"LIVE TRADING ARMED — trading wallet {executor.wallet_address}. "
           f"Per-trade cap {ex.max_buy_sol:g} SOL.")

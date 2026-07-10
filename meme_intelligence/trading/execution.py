@@ -150,62 +150,109 @@ class LiveExecutor:
             return (f"Refused: {intent.sol_amount:g} SOL exceeds the per-trade cap of "
                     f"{self._max_buy_sol:g} SOL (MEMEINTEL_EXECUTION_MAX_BUY_SOL).")
         lamports = int(intent.sol_amount * _LAMPORTS_PER_SOL)
-        try:
-            async with self._lock:
+        async with self._lock:
+            # These run BEFORE any transaction is broadcast, so a failure here
+            # means nothing was spent and it is safe to say so.
+            try:
                 balance = await self._rpc.get_sol_balance_lamports(self._pubkey)
-                if balance < lamports + _FEE_BUFFER_LAMPORTS:
-                    return (f"Refused: wallet holds {balance / _LAMPORTS_PER_SOL:.4f} SOL, "
-                            f"not enough for {intent.sol_amount:g} SOL + fees. Fund the "
-                            "trading wallet or lower the amount.")
+            except CollectorError as exc:
+                return ("Buy aborted — could not read the wallet balance "
+                        f"({self._safe(str(exc))}). Nothing was spent.")
+            if balance < lamports + _FEE_BUFFER_LAMPORTS:
+                return (f"Refused: wallet holds {balance / _LAMPORTS_PER_SOL:.4f} SOL, "
+                        f"not enough for {intent.sol_amount:g} SOL + fees. Fund the "
+                        "trading wallet or lower the amount.")
+            try:
                 quote = await self._jupiter.get_quote(
-                    SOL_MINT, intent.token_address, lamports, self._slippage_bps)
-                if quote is None:
-                    return ("No route to buy this token right now (Jupiter found no "
-                            "swap path). Nothing was spent.")
-                signature = await self._swap_and_send(quote)
-                landed = await self._confirm(signature)
-        except (CollectorError, TradeError) as exc:
-            self._logger.error("buy failed for %s: %s", intent.token_address,
-                               self._safe(str(exc)))
-            return f"Buy failed: {self._safe(str(exc))}. Check the wallet before retrying."
-
-        self._journal(intent.token_address, "trade_buy",
-                      f"live buy {intent.sol_amount:g} SOL via {intent.source}: {signature}")
-        status = "confirmed" if landed else "submitted (confirmation pending)"
-        return (f"BUY {status}: {intent.sol_amount:g} SOL of {intent.token_address}. "
-                f"It will appear in your Phantom wallet.\n{_SOLSCAN_TX}{signature}")
+                    SOL_MINT, intent.token_address, lamports, self._slippage_bps,
+                    use_cache=False)
+            except CollectorError as exc:
+                return ("Buy aborted — could not get a fresh quote "
+                        f"({self._safe(str(exc))}). Nothing was spent.")
+            if quote is None:
+                return ("No route to buy this token right now (Jupiter found no "
+                        "swap path). Nothing was spent.")
+            return await self._execute_swap(
+                quote, mint=intent.token_address, kind="trade_buy", action="BUY",
+                detail=f"{intent.sol_amount:g} SOL via {intent.source}")
 
     async def execute_sell_all(self, mint: str, chain: str = "solana") -> str:
         if chain not in ("solana", "sol"):
             return "Live trading is Solana-only."
-        try:
-            async with self._lock:
+        async with self._lock:
+            try:
                 raw = await self._rpc.get_token_balance_raw(self._pubkey, mint)
-                if raw <= 0:
-                    return "Nothing to dump — the trading wallet holds none of this token."
+            except CollectorError as exc:
+                return ("Dump aborted — could not read the token balance "
+                        f"({self._safe(str(exc))}). Nothing was sold.")
+            if raw <= 0:
+                return "Nothing to dump — the trading wallet holds none of this token."
+            try:
                 quote = await self._jupiter.get_quote(
-                    mint, SOL_MINT, raw, self._slippage_bps)
-                if quote is None:
-                    return ("No route to sell this token right now (Jupiter found no "
-                            "swap path). Nothing was sold — try again shortly.")
-                signature = await self._swap_and_send(quote)
-                landed = await self._confirm(signature)
-        except (CollectorError, TradeError) as exc:
-            self._logger.error("dump failed for %s: %s", mint, self._safe(str(exc)))
-            return f"Dump failed: {self._safe(str(exc))}. Check the wallet before retrying."
-
-        self._journal(mint, "trade_sell", f"live dump (100%): {signature}")
-        status = "confirmed" if landed else "submitted (confirmation pending)"
-        return (f"DUMP {status}: sold the full {mint} position back to SOL.\n"
-                f"{_SOLSCAN_TX}{signature}")
+                    mint, SOL_MINT, raw, self._slippage_bps, use_cache=False)
+            except CollectorError as exc:
+                return ("Dump aborted — could not get a fresh quote "
+                        f"({self._safe(str(exc))}). Nothing was sold.")
+            if quote is None:
+                return ("No route to sell this token right now (Jupiter found no "
+                        "swap path). Nothing was sold — try again shortly.")
+            return await self._execute_swap(
+                quote, mint=mint, kind="trade_sell", action="DUMP",
+                detail="100% of position")
 
     # ---- internals ----
 
-    async def _swap_and_send(self, quote: dict) -> str:
-        swap_b64 = await self._jupiter.build_swap_transaction(
-            quote, self._pubkey, priority_fee_max_lamports=self._priority_fee_max)
-        signed = self._sign(swap_b64)
-        return await self._rpc.send_raw_transaction(signed)
+    async def _execute_swap(self, quote: dict, *, mint: str, kind: str,
+                            action: str, detail: str) -> str:
+        """Build -> sign -> send -> confirm with money-safe staged reporting.
+
+        The single rule: once a transaction has been BROADCAST (send returned a
+        signature), never report an outright failure that hides the signature —
+        the operator must verify on-chain, not blindly re-tap and double-spend.
+        Only pre-broadcast failures (build/sign, and a clean submission
+        rejection) are reported as 'nothing spent'.
+        """
+        # Pre-broadcast: build + sign. A failure here spent nothing.
+        try:
+            swap_b64 = await self._jupiter.build_swap_transaction(
+                quote, self._pubkey,
+                priority_fee_max_lamports=self._priority_fee_max,
+                max_slippage_bps=self._slippage_bps)
+            signed = self._sign(swap_b64)
+        except (CollectorError, TradeError) as exc:
+            return f"{action} failed before sending — nothing was spent: {self._safe(str(exc))}"
+
+        # Submission. If this raises we cannot be certain the tx did NOT reach
+        # the network, so we must NOT invite a blind retry.
+        try:
+            signature = await self._rpc.send_raw_transaction(signed)
+        except CollectorError as exc:
+            self._logger.error("%s submission error for %s: %s", action, mint,
+                               self._safe(str(exc)))
+            return (f"{action} may not have gone through (submission error). Do NOT retry "
+                    f"blindly — check your wallet / Solscan first: {self._safe(str(exc))}")
+
+        # Broadcast: the signature is now the source of truth. Journal it
+        # immediately so a confirmation hiccup can never lose the record.
+        link = f"{_SOLSCAN_TX}{signature}"
+        self._journal(mint, kind, f"live {kind} {detail}: {signature}")
+        try:
+            landed = await self._confirm(signature)
+        except TradeError as exc:
+            # Confirmed on-chain FAILURE: the tx reverted, so no funds moved
+            # beyond the network fee — safe to retry.
+            return (f"{action} did NOT go through on-chain — only the network fee was spent, "
+                    f"safe to retry. ({self._safe(str(exc))})\n{link}")
+        except CollectorError as exc:
+            # The RPC could not tell us the outcome. UNKNOWN — do not retry.
+            self._logger.warning("%s confirmation unknown for %s: %s", action, mint,
+                                 self._safe(str(exc)))
+            return (f"{action} was submitted but could not be confirmed (RPC error). Do NOT "
+                    f"retry — check Solscan first.\n{link}")
+        if landed:
+            return f"{action} confirmed.\n{link}"
+        return (f"{action} submitted — confirmation still pending. Do NOT retry; "
+                f"check Solscan.\n{link}")
 
     def _sign(self, swap_tx_base64: str) -> str:
         """Sign the Jupiter VersionedTransaction with the trading key."""
