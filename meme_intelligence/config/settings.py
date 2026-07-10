@@ -492,6 +492,12 @@ class AISettings:
     # the alert dispatches — deep analysis strictly after initial
     # requirements. Gate-passing tokens are rare, so cost stays near zero.
     verify_opportunities: bool = True
+    # Credit conservation: a paid verification call is the LAST check, never
+    # the first. If the deterministic rug engine scores at/above this before
+    # the call, the call is skipped (the alert is downgraded instead). The
+    # smallest signal weight is 10, so the default means ANY fired rug signal
+    # blocks the spend; raise it to tolerate weak signals.
+    verify_skip_rug_score: float = 10.0
 
     def __post_init__(self) -> None:
         if self.model.strip() == "":
@@ -503,6 +509,7 @@ class AISettings:
             if not math.isfinite(value) or value <= 0:
                 raise ConfigurationError(f"ai setting '{name}' must be positive")
         _check_range("ai min_confidence", self.min_confidence, 0.0, 100.0)
+        _check_range("ai verify_skip_rug_score", self.verify_skip_rug_score, 0.0, 100.0)
 
 
 @dataclass(frozen=True)

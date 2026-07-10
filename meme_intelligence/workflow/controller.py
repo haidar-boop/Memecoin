@@ -395,23 +395,35 @@ class ContinuousScanner:
             provisional = self._rules.evaluate(result, previous_score=previous_score)
             if any(e.alert_type in ("high_priority_opportunity", "strong_candidate")
                    for e in provisional):
-                self._logger.info("gate-passing candidate %s: running AI verification",
-                                  token.address)
-                enriched = await self._pipeline.enrich_with_ai(
-                    result, service=self._ai_verifier)
-                # No judgment attached means the verification produced nothing
-                # usable (discarded below the confidence floor, or the call
-                # failed) — recorded so the alert rules treat it as
-                # unconfirmed rather than as if AI never looked (Rule 8).
-                ai_inconclusive = enriched.ai_judgment is None
-                self._ai_verified[verify_key] = ai_inconclusive
-                if (enriched is not result
-                        and enriched.master.final_score < result.master.final_score):
+                # Credit conservation: a paid call is the LAST check, never
+                # the first. Every free deterministic signal must be clean
+                # before the API is asked for an opinion (Rule 10/11). A
+                # vetoed token is NOT cached as verified — if its risk clears
+                # on a later recheck, verification can still run then.
+                veto = self._ai_spend_veto(result, provisional, creator)
+                if veto is not None:
                     self._logger.info(
-                        "AI verification moved %s score %.0f -> %.0f",
-                        token.address, result.master.final_score,
-                        enriched.master.final_score)
-                result = enriched
+                        "AI verification skipped for %s: %s — credits saved; "
+                        "alert downgraded", token.address, veto)
+                    ai_inconclusive = True  # strong-candidate tier downgrades
+                else:
+                    self._logger.info("gate-passing candidate %s: running AI verification",
+                                      token.address)
+                    enriched = await self._pipeline.enrich_with_ai(
+                        result, service=self._ai_verifier)
+                    # No judgment attached means the verification produced
+                    # nothing usable (discarded below the confidence floor, or
+                    # the call failed) — recorded so the alert rules treat it
+                    # as unconfirmed rather than as if AI never looked (Rule 8).
+                    ai_inconclusive = enriched.ai_judgment is None
+                    self._ai_verified[verify_key] = ai_inconclusive
+                    if (enriched is not result
+                            and enriched.master.final_score < result.master.final_score):
+                        self._logger.info(
+                            "AI verification moved %s score %.0f -> %.0f",
+                            token.address, result.master.final_score,
+                            enriched.master.final_score)
+                    result = enriched
 
         self._storage.record_snapshot(
             result.master, source=source,
@@ -472,6 +484,54 @@ class ContinuousScanner:
             )
 
         self._feed_learning(result, stats, creator=creator)
+
+    # Alert types that mean "this token is already flagged risky" — a paid AI
+    # opinion on it is wasted money, not information.
+    _RISK_ALERT_TYPES = frozenset({"emergency_review", "risk_warning"})
+
+    def _ai_spend_veto(self, result: PipelineResult, provisional: list,
+                       creator: str | None) -> str | None:
+        """Free deterministic checks that gate every paid AI verification.
+
+        Returns the reason to skip (credits saved), or None when everything
+        checks out and the AI's opinion is genuinely the missing piece.
+        Checks: risk alerts already firing on this token, and the mind
+        layer's rug engine (contract facts + deployer blacklist + observed
+        dev outflow) — all zero-API-cost.
+        """
+        risky = sorted({e.alert_type for e in provisional
+                        if e.alert_type in self._RISK_ALERT_TYPES})
+        if risky:
+            return f"risk alerts already firing ({', '.join(risky)})"
+
+        from meme_intelligence.learning.models import CoinSnapshot
+        from meme_intelligence.learning.rug_engine import RugEngine
+
+        profile = result.security_profile
+        if creator is None and profile is not None:
+            creator = profile.creator_address
+        deployer_rugs = 0
+        if self._learning is not None and creator:
+            try:
+                deployer_rugs = self._learning.store.deployer_rug_count(
+                    creator, result.pair.base_token.chain)
+            except Exception:  # noqa: BLE001 — advisory lookup, never blocks
+                deployer_rugs = 0
+        snapshot = CoinSnapshot.from_dict({
+            "age_seconds": 0.0,
+            "volume_1h_usd": result.pair.volume_1h,
+            "holder_count": profile.holder_count if profile is not None else None,
+            "dev_outflow_usd": _creator_outflow_usd(result.wallet, creator),
+        })
+        rug = RugEngine(self._settings.rug_signal_weights,
+                        self._settings.rug_thresholds).assess(
+            security=profile, snapshots=(snapshot,),
+            deployer_rug_count=deployer_rugs)
+        if rug.score >= self._settings.ai.verify_skip_rug_score:
+            return (f"rug engine score {rug.score:.0f} >= "
+                    f"{self._settings.ai.verify_skip_rug_score:.0f} "
+                    f"(signals: {', '.join(rug.fired_names)})")
+        return None
 
     def _feed_learning(self, result: PipelineResult, stats: CycleStats,
                        *, creator: str | None = None) -> None:

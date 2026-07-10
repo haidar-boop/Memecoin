@@ -402,6 +402,49 @@ async def test_gate_passing_token_triggers_one_ai_verification():
         assert high  # judgment unavailable -> deterministic evidence stands (Rule 9)
 
 
+async def test_ai_spend_vetoed_for_blacklisted_deployer():
+    """Credit conservation: a gate-passing token whose deployer sits on the
+    mind layer's blacklist never triggers a paid verification call — the
+    free rug engine is consulted BEFORE the API (a paid opinion is the last
+    check, never the first)."""
+    import dataclasses as _dc
+    from meme_intelligence.learning.service import LearningService
+    from meme_intelligence.learning.store import LearningStore
+
+    settings = Settings.from_env(env={
+        "MEMEINTEL_LEARNING_ENABLE_IN_MONITOR": "true",
+        "MEMEINTEL_LEARNING_STATE_DIR": ":memory:",
+    })
+    learning = LearningService(
+        settings, store=LearningStore(":memory:", now_func=lambda: NOW),
+        now_func=lambda: NOW)
+    learning.store.blacklist_deployer("devBad", "solana")
+
+    ai = VerifierAI(judgment=weak_narrative_judgment())
+    sink = RecordingSink()
+    pair = make_pair()
+    profile = _dc.replace(clean_profile(pair.base_token), creator_address="devBad")
+
+    async def fake_sleep(seconds):
+        pass
+
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        notifier = NotificationEngine([sink], AlertEngineSettings(), time_func=lambda: 0.0)
+        scanner = ContinuousScanner(
+            settings, storage, notifier,
+            gecko_client=FakeGecko([pair]),
+            goplus_client=FakeGoPlus({pair.base_token.address: profile}),
+            market_service=FakeMarketService(verdict=(True, "liquidity confirmed")),
+            community_client=FakeCommunity(),
+            ai_service=ai,
+            learning_service=learning,
+            now_func=lambda: NOW, sleep_func=fake_sleep,
+        )
+        await scanner.run(max_cycles=1)
+
+    assert ai.judge_calls == 0  # credits saved: rug engine vetoed the call
+
+
 async def test_ai_confirmation_annotates_the_alert():
     judgment = weak_narrative_judgment()
     # strong narrative instead: same judgment but high slots
