@@ -313,3 +313,70 @@ async def test_rpc_send_with_no_signature_raises(monkeypatch):
     client = make_rpc_client(monkeypatch, [None])
     with pytest.raises(CollectorError):
         await client.send_raw_transaction("b64tx")
+
+
+# ---- Dedicated trading Helius key (build_executor wiring) ----
+
+def _executor_env(kp, **extra):
+    env = {
+        "MEMEINTEL_EXECUTION_LIVE_ENABLED": "true",
+        "MEMEINTEL_EXECUTION_PRIVATE_KEY": keypair_b58(kp),
+        "MEMEINTEL_HELIUS_API_KEY": "scanner-key",
+    }
+    env.update(extra)
+    return env
+
+
+def test_build_executor_uses_dedicated_trading_helius_key():
+    """MEMEINTEL_EXECUTION_HELIUS_API_KEY gives trading its OWN account +
+    its OWN rate limiter, so the scanner's exhausted budget can't 429 a
+    trade's balance read (observed live 2026-07-11)."""
+    from meme_intelligence.__main__ import build_executor
+    from meme_intelligence.config.settings import Settings
+    from meme_intelligence.core.rate_limiter import RateLimiter
+
+    kp = new_keypair()
+    settings = Settings.from_env(env=_executor_env(
+        kp, MEMEINTEL_EXECUTION_HELIUS_API_KEY="trading-key"))
+    assert settings.trading_helius_api_key == "trading-key"
+    shared = RateLimiter.per_minute(120.0)
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        executor, rpc = build_executor(
+            settings, storage, jupiter_client=object(), helius_rate_limiter=shared)
+        assert executor.live is True
+        assert rpc is not None
+        assert rpc._api_key == "trading-key"          # the second account's key
+        assert rpc._rate_limiter is not shared        # and its own budget
+
+
+def test_build_executor_without_dedicated_key_shares_the_scanner_limiter():
+    """No dedicated key -> same account as the scanner -> one shared bucket
+    (the earlier fix for two independent limiters exceeding one budget)."""
+    from meme_intelligence.__main__ import build_executor
+    from meme_intelligence.config.settings import Settings
+    from meme_intelligence.core.rate_limiter import RateLimiter
+
+    kp = new_keypair()
+    settings = Settings.from_env(env=_executor_env(kp))
+    shared = RateLimiter.per_minute(120.0)
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        executor, rpc = build_executor(
+            settings, storage, jupiter_client=object(), helius_rate_limiter=shared)
+        assert executor.live is True
+        assert rpc._api_key == "scanner-key"
+        assert rpc._rate_limiter is shared
+
+
+def test_build_executor_dedicated_key_alone_is_enough():
+    """A trading-only Helius key with NO scanner key still arms live trading."""
+    from meme_intelligence.__main__ import build_executor
+    from meme_intelligence.config.settings import Settings
+
+    kp = new_keypair()
+    env = _executor_env(kp, MEMEINTEL_EXECUTION_HELIUS_API_KEY="trading-key")
+    env["MEMEINTEL_HELIUS_API_KEY"] = ""
+    settings = Settings.from_env(env=env)
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        executor, rpc = build_executor(settings, storage, jupiter_client=object())
+        assert executor.live is True
+        assert rpc._api_key == "trading-key"

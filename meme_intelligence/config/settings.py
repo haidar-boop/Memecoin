@@ -1360,6 +1360,13 @@ class Settings:
     # low-balance trading wallet. Empty = no live executor (dry-run only).
     # Read from env only; never logged or committed (Rule 16).
     trading_private_key: str = ""
+    # Optional DEDICATED Helius key for live trading (Project 6): a buy/dump
+    # only needs a handful of RPC calls, but the scanner's wallet-intelligence
+    # traffic can exhaust the shared account's server-side budget and 429 the
+    # trade's balance read (observed live 2026-07-11). Set this to a SECOND
+    # Helius account's key so trading has its own untouched budget. Empty =
+    # trading shares MEMEINTEL_HELIUS_API_KEY (previous behavior, Rule 18).
+    trading_helius_api_key: str = ""
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Settings":
@@ -1419,6 +1426,7 @@ class Settings:
             telegram_chat_id=env.get(f"{_ENV_PREFIX}_TELEGRAM_CHAT_ID", ""),
             discord_webhook_url=env.get(f"{_ENV_PREFIX}_DISCORD_WEBHOOK_URL", ""),
             trading_private_key=env.get(f"{_ENV_PREFIX}_EXECUTION_PRIVATE_KEY", ""),
+            trading_helius_api_key=env.get(f"{_ENV_PREFIX}_EXECUTION_HELIUS_API_KEY", ""),
         )
 
 

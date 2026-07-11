@@ -201,24 +201,34 @@ def build_executor(
     ``helius_rate_limiter``: see :func:`build_wallet_service` — pass the same
     shared limiter when a wallet-intelligence Helius client is also running
     so both clients draw from one real account budget instead of two
-    independent ones that can together exceed it.
+    independent ones that can together exceed it. When
+    MEMEINTEL_EXECUTION_HELIUS_API_KEY names a DIFFERENT Helius account for
+    trading, the trading client instead gets its own fresh limiter — a
+    separate account is a separate real budget, and sharing the scanner's
+    (possibly exhausted) bucket would just re-create the starvation the
+    dedicated key exists to avoid.
     """
     from meme_intelligence.trading.execution import DryRunExecutor
 
     ex = settings.execution
     if not (ex.live_enabled and settings.trading_private_key):
         return DryRunExecutor(storage), None
-    if jupiter_client is None or not settings.helius_api_key:
+    rpc_key = settings.trading_helius_api_key or settings.helius_api_key
+    if jupiter_client is None or not rpc_key:
         print("Note: MEMEINTEL_EXECUTION_LIVE_ENABLED is on but a trading key, "
               "Jupiter key, or Helius key is missing — buy/dump run in DRY RUN.")
         return DryRunExecutor(storage), None
     from meme_intelligence.trading.execution import LiveExecutor
     from meme_intelligence.trading.solana_rpc import SolanaRpcClient
 
+    dedicated = bool(settings.trading_helius_api_key
+                     and settings.trading_helius_api_key != settings.helius_api_key)
     rpc = SolanaRpcClient(
-        settings.helius_api_key, rpc_url=settings.providers.helius_rpc_url,
-        rate_limiter=helius_rate_limiter or RateLimiter.per_minute(
-            settings.providers.helius_requests_per_minute),
+        rpc_key, rpc_url=settings.providers.helius_rpc_url,
+        rate_limiter=(
+            RateLimiter.per_minute(settings.providers.helius_requests_per_minute)
+            if dedicated or helius_rate_limiter is None
+            else helius_rate_limiter),
         **_shared_collector_kwargs(settings),
     )
     try:

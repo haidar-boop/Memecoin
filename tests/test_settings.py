@@ -255,10 +255,14 @@ def test_execution_live_env_overrides():
         "MEMEINTEL_EXECUTION_LIVE_ENABLED": "true",
         "MEMEINTEL_EXECUTION_PRIVATE_KEY": "somebase58key",
         "MEMEINTEL_EXECUTION_MAX_BUY_SOL": "0.2",
+        "MEMEINTEL_EXECUTION_HELIUS_API_KEY": "dedicated-trading-key",
     })
     assert settings.execution.live_enabled is True
     assert settings.trading_private_key == "somebase58key"
     assert settings.execution.max_buy_sol == 0.2
+    assert settings.trading_helius_api_key == "dedicated-trading-key"
+    # Default stays empty -> trading shares the scanner's key (Rule 18).
+    assert Settings.from_env(env={}).trading_helius_api_key == ""
 
 
 def test_project2_env_overrides_load():

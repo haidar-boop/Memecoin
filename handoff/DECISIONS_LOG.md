@@ -928,6 +928,32 @@ A three-lens money-safety review (each finding independently verified,
   scanner at startup. It now catches any construction failure and falls back
   to dry-run.
 
+## 2026-07-11 — Live-trade 429s: dedicated Helius account for trading
+
+The first live `/buy` attempts aborted safely ("Nothing was spent") because
+the pre-broadcast balance read got HTTP 429 from Helius. Diagnosis on the
+droplet: a single direct `getBalance` also 429'd (5/5), while the journal
+showed the scanner's wallet-intelligence traffic
+(`api.helius.xyz/v0/addresses/…/transactions`) being continuously rate
+limited — the shared free-tier Helius account is exhausted server-side, so
+any budget the trade path shares with the scanner is already spent.
+
+Two-step resolution (Rules 4/9/11/17/18):
+
+* **Share one client-side bucket per account.** `build_wallet_service` /
+  `build_executor` accept a shared `RateLimiter`; the monitor builds one per
+  Helius key so two clients on the same account can no longer each assume
+  the full budget. (Necessary, but insufficient when the account itself is
+  out of credits.)
+* **Separate account for the money path (operator's suggestion).**
+  `MEMEINTEL_EXECUTION_HELIUS_API_KEY` names a second Helius account used
+  only by `SolanaRpcClient` (balance reads, send, confirm — a handful of
+  calls per trade). When set and different from the scanner's key, the
+  trading client gets its own fresh limiter — a separate account is a
+  separate real budget, and sharing the scanner's exhausted bucket would
+  re-create the starvation. Empty keeps the old shared-key behavior
+  (Rule 18); the trade path never competes with data collection (Rule 4).
+
 ## Notable implementation choices (Rule 19)
 
 - **Python 3.11 + asyncio** over Node.js (both allowed by spec): the
