@@ -1040,6 +1040,29 @@ found and fixed (all with regression tests; suite 738 → 747):
   skipped unparseable token accounts; added a warning log so a rare
   under-counted "sell 100%" is diagnosable.
 
+## 2026-07-11 — OOM crash-loop, then a reclaim stall: memory policy for 1GB
+
+One day after arming, the bot went silent. Root causes, in the order they
+were hit (full symptoms + watch-items in OPERATIONS.md "Memory on the 1GB
+droplet"):
+
+1. The learning layer had grown from ~450 to 6,362 resolved coins
+   (~440M → ~740M RSS), outgrowing the unit's `MemoryMax=512M` → OOM
+   crash-loop every ~34s. Each restart's backlog-discard (correctly)
+   dropped the operator's buffered Telegram commands, which is why the
+   bot "ignored" him while the service showed active.
+2. The first fix (`MemoryHigh=700M` + `MemoryMax=800M`) traded the crash
+   for a stall: usage sat ABOVE the soft limit, so the kernel throttled
+   the single-event-loop process into unresponsive reclaim. Lesson
+   recorded: never use MemoryHigh for this workload on a swapless box.
+
+**Resolution:** `MemoryMax=880M` as an OOM backstop only (no MemoryHigh),
+plus a persistent 1G swapfile on the droplet; `deploy/meme-intelligence.service`
+updated so reinstalls don't resurrect the 512M cap. **Standing watch-item:**
+learning memory grows unboundedly with resolved coins — when steady-state
+nears ~800M, either bound the analog index or move to the 2GB droplet;
+do not keep raising the cap on 1GB.
+
 ## Notable implementation choices (Rule 19)
 
 - **Python 3.11 + asyncio** over Node.js (both allowed by spec): the

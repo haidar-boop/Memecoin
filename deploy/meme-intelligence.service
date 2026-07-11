@@ -15,8 +15,13 @@ RestartSec=10
 # if the process itself dies outright, systemd brings it back.
 StartLimitIntervalSec=0
 
-# Modest resource ceiling — this workload never needs much (Rule 12).
-MemoryMax=512M
+# OOM backstop only — sized for the learning layer, which grows with every
+# resolved coin (~740M at 6,362 coins, 2026-07-11). The old 512M cap caused
+# an OOM crash-loop once memory grew past it, and an intermediate
+# MemoryHigh=700M soft limit stalled the whole process in kernel reclaim
+# (avoid MemoryHigh here: no-swap droplets + anon-heavy Python = livelock).
+# Pair with a 1G swapfile on 1GB droplets — see handoff/OPERATIONS.md.
+MemoryMax=880M
 
 [Install]
 WantedBy=multi-user.target

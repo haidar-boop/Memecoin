@@ -98,6 +98,31 @@ paste-merge corrupted a line; an empty-file scare from the wrong cwd) —
 prefer giving him exact one-liners (`printf '\nKEY=value\n' >> .env`,
 `sed -i` edits) over interactive nano.
 
+## Memory on the 1GB droplet (learned the hard way, 2026-07-11)
+
+The learning layer's memory grows with every resolved coin (~440M at ~450
+coins → ~740M at 6,362 coins). Two failure modes were hit live, one day
+after arming:
+
+1. **OOM crash-loop:** the unit's old `MemoryMax=512M` was outgrown — the
+   process was killed every ~34s, and each restart's backlog-discard ate
+   the operator's Telegram commands. Symptom: a NEW python PID in the
+   journal every half-minute; `Failed with result 'oom-kill'`.
+2. **Reclaim stall:** a `MemoryHigh=700M` soft limit with usage above it
+   throttled the whole (single-event-loop) process into silence — running,
+   zero errors, answering nothing. **Do not set MemoryHigh** on a no-swap
+   droplet for this anon-heavy Python workload.
+
+Current setup: `MemoryMax=880M` (OOM backstop only — in
+`deploy/meme-intelligence.service`, overridable via
+`/etc/systemd/system/meme-intelligence.service.d/memory.conf`) **plus a 1G
+swapfile** (`/swapfile`, in `/etc/fstab`) so spikes degrade gracefully.
+
+Watch it occasionally: `systemctl show meme-intelligence -p MemoryCurrent`.
+When steady-state usage approaches ~800M, the honest options are bounding
+the learning memory (cap/prune the analog index) or the $12/mo 2GB droplet
+— raising the cap further on a 1GB box just starves the OS.
+
 ## Reading the system
 
 - **Live tail:** `journalctl -u meme-intelligence -f`
