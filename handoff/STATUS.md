@@ -1,11 +1,15 @@
 # Build Status — Parts 1 through 33 (built or verified-satisfied)
 
-**650 tests passing.** ~14,000 lines of source, ~8,000 lines of tests.
-Parts 20-33 completed a verification pass (see `next_steps/INDEX.md`);
-the only unbuilt items are the web dashboard and creator-history
-intelligence (data-source-blocked).
+**738 tests passing** (as of 2026-07-11). ~14,000+ lines of source,
+~8,000+ lines of tests. Parts 20-33 completed a verification pass (see
+`next_steps/INDEX.md`); the only unbuilt items are the web dashboard
+(**discarded by the operator 2026-07-10 — do not build**) and
+creator-history intelligence (data-source-blocked).
 Parts 1–18 were built on `claude/large-prompt-review-l49wp1`; Parts 19
-and 23 on `claude/handoff-folder-review-fuu9dq`.
+and 23 on `claude/handoff-folder-review-fuu9dq`; Projects 1/2/3/6 and
+the 2026-07-11 live-trading hardening on
+`claude/memecoin-onboarding-yrvjbg` (the current authoritative branch —
+the droplet pulls it).
 
 Legend: ✅ built and tested · 🟡 built partially (documented gap) ·
 ⏳ blocked on something outside the code (API key, data source that
@@ -230,6 +234,14 @@ The classification/scoring framework, config system, and logging.
   `MEMEINTEL_BIRDEYE_API_KEY` (see SETUP.md)
 - **Scope: Solana only.** EVM wallet intelligence (would need Alchemy or
   similar) is not built.
+- **⏳ PAUSED IN THE MONITOR as of 2026-07-11**
+  (`MEMEINTEL_WALLET_ENABLE_IN_MONITOR=false` on the droplet): running it
+  on every analyzed token exhausted the free Helius account's monthly
+  credits, so it produced nothing but 429 retries. Deliberately parked —
+  re-enable ONLY when the bot is profitable, and only together with
+  (a) a paid Helius plan and (b) credit-gating so wallet lookups run only
+  on best/alert-worthy candidates, not every token. The code is built,
+  tested, and untouched. See DECISIONS_LOG 2026-07-11.
 
 ## Part 18 — Advanced Rug Detection & Scam Prevention Engine → ✅
 
@@ -298,8 +310,11 @@ The classification/scoring framework, config system, and logging.
 
 ## Part 23 — AI Agent Integration Blueprint & Intelligence Pipeline → 🟡
 
-- `ai/reasoning.py` — the LLM reasoning layer, live against the Anthropic
-  API (key verified). `AIJudgmentService.judge()` makes one structured-
+- `ai/reasoning.py` — the LLM reasoning layer, built and verified live
+  against the Anthropic API. (**The key is currently OFF on the droplet**
+  — operator's deliberate credit-saving choice, 2026-07-10; the layer
+  reactivates the moment a key lands in `.env`.)
+  `AIJudgmentService.judge()` makes one structured-
   output request per token (§4 prompt structure: role = the tested
   `ANALYST_SYSTEM_PROMPT`, objective, §3 structured snapshot, rules
   including the §9 bias warnings, JSON-schema output format) and returns
@@ -379,10 +394,11 @@ The classification/scoring framework, config system, and logging.
   ≥$100k and ≥10× the candidate's liquidity → downgrade with the
   original named). Config `MEMEINTEL_ALERTS_COPYCAT_*`. See
   DECISIONS_LOG.md.
-- **Gap (why 🟡):** no Telegram bot token / Discord webhook configured
-  yet — sinks are built, tested against mocks, and activate the moment
-  `MEMEINTEL_TELEGRAM_BOT_TOKEN` + `MEMEINTEL_TELEGRAM_CHAT_ID` (or
-  `MEMEINTEL_DISCORD_WEBHOOK_URL`) land in `.env`. Verify with
+- **Gap resolved (2026-07-10):** the Telegram bot token + chat id are
+  configured on the droplet and alerts arrive on the operator's phone
+  (HIGH+ only). Discord remains unconfigured (unused, not missed). The 🟡
+  now reflects only the historical note that delivery depends on the
+  operator's `.env`; verify any sink change with
   `python -m meme_intelligence alerts --test`.
 
 ---
@@ -639,12 +655,12 @@ a one-tap copy-address button).
   and the Project 1 gap ROADMAP §1 named is closed: the live probe's
   confirmed cannot-sell now feeds `RugEngine.assess(unsellable_override=...)`
   — only ever True or None, never False.
-- **Buy-button scaffold (operator-requested, NOT launched):**
-  `trading/execution.py` — `DryRunExecutor` only: journals a
-  `trade_intent` and answers "DRY RUN — no real trade executed". NO wallet
-  keys, NO signing, NO live path exists;
-  `MEMEINTEL_EXECUTION_BUY_BUTTON_ENABLED` (default false) merely reveals
-  the `[Buy (dry run)]` button. See DECISIONS_LOG (2026-07-10).
+- **Buy-button scaffold (operator-requested; historical — superseded by
+  Project 6 below):** at Project 2 time, `trading/execution.py` was
+  `DryRunExecutor` only — journals a `trade_intent` and answers "DRY RUN —
+  no real trade executed"; no live path existed. Project 6 (2026-07-10)
+  added `LiveExecutor`, and it was armed live on 2026-07-11. See
+  DECISIONS_LOG (2026-07-10, both entries).
 - Config: `TelegramCommandSettings` (`MEMEINTEL_TELEGRAM_COMMANDS_*`,
   enabled=false by default) and `ExecutionSettings`
   (`MEMEINTEL_EXECUTION_*`).
@@ -723,10 +739,55 @@ execution. NEVER auto-trades; a trade only happens on a button/command.
 
 ---
 
+## New (2026-07-11): live trading ARMED and validated; Helius split; wallet-intel paused
+
+Project 6 went from "built, off by default" to **armed and working in
+production**: the operator's first real `/buy` executed successfully from
+Telegram (dedicated fresh Phantom wallet, funded ~$20 CAD, small per-trade
+caps in the droplet `.env`). The `/dump` half of the round-trip validation
+is the open next step. Never auto-trades — every trade is a button the
+operator taps.
+
+Getting there surfaced and fixed real issues (each with tests, all on
+`claude/memecoin-onboarding-yrvjbg`):
+
+- **Adversarial money-safety review of Project 6** (6/6 findings confirmed,
+  commit `2957ea2`) — staged broadcast reporting so a signature is never
+  hidden (double-spend prevention), hard `dynamicSlippage: {maxBps}` cap,
+  `use_cache=False` trade-time quotes, dry-run fallback on any executor
+  construction failure. Details in DECISIONS_LOG 2026-07-10.
+- **Semgrep hygiene pass** (commit `d5ef485`) — SQL identifier allowlist
+  (`_safe_identifier()`), fully static SQL in `get_holdings()`/
+  `predictions()`, sha256 cache fingerprints. All findings were
+  non-exploitable; cleaned so future scans stay quiet.
+- **Double-reply fix** (commit `85ed00d`) — typed `/buy`/`/dump` sent two
+  Telegram messages (the handler replied directly AND returned text the
+  caller also sent). `_do_buy`/`_do_dump` are now pure; each path replies
+  exactly once.
+- **Shared Helius rate limiter** (commit `10c6643`) — wallet intelligence
+  and the trading RPC client each had an independent 120/min bucket
+  against the same Helius account; combined traffic exceeded the real
+  server-side limit. The monitor now builds ONE limiter per Helius key.
+- **Dedicated trading Helius account** (commit `5850616`) —
+  `MEMEINTEL_EXECUTION_HELIUS_API_KEY` (a SECOND Helius account) is used
+  only by `SolanaRpcClient` (balance reads, send, confirm), so live
+  trading works even while the scanner's account is throttled. Empty =
+  shares the main key (backward compatible). This is what unblocked the
+  first live buy: the main account's free credits were exhausted
+  server-side ("max usage reached"), and a new key on the SAME account
+  changed nothing — credits are per-account, not per-key.
+- **Wallet intelligence paused** — see the Part 17 note above.
+
+---
+
 ## What's NOT built yet
 
-The **web/monitoring dashboard** (Part 21 §10 / 22 / 27 §12 / 28 §11) and
+The **web/monitoring dashboard** (Part 21 §10 / 22 / 27 §12 / 28 §11) —
+**DISCARDED by the operator on 2026-07-10** ("Honestly no there's no point
+discard 4"); do not build it without a new explicit request — and
 Part 27's **creator launch-history intelligence** (data-source-blocked).
+**Project 5** (paid Twitter/X social intelligence) is **parked by the
+operator** ("we'll build it later") — do not start it unasked.
 Everything else in `next_steps/` has been built or verified-satisfied
 (see the verification-pass section in `next_steps/INDEX.md`). Some parts
 (20, 21, 22, 23, 30, 31, 32)
@@ -752,11 +813,16 @@ earlier parts.
    metrics accumulate as the scanner runs.
 3. **EVM wallet intelligence** (Alchemy or similar) is not built — Part
    17 is Solana-only.
-4. ~~No Telegram/Discord alert sinks yet~~ **Resolved — Part 29 built.**
-   Sinks activate when the bot token / webhook URL lands in `.env`
-   (still pending on the user's side).
-5. ~~No Anthropic/LLM integration yet.~~ **Resolved — Part 23 built and
-   live.** The AI reasoning layer fills the qualitative judgment slots
-   via `report --ai` / `plan --ai`; only the social-data half of those
-   judgments (gap #1) remains thin.
-6. **No dashboard/web UI** — CLI only, per the phased roadmap.
+4. ~~No Telegram/Discord alert sinks yet~~ **Resolved — Part 29 built and
+   LIVE**: the Telegram token/chat-id are configured on the droplet and
+   alerts arrive on the operator's phone (Discord unused by choice).
+5. ~~No Anthropic/LLM integration yet.~~ **Resolved — Part 23 built.**
+   The AI reasoning layer fills the qualitative judgment slots via
+   `report --ai` / `plan --ai`. **Note: the Anthropic key is currently
+   OFF on the droplet** — the operator's deliberate credit-saving choice
+   (2026-07-10); the system runs fully without it, do not "fix" it.
+6. **No dashboard/web UI** — CLI + Telegram only. The dashboard was
+   **discarded by the operator (2026-07-10)**; do not build it unasked.
+7. **Wallet intelligence paused in the monitor (2026-07-11)** — see the
+   Part 17 note above and DECISIONS_LOG 2026-07-11 for the re-enable
+   criteria (paid Helius plan + credit-gating, together).

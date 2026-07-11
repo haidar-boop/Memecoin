@@ -1,12 +1,15 @@
 # Handoff Folder — Meme Coin Intelligence System
 
-Complete project handoff as of **2026-07-10**, written so a fresh session
+Complete project handoff as of **2026-07-11**, written so a fresh session
 (human or AI, with zero memory of prior conversations) can operate, debug,
 and extend the system without re-learning anything the hard way.
 
-**The system is LIVE**: Parts 1–33 + the Self-Learning Mind Layer are built,
-**626 tests pass**, and it runs 24/7 on the operator's droplet sending
-Telegram alerts. Branch: `claude/session-rules-preferences-kc71bf`.
+**The system is LIVE**: Parts 1–33 + the Self-Learning Mind Layer +
+Projects 1/2/3/6 are built, **738 tests pass**, and it runs 24/7 on the
+operator's droplet sending Telegram alerts — and, as of 2026-07-11,
+executing operator-tapped buy/dump trades from a dedicated low-balance
+wallet (**never auto-trading**). Branch:
+`claude/memecoin-onboarding-yrvjbg`.
 
 ## Read in this order
 
@@ -30,28 +33,39 @@ literal spec text the reference for any future rework.
 
 ## The one-paragraph summary
 
-A meme-coin research and intelligence platform — **never an auto-trader; it
-never holds funds** — in Python 3.11 (async) + SQLite + free/low-cost APIs
-(DexScreener, GeckoTerminal, GoPlus, CoinGecko, Helius, Birdeye, pump.fun,
-optional Anthropic). It discovers new launches, screens security, scores
-across weighted categories, tracks a tiered watchlist, **learns from
-outcomes** (analog memory + classifier + rug engine + ensemble), and sends
-prioritized Telegram alerts filtered so the operator's phone buzzes only
-for vetted opportunities or trouble on coins it previously recommended.
-16 CLI commands; the 24/7 entry point is `monitor`.
+A meme-coin research, intelligence, and (operator-initiated) trading
+platform — **never an auto-trader**: since Project 6 (2026-07-11) it can
+buy/dump from Telegram, but only on an explicit operator button/command,
+signing from a dedicated low-balance wallet whose funding is the real risk
+cap. Python 3.11 (async) + SQLite + free/low-cost APIs (DexScreener,
+GeckoTerminal, GoPlus, CoinGecko, Helius, Birdeye, Jupiter, pump.fun,
+optional Anthropic). It discovers new launches, screens security (including
+a LIVE Jupiter round-trip sell test), scores across weighted categories,
+tracks a tiered watchlist, **learns from outcomes** (analog memory +
+classifier + rug engine + ensemble), and sends prioritized Telegram alerts
+filtered so the operator's phone buzzes only for vetted opportunities or
+trouble on coins it previously recommended. Two-way Telegram control
+(`/status`, `/check`, `/buy`, `/dump`, …); the 24/7 entry point is
+`monitor`.
 
-## What's next (the operator's chosen plan)
+## What's next (the operator's chosen plan — status as of 2026-07-11)
 
-The five upgrades in [ROADMAP.md](./ROADMAP.md), in order:
-**1)** Jupiter live sell-simulation rug check (free) · **2)** two-way
-Telegram control + feedback (free) · **3)** mind-layer P(rug) as an alert
-veto once its accuracy is proven (free) · **4)** read-only web dashboard
-(free) · **5)** paid Twitter/X social intelligence (only with his explicit
-cost approval).
+The five upgrades in [ROADMAP.md](./ROADMAP.md):
+**1)** Jupiter live sell-simulation rug check — ✅ BUILT ·
+**2)** two-way Telegram control + feedback — ✅ BUILT ·
+**3)** mind-layer P(rug) alert veto — ✅ BUILT (veto flag stays off until
+its measured accuracy earns authority) ·
+**4)** read-only web dashboard — ❌ **DISCARDED by the operator; do not
+build** · **5)** paid Twitter/X social intelligence — ⏸ **PARKED** until
+the bot makes money (explicit cost approval required).
+Plus the unplanned **Project 6** (operator-requested): live buy/dump from
+Telegram — ✅ BUILT, ARMED, first live buy validated 2026-07-11.
+Smart-money wallet intelligence is temporarily **paused** (Helius credits
+exhausted; re-enable criteria in DECISIONS_LOG 2026-07-11).
 
 ## Where the code lives
 
 Repository: `haidar-boop/Memecoin` · Branch:
-`claude/session-rules-preferences-kc71bf` · Implementation:
+`claude/memecoin-onboarding-yrvjbg` · Implementation:
 `meme_intelligence/` · Tests: `tests/` · Deployment kit: `deploy/` ·
 Live host: the operator's DigitalOcean droplet (see OPERATIONS.md).

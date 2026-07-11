@@ -47,22 +47,38 @@ cd ~/meme-intelligence
 .venv/bin/python -m pytest tests/ -q
 ```
 
-Expect `626 passed` (count as of 2026-07-10; update this number when you
+Expect `738 passed` (count as of 2026-07-11; update this number when you
 add tests).
 
-## `.env` on the droplet (state as of 2026-07-10)
+## `.env` on the droplet (state as of 2026-07-11)
 
 Set and working:
-- `MEMEINTEL_HELIUS_API_KEY` — Solana wallet/holder data. **Note: this key
-  appeared in a chat screenshot; recommend rotating it** (helius.dev →
-  regenerate → edit `.env` → restart).
+- `MEMEINTEL_HELIUS_API_KEY` — main Helius account (scanner). **Its monthly
+  free credits are currently EXHAUSTED** (429 "max usage reached" on every
+  call; resets monthly) — which is why wallet-intel is off, below. Also:
+  this key appeared in a chat screenshot; recommend rotating it
+  (helius.dev → regenerate → edit `.env` → restart).
+- `MEMEINTEL_EXECUTION_HELIUS_API_KEY` — **second, separate Helius account
+  used only by live trading** (balance reads, send, confirm). Healthy.
+  Exists so the money path never competes with the scanner's credit burn
+  (DECISIONS_LOG 2026-07-11). This key also transited chat; rotate at
+  leisure.
+- `MEMEINTEL_JUPITER_API_KEY` — Jupiter quotes/swaps (Project 1 sell-test
+  AND a hard prerequisite for live trading).
 - `MEMEINTEL_BIRDEYE_API_KEY` — Solana trades/overview.
 - `MEMEINTEL_TELEGRAM_BOT_TOKEN` + `MEMEINTEL_TELEGRAM_CHAT_ID` — alert
   delivery to his phone (working; alerts arrive).
+- `MEMEINTEL_TELEGRAM_COMMANDS_ENABLED=true` — two-way control (Project 2).
 - `MEMEINTEL_ALERT_DELIVERY_EXTERNAL_MIN_PRIORITY=high` — his phone gets
   HIGH/CRITICAL only. **Do not lower this without asking him.**
 - Learning layer enabled in the monitor (`MEMEINTEL_LEARNING_*` — the mind
   layer accumulated 449 coins on day one and trains as outcomes resolve).
+- **Live trading (Project 6) — ARMED, real money:**
+  `MEMEINTEL_EXECUTION_BUY_BUTTON_ENABLED=true`,
+  `MEMEINTEL_EXECUTION_LIVE_ENABLED=true`,
+  `MEMEINTEL_EXECUTION_PRIVATE_KEY` (dedicated ~$20 Phantom trading
+  wallet — the funding IS the risk cap), plus small
+  `MEMEINTEL_EXECUTION_MAX_BUY_SOL` / `_BUY_PRESETS_SOL` values he set.
 
 Deliberately OFF:
 - `MEMEINTEL_ANTHROPIC_API_KEY` — **removed by the operator (2026-07-10) to
@@ -70,10 +86,17 @@ Deliberately OFF:
   deterministic and free; AI is only ever a final second opinion. Do not
   treat the missing key as a bug. If he re-enables it, no other change is
   needed — the verify layer picks it up on restart.
+- `MEMEINTEL_WALLET_ENABLE_IN_MONITOR=false` — **wallet-intel / smart-money
+  paused by the operator (2026-07-11)**: it exhausted the main Helius
+  account's credits and produced only 429 noise. Do not flip it back on;
+  re-enable criteria (paid plan + credit-gating, together) are in
+  DECISIONS_LOG 2026-07-11.
 
 Never in git: `.env` is gitignored; secrets exist only on the droplet.
-Editing on the phone: `nano .env` trips him up — give exact keystrokes
-(Ctrl+O, Enter, Ctrl+X) when asking him to edit it.
+Editing on the phone: `nano .env` trips him up (two incidents: a
+paste-merge corrupted a line; an empty-file scare from the wrong cwd) —
+prefer giving him exact one-liners (`printf '\nKEY=value\n' >> .env`,
+`sed -i` edits) over interactive nano.
 
 ## Reading the system
 
@@ -113,10 +136,12 @@ with the same token).
 
 Every Telegram alert carries 👍/👎 buttons (stored as **advisory**
 operator feedback — never a training label) and a one-tap **📋 Copy
-address** button. The `[Buy (dry run)]` button appears only when
-`MEMEINTEL_EXECUTION_BUY_BUTTON_ENABLED=true` and does nothing but journal
-the intent — there is no live trade executor, deliberately (DECISIONS_LOG
-2026-07-10).
+address** button. Buy/Dump buttons appear when
+`MEMEINTEL_EXECUTION_BUY_BUTTON_ENABLED=true`; whether they execute real
+trades or dry-runs is governed by `MEMEINTEL_EXECUTION_LIVE_ENABLED` —
+see the next section. (Historical note: Project 2 shipped this as a
+dry-run-only scaffold; Project 6 added the live executor on 2026-07-10,
+armed and validated live 2026-07-11.)
 
 ## Live buy / dump from Telegram (Project 6 — real money, arm carefully)
 
@@ -142,9 +167,27 @@ Setup is deliberately manual because it involves a hot wallet.
    MEMEINTEL_EXECUTION_PRIVATE_KEY=<the base58 key you exported>
    MEMEINTEL_EXECUTION_MAX_BUY_SOL=0.15
    ```
-5. `sudo systemctl restart meme-intelligence`. The startup log prints
+5. **Give trading its own Helius account** (learned live 2026-07-11): the
+   scanner can exhaust the main Helius account's monthly credits, and
+   credits are per-ACCOUNT — a trade's balance read on a shared account
+   then gets 429'd no matter what. Sign up for a SECOND free Helius
+   account (different email), copy its API key, and add:
+   ```
+   MEMEINTEL_EXECUTION_HELIUS_API_KEY=<the second account's key>
+   ```
+   Empty = trading shares the main key (works, but a starved scanner
+   account will block trades).
+6. **Check the other prerequisites are present**: live trading also
+   requires `MEMEINTEL_JUPITER_API_KEY` (quotes/swap building — without it
+   `build_executor` silently falls back to dry-run) and a Helius key
+   (dedicated or main). Both are already set on the droplet.
+7. `sudo systemctl restart meme-intelligence`. The startup log prints
    `LIVE TRADING ARMED — trading wallet <address>`; `/status` shows
-   `trading LIVE`.
+   `trading LIVE`. (`journalctl -u meme-intelligence | grep -i armed`
+   to check.) If it silently stays dry-run, the causes seen live are:
+   `solders` missing from the venv
+   (`.venv/bin/pip install -r requirements.txt`), or a missing
+   Jupiter/Helius/private key (the startup note names what's missing).
 
 **Using it:**
 - Every alert now carries one-tap **Buy 0.05◎ / Buy 0.1◎** buttons and a
@@ -157,7 +200,9 @@ Setup is deliberately manual because it involves a hot wallet.
 
 **First live test:** buy a tiny amount (e.g. `/buy <a well-known token> 0.01`)
 and confirm it shows in the Phantom trading account before trusting it on a
-fresh meme coin. To disable instantly: set `MEMEINTEL_EXECUTION_LIVE_ENABLED=false`
+fresh meme coin. **Status 2026-07-11: the buy leg passed live** (first real
+/buy executed and confirmed); the `/dump` sell-back leg is the remaining
+validation step. To disable instantly: set `MEMEINTEL_EXECUTION_LIVE_ENABLED=false`
 (or `BUY_BUTTON_ENABLED=false` to hide the buttons) and restart.
 
 ## Mind-layer P(rug) veto (Project 3 — enable only when EARNED)

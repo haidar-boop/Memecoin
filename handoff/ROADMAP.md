@@ -5,10 +5,27 @@
 > redirects. Each section says what it is, why it earns its place, exactly
 > where it hooks into the existing code, and what "done" means. Items 1–4
 > are free; only #5 costs money and it is deliberately last.
+>
+> **Status as of 2026-07-11:** #1 ✅ built · #2 ✅ built · #3 ✅ built
+> (veto flag off until authority is earned) · #4 ❌ **DISCARDED by the
+> operator — do not build** · #5 ⏸ **PARKED by the operator — build later,
+> only with explicit cost approval**. An unplanned **Project 6**
+> (operator-requested live buy/dump from Telegram) was also built, armed,
+> and validated with a first live buy — see STATUS.md and DECISIONS_LOG
+> 2026-07-10/-11.
 
 ---
 
-## 1. Live sell-simulation rug check (Jupiter round-trip) — FREE, build first
+## 1. Live sell-simulation rug check (Jupiter round-trip) — FREE — ✅ BUILT 2026-07-10
+
+> Status: built as Project 1 (see STATUS.md), with one deviation from the
+> sketch below: Jupiter's keyless "Lite" tier was deprecated, so it uses a
+> free-with-signup Developer Platform key (`MEMEINTEL_JUPITER_API_KEY`)
+> and runs inside `ResearchPipeline` (merged into `SecurityProfile` before
+> scoring) rather than only at the HIGH-alert veto; the confirmed
+> cannot-sell result also feeds `RugEngine.assess(unsellable_override=…)`.
+> A 2026-07-10 review added `sell_confirm_fraction` so thin-but-legit
+> fresh pools aren't falsely called honeypots.
 
 **What:** Before any HIGH opportunity alert on a Solana token, ask Jupiter's
 public quote API for a real round-trip: quote buying ~$50 of the token, then
@@ -46,9 +63,9 @@ behavior; suite green.
 > Status: built as specified (see STATUS.md "Project 2"), plus two
 > operator-requested additions: `/check <address>` on-demand intelligence
 > and a one-tap copy-address button on alerts and command replies. A
-> dry-run-only buy-button scaffold also shipped, hidden behind
-> `MEMEINTEL_EXECUTION_BUY_BUTTON_ENABLED=false` (no live executor exists
-> — see DECISIONS_LOG 2026-07-10). Enable the commands with
+> dry-run-only buy-button scaffold also shipped at the time (historical —
+> Project 6 later added the real `LiveExecutor`, armed live 2026-07-11;
+> see DECISIONS_LOG 2026-07-10/-11). Enable the commands with
 > `MEMEINTEL_TELEGRAM_COMMANDS_ENABLED=true` + restart. The item-1 note
 > below about the rug engine's `unsellable_override` seam is now wired.
 
@@ -126,7 +143,11 @@ nothing; flag defaults off; suite green.
 
 ---
 
-## 4. Read-only web dashboard — FREE, the deferred spec item
+## 4. Read-only web dashboard — ❌ DISCARDED by the operator (2026-07-10)
+
+> Status: the operator rejected this outright ("Honestly no there's no
+> point discard 4"). **Do not build it** unless he explicitly asks again.
+> The spec below is kept only so a future revival doesn't start from zero.
 
 **What:** One password-protected, phone-friendly page served from the
 droplet: scanner health + last cycle, watchlist by tier, recent alerts with
@@ -151,7 +172,14 @@ and nothing on the page can mutate state; unauthenticated requests get 401.
 
 ---
 
-## 5. Real social intelligence (Twitter/X via paid aggregator) — PAID, last
+## 5. Real social intelligence (Twitter/X via paid aggregator) — PAID — ⏸ PARKED (2026-07-10)
+
+> Status: parked by the operator ("honesty scratch the community thing
+> right now well build it later"). He knows meme coins live on Twitter and
+> wants this eventually — but only after the bot makes money, and only
+> with his explicit cost approval. Free/cheap alternatives to the official
+> Twitter API were discussed; nothing free covers engagement/bot-detection
+> usefully. Do not start unasked.
 
 **What:** Fill the biggest data gap: Twitter/X engagement, growth rates, and
 bot detection for the community/narrative scores, via LunarCrush (or

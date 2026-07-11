@@ -954,6 +954,51 @@ Two-step resolution (Rules 4/9/11/17/18):
   re-create the starvation. Empty keeps the old shared-key behavior
   (Rule 18); the trade path never competes with data collection (Rule 4).
 
+## 2026-07-11 — First live trade; double-reply fix; wallet intelligence paused
+
+**First live buy succeeded.** With the dedicated trading Helius key in
+place (previous entry), the operator's `/buy <token> 0.001` executed end to
+end from Telegram — cap check → balance read → fresh quote → sign →
+broadcast → on-chain confirmation — on the dedicated ~$20 Phantom trading
+wallet. This validates the whole Project 6 money path in production. The
+**`/dump` half of the round-trip validation is still owed**: selling the
+test position back must be confirmed before the operator trusts live
+trading on a real alert (a buy that can't be sold is exactly the failure
+mode this system exists to catch).
+
+**Double-reply fix (commit `85ed00d`).** Typed `/buy` and `/dump` commands
+produced two Telegram messages: `_do_buy`/`_do_dump` replied directly AND
+returned a short string the message handler also sent. Confirmed from the
+operator's screenshot. Resolution: the do-functions are now pure (return
+the full result, no side-effect reply); the button-callback path replies
+explicitly and returns a short ack; the text-command path returns the
+result through the normal single-reply flow. Regression tests assert the
+reply COUNT, not just the first message (the original tests missed this by
+only checking message content).
+
+**Wallet intelligence (Part 17) paused in the monitor — operator decision.**
+Running smart-money analysis on every analyzed token exhausted the main
+Helius account's monthly free credits; every call (scanner and trading
+alike) got 429 "max usage reached", so the layer was producing zero data
+while spamming retries. The operator's call, in his words: *"i need to make
+money first off this bot… for now we dont need it"*. So:
+`MEMEINTEL_WALLET_ENABLE_IN_MONITOR=false` on the droplet (.env change
+only — no code was removed; the layer stays built and tested).
+**Re-enable criteria (agreed):** only when the bot is making money, and
+only together with (a) a paid Helius plan (~$49 USD/mo Developer tier) AND
+(b) credit-gating in the pipeline so wallet lookups run only on
+best/alert-worthy candidates instead of every analyzed token (est. 5-10×
+credit reduction; may even fit the free tier). Neither piece alone.
+
+**Standing operator directions reaffirmed this session:** Project 4
+(dashboard) is DISCARDED — do not build. Project 5 (paid social/Twitter
+data) is PARKED — build later, only with explicit cost approval. The hard
+security rule stands: the wallet private key / seed phrase goes ONLY into
+the droplet `.env` over SSH — never into chat, never into git. API keys
+are lower-stakes (they guard RPC credits, not funds) but are still
+secrets; keys that transited chat this session can be rotated in the
+provider dashboard at the operator's leisure.
+
 ## Notable implementation choices (Rule 19)
 
 - **Python 3.11 + asyncio** over Node.js (both allowed by spec): the
