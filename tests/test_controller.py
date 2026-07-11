@@ -2,7 +2,10 @@
 
 from datetime import datetime, timedelta, timezone
 
-from meme_intelligence.alerts.notification_engine import NotificationEngine
+from meme_intelligence.alerts.notification_engine import (
+    _BUY_SIDE_ALERT_TYPES,
+    NotificationEngine,
+)
 from meme_intelligence.config.settings import AlertEngineSettings, Settings
 from meme_intelligence.core.errors import TransientCollectorError
 from meme_intelligence.core.models import DexPair, SecurityProfile, TokenIdentity
@@ -544,11 +547,11 @@ async def test_rug_screen_vetoes_high_alert_even_without_ai():
         )
         await scanner.run(max_cycles=1)
 
-    assert not any(e.alert_type in ("high_priority_opportunity", "strong_candidate")
-                   for e in sink.sent)
-    downgraded = [e for e in sink.sent if e.alert_type == "early_opportunity"]
-    assert downgraded
-    assert any("deterministic risk veto" in r for r in downgraded[0].reasons)
+    # The rug-engine veto now SUPPRESSES the buy-side alert entirely — it used
+    # to downgrade to a MEDIUM early_opportunity that a MEDIUM-threshold phone
+    # still buzzed for (a demoted rug reaching the operator). No opportunity /
+    # momentum alert of any tier survives the veto.
+    assert not any(e.alert_type in _BUY_SIDE_ALERT_TYPES for e in sink.sent)
 
 
 class SearchingMarketService(FakeMarketService):
@@ -593,11 +596,9 @@ async def test_copycat_of_established_token_never_fires_high():
         await scanner.run(max_cycles=1)
 
     assert market.search_calls == 1
-    assert not any(e.alert_type in ("high_priority_opportunity", "strong_candidate")
-                   for e in sink.sent)
-    downgraded = [e for e in sink.sent if e.alert_type == "early_opportunity"]
-    assert downgraded
-    assert any("duplicates established token" in r for r in downgraded[0].reasons)
+    # The copycat veto now suppresses the buy-side alert entirely (was: a
+    # MEDIUM early_opportunity naming the duplicate).
+    assert not any(e.alert_type in _BUY_SIDE_ALERT_TYPES for e in sink.sent)
 
 
 def test_copycat_rule_requires_a_real_size_gap():

@@ -208,11 +208,17 @@ class AutomationRules:
         drop = self._score_drop_rule(result, previous_score)
         if drop is not None:
             events.append(drop)
-        # Operator liquidity/market-cap floor: below a tradeable pool depth,
-        # buy-side signals are pump artifacts on an untradeable coin, not
-        # opportunities — drop them so the phone never buzzes for a coin the
-        # operator could not actually enter. Protective alerts pass through.
-        if self._below_opportunity_floor(result):
+        # SUPPRESS buy-side alerts (not merely downgrade to MEDIUM) when a free
+        # risk/rug/copycat screen vetoed the token, or the pool is too thin to
+        # trade. A flagged coin is not a real entry at ANY priority. The old
+        # design only DOWNGRADED a vetoed HIGH candidate to a MEDIUM
+        # "provisional" alert, which hid it from a HIGH-only phone — but once
+        # the operator lowers the phone threshold to MEDIUM, that demoted rug
+        # lands right on the phone. Dropping it fixes that (protective alerts
+        # always pass through — a flagged coin's holder still needs the warning;
+        # and the mind-layer p(rug) veto flows through the same path once
+        # MEMEINTEL_LEARNING_VETO_ENABLED is on, adding the learned detector).
+        if deterministic_risk_veto is not None or self._below_opportunity_floor(result):
             events = [e for e in events if e.alert_type not in _BUY_SIDE_ALERT_TYPES]
         return gate_events_by_interest(
             events, operator_interest=operator_interest,

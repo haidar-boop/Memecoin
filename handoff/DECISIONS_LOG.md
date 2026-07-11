@@ -1092,6 +1092,30 @@ NB (separate follow-up, not yet fixed): the delivery trace also found that
 `alerts` table's presence of a row does NOT prove phone delivery. Confirm
 real phone delivery with `alerts --test`, not DB counts.
 
+## 2026-07-11 — Rug/risk veto now SUPPRESSES buy-side alerts (was: downgrade)
+
+Immediately after moving to the MEDIUM phone threshold, the operator got
+buy-side alerts on coins the rug engine had flagged: "it's still not
+detecting rugs." It WAS detecting them — every deterministic screen (rug
+engine, copycat, risk-already-firing) and even the mind-layer p(rug) veto
+only DOWNGRADED a flagged HIGH candidate to a MEDIUM `early_opportunity`
+("provisional, held back by vetoes"). That hid it from a HIGH-only phone,
+but on a MEDIUM phone the demoted rug lands directly on it. The whole veto
+design silently assumed HIGH-only delivery.
+
+Fix: in `AutomationRules.evaluate`, when `deterministic_risk_veto` is set,
+the buy-side alert types (`_BUY_SIDE_ALERT_TYPES`) are dropped entirely —
+same suppression path as the liquidity floor above — so a flagged coin is
+no buy alert at ANY priority (opportunity AND momentum AND smart-money).
+Protective alerts still fire (a flagged coin's holder needs the warning);
+the softer downgrades (lukewarm-AI, strong-candidate depth caveat) still
+emit a MEDIUM `early_opportunity` — only the risk/rug/copycat veto
+suppresses. The mind-layer p(rug) veto flows through the same
+`deterministic_risk_veto` path, so enabling `MEMEINTEL_LEARNING_VETO_ENABLED`
+now adds the learned 97%-precision detector to the suppression (previously
+it too only downgraded). Verified end-to-end + updated the two controller
+tests that asserted the old MEDIUM-downgrade behavior.
+
 ## Notable implementation choices (Rule 19)
 
 - **Python 3.11 + asyncio** over Node.js (both allowed by spec): the

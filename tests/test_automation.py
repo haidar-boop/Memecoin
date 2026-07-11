@@ -5,11 +5,14 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from meme_intelligence.alerts.notification_engine import (
+    _BUY_SIDE_ALERT_TYPES,
+    _PROTECTIVE_ALERT_TYPES,
     AlertEvent,
     AutomationRules,
     NotificationEngine,
 )
 from meme_intelligence.config.settings import AlertEngineSettings, AlertThresholds, Settings
+from meme_intelligence.core.errors import ConfigurationError
 from meme_intelligence.core.enums import AlertPriority, MarketRegime
 from meme_intelligence.core.models import DexPair, SecurityProfile, TokenIdentity
 from meme_intelligence.workflow.pipeline import ResearchPipeline
@@ -116,10 +119,12 @@ async def test_low_ai_confidence_vetoes_strong_candidate():
                for r in types["early_opportunity"].reasons)
 
 
-async def test_deterministic_veto_downgrades_fully_verified_tier():
-    """Bug-hunt: the fully-verified HIGH tier bypassed every veto — a
-    blacklisted deployer / rug-engine hit with community data still fired
-    HIGH, unchecked. The deterministic veto now downgrades it too."""
+async def test_deterministic_veto_suppresses_buy_side_alerts():
+    """A rug/risk/copycat screen veto now SUPPRESSES the buy-side alert
+    entirely — it used to downgrade to a MEDIUM 'provisional' early_opportunity
+    that a MEDIUM-threshold phone still buzzed for (a demoted rug reaching the
+    operator once he lowered his threshold). No buy-side alert of any tier
+    survives the veto."""
     import dataclasses
     from types import SimpleNamespace
 
@@ -130,10 +135,8 @@ async def test_deterministic_veto_downgrades_fully_verified_tier():
                                           findings=()))
     events = make_rules().evaluate(
         verified, deterministic_risk_veto="rug engine score 25 (deployer_blacklisted)")
-    types = {e.alert_type: e for e in events}
-    assert "high_priority_opportunity" not in types
-    assert "strong_candidate" not in types
-    assert any("deterministic risk veto" in r for r in types["early_opportunity"].reasons)
+    types = {e.alert_type for e in events}
+    assert not (types & _BUY_SIDE_ALERT_TYPES)   # nothing buy-side reaches the phone
 
 
 async def test_inconclusive_ai_verification_vetoes_strong_candidate():
@@ -425,13 +428,6 @@ def test_event_renders():
 
 # ---- Operator liquidity / market-cap floor for buy-side alerts (2026-07-11) ----
 
-from meme_intelligence.alerts.notification_engine import (  # noqa: E402
-    _BUY_SIDE_ALERT_TYPES,
-    _PROTECTIVE_ALERT_TYPES,
-)
-from meme_intelligence.core.errors import ConfigurationError  # noqa: E402
-
-
 async def test_liquidity_floor_suppresses_buy_side_alerts():
     """Below a tradeable pool depth, buy-side signals are suppressed entirely
     (not just downgraded) — the fix for 0-liquidity 'opportunities' reaching
@@ -499,3 +495,16 @@ def test_opportunity_floor_validates_and_loads_from_env():
     assert s.alerts.opportunity_min_market_cap_usd == 50000.0
     # default stays off
     assert Settings.from_env(env={}).alerts.opportunity_min_liquidity_usd == 0.0
+
+
+async def test_deterministic_veto_keeps_protective_alerts():
+    """The rug/risk veto suppresses buy-side signals but never a protective
+    warning — a holder on a flagged coin still gets the alert."""
+    # Honeypot at healthy liquidity -> a protective emergency_review on the
+    # normal path; passing a deterministic veto must not silence it.
+    result = await pipeline_result(honeypot=True, pair=make_pair(liquidity_usd=90_000.0))
+    events = make_rules().evaluate(
+        result, deterministic_risk_veto="rug engine score 30 (deployer_blacklisted)")
+    types = {e.alert_type for e in events}
+    assert types & _PROTECTIVE_ALERT_TYPES       # the warning survives the veto
+    assert not (types & _BUY_SIDE_ALERT_TYPES)   # no buy-side leaks through
