@@ -341,7 +341,9 @@ async def test_buy_button_on_routes_to_dry_run_when_not_live():
         assert "DRY RUN — no real trade executed" in replies[0]["text"]
         assert "0.05 SOL" in replies[0]["text"]
         acks = callback_answers(calls)
-        assert acks and "Buy sent" in acks[0]["text"]  # the button's own popup ack
+        # The popup ack points to the chat for the real outcome; it must NOT
+        # assert "Buy sent" (which would contradict a refusal/failure reply).
+        assert acks and "see chat" in acks[0]["text"].lower()
         journal = storage.journal_entries(limit=10)
         assert journal and journal[0]["kind"] == "trade_intent"
 
@@ -545,3 +547,108 @@ async def test_startup_discards_pending_backlog_without_handling():
         assert storage.feedback_summary() == {"up": 0, "down": 0}   # feedback NOT replayed
         assert storage.get_holdings(active_only=True) == []         # /holding NOT replayed
         assert sent_messages(calls) == []                           # no replies emitted
+
+# ---- Bug-hunt fixes (2026-07-11) ----
+
+async def test_backlog_drain_retries_and_never_falls_through_to_live(monkeypatch):
+    """If the first drain poll fails transiently, _poll_forever must RETRY the
+    drain — not fall through to live polling with the backlog still pending
+    (which would replay a buffered /buy as a real trade)."""
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage)
+        # First drain poll raises; second returns a pending /holding backlog;
+        # third drains clean. Live polling then runs once and stops.
+        drain_batches = [
+            CollectorError("transient getUpdates failure"),
+            {"ok": True, "result": [message_update(f"/holding {SOL_ADDR}", update_id=20)]},
+            {"ok": True, "result": []},
+        ]
+
+        async def fake_get_json(path, params=None, *, cache_key=None, cache_ttl=None,
+                                headers=None, json_body=None, error_status_as_json=None):
+            calls.append((path, params, json_body))
+            item = drain_batches.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        live_polls = []
+
+        async def fake_poll_once():
+            live_polls.append(True)
+            listener._stopping = True
+            return 0
+
+        sleeps = []
+
+        async def fake_sleep(seconds):
+            sleeps.append(seconds)
+
+        listener._get_json = fake_get_json
+        listener._poll_once = fake_poll_once
+        listener._sleep = fake_sleep
+        await listener._poll_forever()
+
+        # The transient failure was retried (one backoff sleep), the backlog
+        # was fully drained (offset past update_id 20), the buffered /holding
+        # was NOT handled, and live polling only started after the drain
+        # succeeded.
+        assert sleeps and sleeps[0] == 2.0
+        assert listener._offset == 21
+        assert storage.get_holdings(active_only=True) == []   # /holding never handled
+        assert len(live_polls) == 1
+
+
+async def test_malformed_drain_response_is_not_treated_as_drained():
+    """An ok:false / malformed getUpdates payload must raise (so the drain is
+    retried), not be mistaken for an empty, fully-drained backlog."""
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage)
+
+        async def fake_get_json(path, params=None, *, cache_key=None, cache_ttl=None,
+                                headers=None, json_body=None, error_status_as_json=None):
+            return {"ok": False, "description": "flood wait"}
+
+        listener._get_json = fake_get_json
+        raised = False
+        try:
+            await listener._discard_backlog()
+        except CollectorError:
+            raised = True
+        assert raised
+        assert listener._offset is None   # offset NOT advanced past an unknown backlog
+
+
+async def test_non_finite_buy_amount_is_refused_before_executor():
+    settings = make_settings(MEMEINTEL_EXECUTION_BUY_BUTTON_ENABLED="true")
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage, settings=settings)
+        for bad in ("nan", "inf", "-inf", "0", "-1"):
+            await listener._handle_update(message_update(f"/buy {SOL_ADDR} {bad}"))
+        # Every non-finite / non-positive amount is refused with a clean
+        # message; NONE reach the executor (no dry-run intent journaled).
+        assert storage.journal_entries(limit=10) == []
+        assert all("positive number" in m["text"] for m in sent_messages(calls))
+
+
+async def test_non_finite_buy_amount_button_is_refused():
+    settings = make_settings(MEMEINTEL_EXECUTION_BUY_BUTTON_ENABLED="true")
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage, settings=settings)
+        await listener._handle_update(callback_update(f"buy:{SOL_ADDR}:nan"))
+        assert sent_messages(calls) == []                 # no trade reply
+        assert storage.journal_entries(limit=10) == []    # nothing journaled
+        acks = callback_answers(calls)
+        assert acks and "Invalid buy amount" in acks[0]["text"]
+
+
+async def test_dump_button_ack_does_not_claim_sent_on_refusal():
+    """The popup ack must not assert a trade happened; the chat reply carries
+    the real outcome (here a dry-run notice)."""
+    settings = make_settings(MEMEINTEL_EXECUTION_BUY_BUTTON_ENABLED="true")
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage, settings=settings)
+        await listener._handle_update(callback_update(f"dump:{SOL_ADDR}"))
+        acks = callback_answers(calls)
+        assert acks and "sent" not in acks[0]["text"].lower()
+        assert "see chat" in acks[0]["text"].lower()

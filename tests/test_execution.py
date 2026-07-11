@@ -5,7 +5,9 @@ no real funds. Verifies the caps, balance checks, route/failure handling, and
 that the sign->send->confirm path runs end to end.
 """
 
+import asyncio
 import base64
+import math
 
 import pytest
 
@@ -380,3 +382,67 @@ def test_build_executor_dedicated_key_alone_is_enough():
         executor, rpc = build_executor(settings, storage, jupiter_client=object())
         assert executor.live is True
         assert rpc._api_key == "trading-key"
+
+
+# ---- Bug-hunt fixes (2026-07-11) ----
+
+async def test_buy_refused_non_finite_amount_at_the_money_gate():
+    """nan/inf must be refused by the executor itself (the money gate), not
+    just the command layer: `nan <= 0` and `nan > cap` are both False, so an
+    unguarded non-finite amount would crash in int(nan * ...)."""
+    kp = new_keypair()
+    jup = FakeJupiter(quote={"outAmount": "1"}, swap_b64=swap_tx_b64(kp))
+    rpc = FakeRpc(sol=100 * LAMPORTS)
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        ex = make_live(storage, kp, jupiter=jup, rpc=rpc)
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            msg = await ex.execute_buy(intent(bad))
+            assert "must be positive" in msg
+        assert rpc.sent == [] and jup.calls == []   # never quoted or broadcast
+
+
+async def test_getbalance_non_numeric_value_raises_collector_error(monkeypatch):
+    """A malformed getBalance value must fail as CollectorError (routing to the
+    clean 'Nothing was spent' abort), not raise a raw TypeError."""
+    from meme_intelligence.core.errors import CollectorError
+
+    client = make_rpc_client(monkeypatch, [{"value": {"unexpected": "shape"}}])
+    with pytest.raises(CollectorError):
+        await client.get_sol_balance_lamports("owner")
+
+
+async def test_buy_aborts_cleanly_when_balance_unreadable():
+    """End-to-end: an unreadable balance aborts pre-broadcast with the safe
+    'Nothing was spent' message and never quotes or sends."""
+    kp = new_keypair()
+    jup = FakeJupiter(quote={"outAmount": "1"}, swap_b64=swap_tx_b64(kp))
+    rpc = FakeRpc(sol="raise")
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        ex = make_live(storage, kp, jupiter=jup, rpc=rpc)
+        msg = await ex.execute_buy(intent(0.1))
+        assert "could not read the wallet balance" in msg
+        assert "Nothing was spent" in msg
+        assert rpc.sent == [] and jup.calls == []
+
+
+async def test_confirmation_cancellation_journals_signature_and_reraises():
+    """If confirmation is cancelled (shutdown) after broadcast, the signature
+    must already be journaled (never lost) and CancelledError propagates."""
+    kp = new_keypair()
+    jup = FakeJupiter(quote={"outAmount": "500000", "routePlan": []},
+                      swap_b64=swap_tx_b64(kp))
+
+    class CancelDuringConfirmRpc(FakeRpc):
+        async def signature_status(self, signature):
+            raise asyncio.CancelledError()
+
+    rpc = CancelDuringConfirmRpc(sol=5 * LAMPORTS, sig="CANCELSIG")
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        ex = make_live(storage, kp, jupiter=jup, rpc=rpc)
+        with pytest.raises(asyncio.CancelledError):
+            await ex.execute_buy(intent(0.1))
+        # The tx was broadcast and journaled BEFORE the confirm poll, so the
+        # signature survives even though no reply could be delivered.
+        journal = storage.journal_entries(limit=5)
+        assert journal and "CANCELSIG" in journal[0]["content"]
+        assert len(rpc.sent) == 1   # broadcast happened exactly once

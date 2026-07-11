@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import math
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -144,7 +145,11 @@ class LiveExecutor:
     async def execute_buy(self, intent: TradeIntent) -> str:
         if intent.chain not in ("solana", "sol"):
             return "Live trading is Solana-only."
-        if intent.sol_amount <= 0:
+        # Reject nan/inf explicitly: `nan <= 0` and `nan > cap` are BOTH
+        # False, so a non-finite amount would slip past both guards into
+        # int(nan * ...) and raise (bug-hunt finding, 2026-07-11). This is the
+        # money gate — it must not rely on the caller having validated.
+        if not math.isfinite(intent.sol_amount) or intent.sol_amount <= 0:
             return "Buy amount must be positive."
         if intent.sol_amount > self._max_buy_sol:
             return (f"Refused: {intent.sol_amount:g} SOL exceeds the per-trade cap of "
@@ -238,6 +243,17 @@ class LiveExecutor:
         self._journal(mint, kind, f"live {kind} {detail}: {signature}")
         try:
             landed = await self._confirm(signature)
+        except asyncio.CancelledError:
+            # Shutdown/cancellation during the confirm poll. The tx is already
+            # broadcast and journaled above; log the signature at ERROR so it
+            # survives in the journalctl record even though the operator's
+            # reply can't be delivered, then propagate. The operator verifies
+            # on Solscan and must NOT blindly re-tap (bug-hunt finding).
+            self._logger.error(
+                "%s for %s was broadcast but confirmation was cancelled "
+                "(shutdown) — verify on-chain, do NOT re-tap: %s",
+                action, mint, link)
+            raise
         except TradeError as exc:
             # Confirmed on-chain FAILURE: the tx reverted, so no funds moved
             # beyond the network fee — safe to retry.

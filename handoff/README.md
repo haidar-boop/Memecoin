@@ -5,7 +5,7 @@ Complete project handoff as of **2026-07-11**, written so a fresh session
 and extend the system without re-learning anything the hard way.
 
 **The system is LIVE**: Parts 1–33 + the Self-Learning Mind Layer +
-Projects 1/2/3/6 are built, **738 tests pass**, and it runs 24/7 on the
+Projects 1/2/3/6 are built, **747 tests pass**, and it runs 24/7 on the
 operator's droplet sending Telegram alerts — and, as of 2026-07-11,
 executing operator-tapped buy/dump trades from a dedicated low-balance
 wallet (**never auto-trading**). Branch:

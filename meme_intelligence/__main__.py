@@ -215,8 +215,10 @@ def build_executor(
         return DryRunExecutor(storage), None
     rpc_key = settings.trading_helius_api_key or settings.helius_api_key
     if jupiter_client is None or not rpc_key:
-        print("Note: MEMEINTEL_EXECUTION_LIVE_ENABLED is on but a trading key, "
-              "Jupiter key, or Helius key is missing — buy/dump run in DRY RUN.")
+        # The trading private key was already checked above; only a missing
+        # Jupiter key (no jupiter_client) or Helius key can reach here.
+        print("Note: MEMEINTEL_EXECUTION_LIVE_ENABLED is on but the Jupiter key "
+              "or Helius key is missing — buy/dump run in DRY RUN.")
         return DryRunExecutor(storage), None
     from meme_intelligence.trading.execution import LiveExecutor
     from meme_intelligence.trading.solana_rpc import SolanaRpcClient

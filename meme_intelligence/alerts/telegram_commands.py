@@ -31,6 +31,7 @@ Design invariants:
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -265,9 +266,18 @@ class TelegramCommandListener(BaseCollector):
             if self._offset is not None:
                 params["offset"] = str(self._offset)
             payload = await self._get_json(f"bot{self._token}/getUpdates", params=params)
-            updates = payload.get("result") if isinstance(payload, dict) else None
+            # A malformed / ok:false response is NOT proof the backlog is
+            # drained. Treating it as "drained" (the old `if not updates`)
+            # would leave the offset un-advanced and let LIVE polling then
+            # handle the pending backlog — replaying a buffered /buy or /dump
+            # as a real trade. Raise instead so _poll_forever retries the
+            # drain rather than falling through (bug-hunt finding, 2026-07-11).
+            if not isinstance(payload, dict) or not payload.get("ok"):
+                raise CollectorError(
+                    f"{self.name}: unexpected getUpdates response while draining backlog")
+            updates = payload.get("result") or []
             if not updates:
-                return
+                return  # genuinely drained: ok:true with an empty result
             discarded = 0
             for update in updates:
                 uid = update.get("update_id") if isinstance(update, dict) else None
@@ -281,16 +291,27 @@ class TelegramCommandListener(BaseCollector):
 
     async def _poll_forever(self) -> None:
         backoff = _ERROR_BACKOFF_START
-        # Drop any backlog before processing anything, so a restart never
+        # Drop any backlog before processing ANYTHING, so a restart never
         # replays commands (Rule 7 — a redeploy must be a no-op for input).
-        try:
-            await self._discard_backlog()
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001 — best effort; live polling still starts
-            self._logger.warning(
-                "could not discard telegram backlog on startup "
-                "(live polling continues): %s", self._scrub(str(exc)))
+        # This is money-safety-critical now that trading is live: a buffered
+        # /buy or /dump handled on startup is a real, unintended trade. So we
+        # RETRY the drain until it provably succeeds (or we're stopping)
+        # rather than falling through to live polling on the first transient
+        # failure — until the backlog is drained we cannot poll live safely
+        # (bug-hunt finding, 2026-07-11).
+        while not self._stopping:
+            try:
+                await self._discard_backlog()
+                break
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — retry, never fall through
+                self._logger.warning(
+                    "could not discard telegram backlog (retrying in %.0fs, "
+                    "live polling held back): %s", backoff, self._scrub(str(exc)))
+                await self._sleep(backoff)
+                backoff = min(self._backoff_max, backoff * 2.0)
+        backoff = _ERROR_BACKOFF_START  # reset for the live loop
         while not self._stopping:
             try:
                 await self._poll_once()
@@ -768,6 +789,8 @@ class TelegramCommandListener(BaseCollector):
             sol_amount = float(args[1])
         except ValueError:
             return "The amount must be a number of SOL, e.g. 0.05"
+        if not math.isfinite(sol_amount) or sol_amount <= 0:
+            return "The amount must be a positive number of SOL, e.g. 0.05"
         guard = self._trading_guard()
         if guard:
             return guard
@@ -846,12 +869,18 @@ class TelegramCommandListener(BaseCollector):
             sol_amount = float(parts[2])
         except ValueError:
             return "Invalid buy amount."
+        if not math.isfinite(sol_amount) or sol_amount <= 0:
+            return "Invalid buy amount."
         guard = self._trading_guard()
         if guard:
             return guard
         message = await self._do_buy(parts[1], sol_amount)
         await self._reply(message)
-        return "Buy sent — details in chat."
+        # The full outcome (success, refusal, or failure) is in the chat
+        # reply above. The popup ack must NOT assert "Buy sent" — a refusal
+        # ("exceeds cap", "no route") would then be contradicted by the very
+        # message it points to (bug-hunt finding, 2026-07-11).
+        return "Done — see chat for the result."
 
     async def _handle_dump(self, data: str) -> str:
         """Callback ``dump:<address>`` — sell the whole position back to SOL."""
@@ -863,7 +892,9 @@ class TelegramCommandListener(BaseCollector):
             return guard
         message = await self._do_dump(address)
         await self._reply(message)
-        return "Dump sent — details in chat."
+        # See _handle_buy: the popup must not claim "Dump sent" when the full
+        # reply might say "Nothing to dump" or "no route" (bug-hunt finding).
+        return "Done — see chat for the result."
 
     def _trading_guard(self) -> str | None:
         """Common preconditions for any live/dry trade; a reason to refuse or None."""

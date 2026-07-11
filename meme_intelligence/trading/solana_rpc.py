@@ -49,7 +49,18 @@ class SolanaRpcClient(BaseCollector):
         """Wallet SOL balance in lamports."""
         result = await self._rpc("getBalance", [owner])
         value = (result or {}).get("value") if isinstance(result, dict) else None
-        return int(value) if value is not None else 0
+        if value is None:
+            return 0
+        try:
+            return int(value)
+        except (TypeError, ValueError) as exc:
+            # A non-numeric balance means we cannot trust the read. Fail as a
+            # CollectorError (not a raw TypeError) so the executor reports the
+            # clean "could not read the wallet balance — Nothing was spent"
+            # instead of a traceback, and never proceeds on a bad number
+            # (bug-hunt finding, 2026-07-11).
+            raise CollectorError(
+                f"{self.name}: getBalance returned a non-numeric value") from exc
 
     async def get_token_balance_raw(self, owner: str, mint: str) -> int:
         """Total raw units of ``mint`` held by ``owner`` across its token accounts."""
@@ -59,13 +70,23 @@ class SolanaRpcClient(BaseCollector):
         )
         accounts = (result or {}).get("value") or [] if isinstance(result, dict) else []
         total = 0
+        skipped = 0
         for account in accounts:
             try:
                 amount = (((account["account"]["data"]["parsed"]["info"]
                             ["tokenAmount"])).get("amount"))
                 total += int(amount)
             except (KeyError, TypeError, ValueError):
+                skipped += 1
                 continue
+        if skipped:
+            # An unparseable token account means the summed balance may be an
+            # UNDER-count, so a "sell 100%" dump built on it could leave a
+            # remainder. Rare (a mint is usually one account), but log it so a
+            # partial dump is diagnosable rather than silent (bug-hunt finding).
+            self._logger.warning(
+                "%s: skipped %d unparseable token account(s) for mint %s; "
+                "balance may be under-reported", self.name, skipped, mint)
         return total
 
     async def send_raw_transaction(self, signed_base64: str) -> str:

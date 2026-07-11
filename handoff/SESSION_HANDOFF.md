@@ -16,7 +16,7 @@
   Telegram control + copy-address button), **Project 3** (mind-layer P(rug)
   veto — built, veto flag off until authority is earned), and **Project 6**
   (live buy/dump from Telegram — see below).
-- **738 tests passing** (`python -m pytest tests/ -q`).
+- **747 tests passing** (`python -m pytest tests/ -q`).
 - **Live in production**: 24/7 on the operator's $6/mo DigitalOcean droplet
   (systemd service `meme-intelligence`, repo at `~/meme-intelligence`),
   Telegram alerts arriving on his phone.
@@ -142,7 +142,7 @@ sudo systemctl restart meme-intelligence
   first live buy validated; dedicated trading Helius account; shared
   per-key rate limiter; double-reply fix; wallet-intel paused (operator
   decision); Projects 1-3 + 6 adversarial reviews recorded; branch moved
-  to `claude/memecoin-onboarding-yrvjbg`; 738 tests.
+  to `claude/memecoin-onboarding-yrvjbg`; 747 tests.
 - 2026-07-10 — rewritten as part of the complete handoff-folder refresh
   (added OPERATOR / ARCHITECTURE / OPERATIONS / ROADMAP / PROJECT_RULES
   docs; interest gate + opportunity screens shipped; 626 tests).

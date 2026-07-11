@@ -999,6 +999,47 @@ are lower-stakes (they guard RPC credits, not funds) but are still
 secrets; keys that transited chat this session can be rotated in the
 provider dashboard at the operator's leisure.
 
+## 2026-07-11 — Adversarial bug hunt on the money path (post-arming)
+
+Three parallel hunters reviewed the code that touches money, each finding
+independently verified against source before any fix. The newest code (the
+shared-limiter and dedicated-Helius-key commits) came back **clean** — the
+key/limiter matrix and RPC lifecycle were confirmed correct. Real defects
+found and fixed (all with regression tests; suite 738 → 747):
+
+- **Backlog replay on restart (money-safety).** If `_discard_backlog`'s
+  first poll failed transiently, `_poll_forever` swallowed it and entered
+  LIVE polling with the offset un-advanced — the backlog was then *handled*,
+  replaying a buffered `/buy` or `/dump` as a real trade. Fix: the drain is
+  now RETRIED (with backoff) until it provably succeeds before live polling
+  starts; a malformed/`ok:false` drain response raises instead of being
+  mistaken for "drained". This restores the invariant a restart is a no-op
+  for input, which matters much more now that trading is live.
+- **Button popup always claimed "Buy sent"/"Dump sent".** The callback ack
+  was hardcoded regardless of outcome, so tapping Dump on a token you don't
+  hold popped "Dump sent" while the chat said "Nothing to dump". Fix: the
+  popup is now neutral ("Done — see chat for the result"); the chat reply
+  remains the authoritative outcome.
+- **Non-finite trade amount.** `nan`/`inf` slipped past `<= 0` and `> cap`
+  (both False for nan) into `int(nan * ...)`. Fix: `math.isfinite` guard at
+  the command layer AND at the executor money gate (defense in depth).
+- **CancelledError could lose a broadcast signature.** On shutdown during
+  the confirm poll, cancellation escaped uncaught. The signature is already
+  journaled before confirm; added an explicit `except CancelledError` that
+  logs the signature/Solscan link at ERROR before propagating, so it is
+  never lost from the record. (The far narrower cancel-inside-send window is
+  documented, not "fixed" — the robust fix risks shutdown-time detached
+  tasks in money code; the journal-before-confirm ordering already bounds
+  the exposure.)
+- **Malformed balance RPC → traceback.** A non-numeric `getBalance` value
+  raised a bare `TypeError` past the `except CollectorError`. Fix:
+  `solana_rpc` now raises `CollectorError` on a non-numeric balance, so the
+  pre-broadcast read fails closed to the clean "could not read the wallet
+  balance — Nothing was spent" abort.
+- **Partial-dump under-report (low).** `get_token_balance_raw` silently
+  skipped unparseable token accounts; added a warning log so a rare
+  under-counted "sell 100%" is diagnosable.
+
 ## Notable implementation choices (Rule 19)
 
 - **Python 3.11 + asyncio** over Node.js (both allowed by spec): the
