@@ -16,7 +16,7 @@
   Telegram control + copy-address button), **Project 3** (mind-layer P(rug)
   veto — built, veto flag off until authority is earned), and **Project 6**
   (live buy/dump from Telegram — see below).
-- **747 tests passing** (`python -m pytest tests/ -q`).
+- **765 tests passing** (`python -m pytest tests/ -q`).
 - **Live in production**: 24/7 on the operator's $6/mo DigitalOcean droplet
   (systemd service `meme-intelligence`, repo at `~/meme-intelligence`),
   Telegram alerts arriving on his phone.
@@ -40,6 +40,19 @@
   with him for a few days. He may toggle it either way — follow his lead.
 - **Learning layer is live and accumulating**; report card via `/mind` or
   `mind metrics`.
+- **Alert quality overhaul, 2026-07-11** (operator moved his phone from
+  HIGH to MEDIUM to see opportunities again, then back to HIGH once he saw
+  the junk it let through — walk through DECISIONS_LOG 2026-07-11 in
+  order): (a) rug/risk/copycat vetoes now SUPPRESS buy-side alerts instead
+  of downgrading to MEDIUM; (b) a configurable liquidity/market-cap floor
+  (`MEMEINTEL_ALERTS_OPPORTUNITY_MIN_LIQUIDITY_USD`, off by default) drops
+  buy-side alerts on untradeable pools; (c) a young/data-starved token that
+  scores AVOID purely from missing categories is no longer permanently
+  blacklisted — it gets a paced second look
+  (`MEMEINTEL_WORKFLOW_INSUFFICIENT_DATA_*`, on by default) instead of
+  being excluded from analysis for the life of the process. Mind-layer
+  P(rug) veto is now ON (`MEMEINTEL_LEARNING_VETO_ENABLED=true`, authority
+  earned at 0.97 rug precision).
 
 ## Money & keys (read before touching anything Helius/trading)
 
@@ -144,7 +157,7 @@ sudo systemctl restart meme-intelligence
   first live buy validated; dedicated trading Helius account; shared
   per-key rate limiter; double-reply fix; wallet-intel paused (operator
   decision); Projects 1-3 + 6 adversarial reviews recorded; branch moved
-  to `claude/memecoin-onboarding-yrvjbg`; 747 tests.
+  to `claude/memecoin-onboarding-yrvjbg`; 765 tests.
 - 2026-07-10 — rewritten as part of the complete handoff-folder refresh
   (added OPERATOR / ARCHITECTURE / OPERATIONS / ROADMAP / PROJECT_RULES
   docs; interest gate + opportunity screens shipped; 626 tests).

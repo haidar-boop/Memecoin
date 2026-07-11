@@ -1,5 +1,6 @@
 """Tests for the continuous scanning controller (Spec Part 13)."""
 
+import dataclasses as _dc
 from datetime import datetime, timedelta, timezone
 
 from meme_intelligence.alerts.notification_engine import (
@@ -208,8 +209,6 @@ async def test_unindexed_tokens_skipped():
 
 
 # ---- Part 15: watchlist recheck cadence + multi-source verification ----
-
-import dataclasses as _dc
 
 from meme_intelligence.core.enums import AlertPriority, WatchlistTier
 from meme_intelligence.core.models import TokenIdentity
@@ -1241,3 +1240,175 @@ def test_veto_gate_function_edges():
     assert veto_gate(good, min_accuracy=0.7, min_samples=13) is None      # too few
     assert veto_gate({"rug": {}}, min_accuracy=0.7, min_samples=1) is None  # no data
     assert veto_gate({}, min_accuracy=0.7, min_samples=1) is None
+
+
+# ---- Insufficient-data retry: young tokens get a second look (2026-07-11) ----
+
+from types import SimpleNamespace  # noqa: E402
+
+from meme_intelligence.core.enums import Classification  # noqa: E402
+
+
+def fake_master(classification, overrides=(), coverage=0.2):
+    return SimpleNamespace(
+        master=SimpleNamespace(classification=classification, overrides=overrides,
+                               coverage=coverage))
+
+
+def make_bare_scanner(storage, settings=None):
+    """A scanner instance for exercising the pure _finalize_or_reschedule
+    decision logic directly, without running a full cycle."""
+    notifier = NotificationEngine([RecordingSink()], AlertEngineSettings(),
+                                  time_func=lambda: 0.0)
+    return ContinuousScanner(
+        settings or SETTINGS, storage, notifier,
+        gecko_client=FakeGecko([]), goplus_client=FakeGoPlus({}),
+        now_func=lambda: NOW,
+    )
+
+
+def test_young_insufficient_data_avoid_is_rescheduled_not_permanent():
+    """The core fix: an AVOID from merely-unverified categories (no red-flag
+    overrides) on a fresh pool is NOT permanently blacklisted -- it gets a
+    scheduled retry instead."""
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner = make_bare_scanner(storage)
+        pair = make_pair(address="Fresh1")
+        pair = _dc.replace(pair, pair_created_at=NOW - timedelta(minutes=1))  # 1 min old
+        key = ("solana", "fresh1")
+        result = fake_master(Classification.AVOID, overrides=(), coverage=0.2)
+        scanner._finalize_or_reschedule(key, result, pair, NOW)
+        assert key not in scanner._seen              # NOT permanently excluded
+        assert key in scanner._retry_pending          # scheduled for another look
+        due_at, saved_address = scanner._retry_pending.get(key)
+        assert due_at == NOW + timedelta(minutes=SETTINGS.workflow.insufficient_data_retry_minutes)
+        assert saved_address == "Fresh1"   # ORIGINAL case preserved, not the lowercased key
+
+
+def test_confirmed_red_flag_avoid_is_never_retried():
+    """A CONFIRMED red-flag AVOID (overrides non-empty -- destructive
+    security / fake community / extreme risk) is real evidence and stays
+    permanently excluded, even on a 1-minute-old pool."""
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner = make_bare_scanner(storage)
+        pair = _dc.replace(make_pair(address="Bad1"),
+                           pair_created_at=NOW - timedelta(minutes=1))
+        key = ("solana", "bad1")
+        result = fake_master(Classification.AVOID, overrides=("destructive security",),
+                             coverage=0.2)
+        scanner._finalize_or_reschedule(key, result, pair, NOW)
+        assert key in scanner._seen
+        assert key not in scanner._retry_pending
+
+
+def test_insufficient_data_avoid_past_max_age_gives_up():
+    """Once the pool itself has aged past the retry window, further waiting
+    is not worth it -- the token is finally excluded like before the fix."""
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner = make_bare_scanner(storage)
+        max_age = SETTINGS.workflow.insufficient_data_max_age_minutes
+        pair = _dc.replace(make_pair(address="Old1"),
+                           pair_created_at=NOW - timedelta(minutes=max_age + 5))
+        key = ("solana", "old1")
+        result = fake_master(Classification.AVOID, overrides=(), coverage=0.2)
+        scanner._finalize_or_reschedule(key, result, pair, NOW)
+        assert key in scanner._seen
+        assert key not in scanner._retry_pending
+
+
+def test_unknown_pool_age_is_not_retried():
+    """Rule 8: without a known pool age, the system cannot reason about
+    'too young to judge' -- it does not guess, and finalizes as before."""
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner = make_bare_scanner(storage)
+        pair = _dc.replace(make_pair(address="Unk1"), pair_created_at=None)
+        key = ("solana", "unk1")
+        result = fake_master(Classification.AVOID, overrides=(), coverage=0.2)
+        scanner._finalize_or_reschedule(key, result, pair, NOW)
+        assert key in scanner._seen
+        assert key not in scanner._retry_pending
+
+
+def test_high_coverage_avoid_is_not_retried():
+    """A confidently-scored AVOID (real data, just a low score) is not a
+    data gap -- it is a verdict, and stays excluded."""
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner = make_bare_scanner(storage)
+        pair = _dc.replace(make_pair(address="Weak1"),
+                           pair_created_at=NOW - timedelta(minutes=1))
+        key = ("solana", "weak1")
+        result = fake_master(Classification.AVOID, overrides=(), coverage=0.95)
+        scanner._finalize_or_reschedule(key, result, pair, NOW)
+        assert key in scanner._seen
+
+
+def test_retry_disabled_by_flag_keeps_old_behavior():
+    settings = Settings.from_env(env={"MEMEINTEL_WORKFLOW_INSUFFICIENT_DATA_RETRY_ENABLED": "false"})
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner = make_bare_scanner(storage, settings=settings)
+        pair = _dc.replace(make_pair(address="Off1"),
+                           pair_created_at=NOW - timedelta(minutes=1))
+        key = ("solana", "off1")
+        result = fake_master(Classification.AVOID, overrides=(), coverage=0.2)
+        scanner._finalize_or_reschedule(key, result, pair, NOW)
+        assert key in scanner._seen
+        assert key not in scanner._retry_pending
+
+
+async def test_main_loop_skips_a_key_pending_retry():
+    """A token already scheduled for a later retry must not be re-run by the
+    plain discovery loop every cycle it's still 'new' -- only the dedicated
+    retry pass handles it, on its own paced schedule."""
+    pair = make_pair(address="Pend1")
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner, _ = make_scanner(storage, [pair],
+                                  {pair.base_token.address: clean_profile(pair.base_token)})
+        key = ("solana", "pend1")
+        scanner._retry_pending.add(key, (NOW + timedelta(minutes=5), "Pend1"))  # not due yet
+        history = await scanner.run(max_cycles=1)
+        assert history[0].analyzed == 0     # skipped, not (re-)analyzed
+        assert key in scanner._retry_pending  # still pending, untouched
+
+
+async def test_retry_pass_reanalyzes_and_finalizes_a_due_token():
+    """When a pending retry's due time arrives, _retry_insufficient_data
+    re-fetches the pair and re-runs the pipeline through the normal alert
+    path -- exactly like a fresh analysis."""
+    pair = make_pair(address="Due1", symbol="DUE")
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        market = FakeMarketService({"Due1": pair})
+        scanner = make_scanner_with_market(
+            storage, [], {"Due1": clean_profile(pair.base_token)}, market)
+        key = ("solana", "due1")
+        scanner._retry_pending.add(key, (NOW, "Due1"))  # due now, original-case address
+        history = await scanner.run(max_cycles=1)
+        assert market.recheck_calls == 1
+        assert history[0].analyzed == 1
+        assert key in scanner._seen   # this healthy re-analysis finalized it
+        assert storage.score_history(pair.base_token)  # went through _process_result
+
+
+async def test_retry_pass_gives_up_when_pool_disappears():
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        market = FakeMarketService({})  # no pairs for this address
+        scanner = make_scanner_with_market(storage, [], {}, market)
+        key = ("solana", "gone1")
+        scanner._retry_pending.add(key, (NOW, "Gone1"))
+        history = await scanner.run(max_cycles=1)
+        assert key in scanner._seen
+        assert history[0].analyzed == 0
+
+
+async def test_retry_pass_skips_a_stale_already_finalized_entry():
+    """A leftover _retry_pending entry for a key already promoted to _seen
+    (the bounded set has no remove -- stale is tolerated, matching _seen's
+    own FIFO-eviction philosophy) must not be re-fetched pointlessly."""
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        market = FakeMarketService({"Stale1": make_pair(address="Stale1")})
+        scanner = make_scanner_with_market(storage, [], {}, market)
+        key = ("solana", "stale1")
+        scanner._seen.add(key)                              # already finalized
+        scanner._retry_pending.add(key, (NOW, "Stale1"))     # stale leftover, due
+        history = await scanner.run(max_cycles=1)
+        assert market.recheck_calls == 0     # never re-fetched
+        assert history[0].analyzed == 0

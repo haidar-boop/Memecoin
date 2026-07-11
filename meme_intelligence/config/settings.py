@@ -636,6 +636,17 @@ class WorkflowSettings:
                                               # (secondary cadence, Part 15 Section 2)
     max_tracked_keys: int = 50000             # cap on the scanner's in-memory dedupe /
                                               # verified caches (bounds weeks-long memory)
+    # Give a young token a second look once more data has likely populated
+    # (2026-07-11 fix): a 1-minute-old pool usually has no GoPlus/community
+    # data yet, so it scores AVOID purely from missing categories -- not a
+    # real red flag -- and was previously excluded from re-analysis forever
+    # (Rule 8: a data gap is not a verdict). A CONFIRMED red-flag AVOID
+    # (destructive security, fake community, extreme risk -- `overrides`
+    # non-empty) is real evidence and is never retried by this mechanism.
+    insufficient_data_retry_enabled: bool = True
+    insufficient_data_min_coverage: float = 0.5     # below this = "too early to judge"
+    insufficient_data_retry_minutes: float = 15.0   # wait this long before another look
+    insufficient_data_max_age_minutes: float = 120.0  # give up once the pool itself is this old
 
     def __post_init__(self) -> None:
         if not self.networks.strip():
@@ -643,10 +654,19 @@ class WorkflowSettings:
         for name in ("top_candidates", "watchlist_review_limit",
                      "risk_on_btc_change_percent", "risk_off_btc_drop_percent",
                      "monitor_interval_seconds", "watchlist_recheck_cycles",
-                     "max_tracked_keys"):
+                     "max_tracked_keys", "insufficient_data_retry_minutes",
+                     "insufficient_data_max_age_minutes"):
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
                 raise ConfigurationError(f"workflow setting '{name}' must be positive")
+        if not (0.0 < self.insufficient_data_min_coverage <= 1.0):
+            raise ConfigurationError(
+                "workflow setting 'insufficient_data_min_coverage' must be in (0, 1], "
+                f"got {self.insufficient_data_min_coverage}")
+        if self.insufficient_data_max_age_minutes < self.insufficient_data_retry_minutes:
+            raise ConfigurationError(
+                "insufficient_data_max_age_minutes must be >= "
+                "insufficient_data_retry_minutes (must allow at least one retry)")
 
     @property
     def network_list(self) -> list[str]:

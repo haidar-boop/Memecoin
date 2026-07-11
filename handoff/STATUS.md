@@ -1,6 +1,6 @@
 # Build Status — Parts 1 through 33 (built or verified-satisfied)
 
-**747 tests passing** (as of 2026-07-11). ~14,000+ lines of source,
+**765 tests passing** (as of 2026-07-11). ~14,000+ lines of source,
 ~8,000+ lines of tests. Parts 20-33 completed a verification pass (see
 `next_steps/INDEX.md`); the only unbuilt items are the web dashboard
 (**discarded by the operator 2026-07-10 — do not build**) and
@@ -777,6 +777,49 @@ Getting there surfaced and fixed real issues (each with tests, all on
   server-side ("max usage reached"), and a new key on the SAME account
   changed nothing — credits are per-account, not per-key.
 - **Wallet intelligence paused** — see the Part 17 note above.
+
+---
+
+## New (2026-07-11): alert quality overhaul — rug-veto suppression, liquidity floor, young-token retry
+
+After moving his phone from HIGH to MEDIUM (to see opportunities again once
+HIGH strong_candidate alerts dried up) the operator immediately hit two real
+gaps in the alert pipeline, plus a separate gap in the scanner's dedupe
+logic surfaced while investigating a third question. All fixed, tested, in
+`claude/memecoin-onboarding-yrvjbg`:
+
+- **Liquidity/market-cap floor** (`alerts/notification_engine.py`) — new
+  `AlertThresholds.opportunity_min_liquidity_usd` / `_min_market_cap_usd`
+  (default 0.0 = off). Below a set floor, buy-side alert types
+  (`_BUY_SIDE_ALERT_TYPES`) are dropped entirely; protective alerts are
+  never floored. Fixes 0-liquidity/0-market-cap "opportunities" reaching
+  MEDIUM.
+- **Rug/risk veto now SUPPRESSES, not downgrades** — every deterministic
+  screen (rug engine, copycat, risk-already-firing) and the mind-layer
+  p(rug) veto used to only demote a flagged HIGH candidate to a MEDIUM
+  `early_opportunity`. That hid it from a HIGH-only phone but landed
+  directly on a MEDIUM one. `AutomationRules.evaluate` now drops the
+  buy-side alert types entirely when `deterministic_risk_veto` is set — a
+  flagged coin is no buy alert at any priority.
+- **Young/data-starved tokens are no longer permanently blacklisted**
+  (`workflow/controller.py`) — a 1-minute-old pool with no GoPlus/community
+  data yet used to score `AVOID` and get added to the scanner's `_seen`
+  dedupe set FOREVER, even once its data fully resolved later. New
+  `_finalize_or_reschedule()` distinguishes a CONFIRMED red-flag AVOID
+  (`overrides` non-empty — still permanent) from a low-`coverage` AVOID on
+  a still-young pool (rescheduled into a new bounded `_retry_pending` set,
+  re-analyzed later by `_retry_insufficient_data()`, mirroring the existing
+  `_recheck_watchlist` pattern). Config:
+  `WorkflowSettings.insufficient_data_retry_enabled` / `_min_coverage` /
+  `_retry_minutes` / `_max_age_minutes`.
+- **Mind-layer p(rug) veto turned ON** (`MEMEINTEL_LEARNING_VETO_ENABLED=true`)
+  — authority earned at 0.97 rug precision over 6,000+ graded calls; now
+  actually suppresses (see above) rather than merely downgrading.
+
+Full rationale, including two real bugs caught by the test suite during
+implementation (case-sensitive Solana addresses in the retry queue; a stale
+`_retry_pending` leftover after finalization), in DECISIONS_LOG 2026-07-11.
+21 new tests; suite 754 → 765.
 
 ---
 

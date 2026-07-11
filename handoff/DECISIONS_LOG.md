@@ -1116,6 +1116,56 @@ now adds the learned 97%-precision detector to the suppression (previously
 it too only downgraded). Verified end-to-end + updated the two controller
 tests that asserted the old MEDIUM-downgrade behavior.
 
+## 2026-07-11 — Young tokens are no longer permanently blacklisted (Part 13/15)
+
+The operator asked "how come it's not learning new coins" and, separately,
+"is my bot detecting coins then calling it rug pulls because of the age?"
+Investigation (an Explore agent tracing the multi-cycle token flow through
+`workflow/controller.py`) confirmed a real, previously-unknown gap:
+
+- The rug-engine/copycat veto re-verification path already worked as
+  designed (Part 15 comment: "a vetoed token is NOT cached as verified") —
+  a flagged HIGH candidate genuinely gets a fresh look on the watchlist
+  recheck cadence once its risk clears.
+- BUT a token that scored `Classification.AVOID` on its very FIRST look —
+  overwhelmingly because a brand-new pool has no GoPlus/community data yet,
+  not because anything was actually wrong with it — was added to the
+  scanner's `_seen` dedupe set unconditionally, forever. That exact token
+  was never analyzed again for the life of the process, even once its data
+  fully resolved an hour later.
+
+**Fix** (`workflow/controller.py`): `_finalize_or_reschedule()` replaces the
+unconditional `_seen.add(key)`. A CONFIRMED red-flag AVOID
+(`result.master.overrides` non-empty — destructive security, fake
+community, extreme risk) is real evidence and is still permanently
+excluded, unchanged. An AVOID with NO overrides and `coverage` below
+`WorkflowSettings.insufficient_data_min_coverage` (default 0.5) on a pool
+younger than `insufficient_data_max_age_minutes` (default 120) is instead
+scheduled into a new bounded `_retry_pending` set (paced by
+`insufficient_data_retry_minutes`, default 15) and re-analyzed later by the
+new `_retry_insufficient_data()` pass — mirroring `_recheck_watchlist`'s
+existing pattern (re-fetch via `market_service.get_token_pairs`, re-run the
+full pipeline, dispatch through the normal alert path). Unknown pool age
+is not retried (Rule 8 — can't reason about "too young" without knowing the
+age). All four knobs are configurable and default to preserving the
+pre-fix behavior when the flag is off.
+
+Two real bugs surfaced and fixed during implementation (both caught by the
+test suite, not by inspection):
+1. Solana addresses are case-sensitive base58; the retry queue's key is
+   deliberately lowercased for dedup (matching `_seen`'s own convention),
+   which is fine for membership checks but would corrupt a later live API
+   call. Fixed by carrying the ORIGINAL-case address in `_retry_pending`'s
+   value alongside the due-time.
+2. `_BoundedKeySet` has no delete, so a key promoted to `_seen` leaves a
+   stale, still-"due" leftover in `_retry_pending` — undetected, this would
+   re-fetch and re-analyze an already-finalized token every cycle
+   thereafter. Fixed with a cheap `if key in self._seen: continue` guard at
+   the top of the retry pass (the leftover itself is harmless dead weight,
+   same tolerance `_BoundedKeySet`'s own FIFO eviction already documents).
+
+15 new tests (`test_controller.py`, `test_settings.py`); suite 754 -> 765.
+
 ## Notable implementation choices (Rule 19)
 
 - **Python 3.11 + asyncio** over Node.js (both allowed by spec): the

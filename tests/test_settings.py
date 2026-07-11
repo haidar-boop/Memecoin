@@ -312,3 +312,32 @@ def test_liquidity_probe_rejects_bad_sell_confirm_fraction():
     with pytest.raises(ConfigurationError, match="sell_confirm_fraction"):
         LiquidityProbeSettings(sell_confirm_fraction=1.0)
     assert LiquidityProbeSettings(sell_confirm_fraction=0.1).sell_confirm_fraction == 0.1
+
+
+def test_insufficient_data_retry_settings_load_and_validate():
+    from meme_intelligence.config.settings import WorkflowSettings
+
+    defaults = WorkflowSettings()
+    assert defaults.insufficient_data_retry_enabled is True
+    assert defaults.insufficient_data_min_coverage == 0.5
+    assert defaults.insufficient_data_retry_minutes == 15.0
+    assert defaults.insufficient_data_max_age_minutes == 120.0
+
+    with pytest.raises(ConfigurationError, match="insufficient_data_min_coverage"):
+        WorkflowSettings(insufficient_data_min_coverage=0.0)
+    with pytest.raises(ConfigurationError, match="insufficient_data_min_coverage"):
+        WorkflowSettings(insufficient_data_min_coverage=1.5)
+    with pytest.raises(ConfigurationError, match="insufficient_data_max_age_minutes"):
+        WorkflowSettings(insufficient_data_retry_minutes=30.0,
+                         insufficient_data_max_age_minutes=10.0)
+
+    settings = Settings.from_env(env={
+        "MEMEINTEL_WORKFLOW_INSUFFICIENT_DATA_RETRY_ENABLED": "false",
+        "MEMEINTEL_WORKFLOW_INSUFFICIENT_DATA_MIN_COVERAGE": "0.4",
+        "MEMEINTEL_WORKFLOW_INSUFFICIENT_DATA_RETRY_MINUTES": "10",
+        "MEMEINTEL_WORKFLOW_INSUFFICIENT_DATA_MAX_AGE_MINUTES": "60",
+    })
+    assert settings.workflow.insufficient_data_retry_enabled is False
+    assert settings.workflow.insufficient_data_min_coverage == 0.4
+    assert settings.workflow.insufficient_data_retry_minutes == 10.0
+    assert settings.workflow.insufficient_data_max_age_minutes == 60.0

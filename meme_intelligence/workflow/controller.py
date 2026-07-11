@@ -25,7 +25,7 @@ import math
 import signal
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable
 
 from meme_intelligence.alerts.notification_engine import (
@@ -42,7 +42,12 @@ from meme_intelligence.analyzers.security_monitor import (
     merge_facts,
 )
 from meme_intelligence.config.settings import Settings
-from meme_intelligence.core.enums import AlertPriority, MarketRegime, WatchlistTier
+from meme_intelligence.core.enums import (
+    AlertPriority,
+    Classification,
+    MarketRegime,
+    WatchlistTier,
+)
 from meme_intelligence.core.errors import (
     AllProvidersFailedError,
     CollectorError,
@@ -177,6 +182,11 @@ class _BoundedKeySet:
 
     def get(self, key, default=None):
         return self._data.get(key, default)
+
+    def items(self) -> list:
+        """Snapshot of (key, value) pairs — safe to iterate while the caller
+        mutates the set (e.g. rescheduling an entry mid-pass)."""
+        return list(self._data.items())
 
     def __len__(self) -> int:
         return len(self._data)
@@ -331,6 +341,10 @@ class ContinuousScanner:
                                           now_func=now_func)
         self._rules = AutomationRules(settings.alerts, settings.alert_engine)
         self._seen = _BoundedKeySet(settings.workflow.max_tracked_keys)
+        # key -> next-eligible-retry datetime, for tokens whose first look was
+        # inconclusive purely from missing data on a young pool (not a real
+        # red flag) — see _finalize_or_reschedule / _retry_insufficient_data.
+        self._retry_pending = _BoundedKeySet(settings.workflow.max_tracked_keys)
         self._stop = asyncio.Event()
 
     def request_stop(self) -> None:
@@ -480,7 +494,11 @@ class ContinuousScanner:
         for candidate in candidates[: self._settings.workflow.top_candidates]:
             token = candidate.pair.base_token
             key = (token.chain, token.address.lower())
-            if key in self._seen:
+            # A key pending an insufficient-data retry is handled ONLY by
+            # _retry_insufficient_data, on its own paced schedule — analyzing
+            # it again here (every cycle it's still "new") would defeat the
+            # pacing and re-run the pipeline far more often than intended.
+            if key in self._seen or key in self._retry_pending:
                 continue
 
             result = await self._pipeline.analyze_pair(candidate.pair, regime=self._regime)
@@ -492,7 +510,7 @@ class ContinuousScanner:
                 # (bug-hunt finding — _seen previously meant "attempted",
                 # not "analyzed").
                 continue
-            self._seen.add(key)
+            self._finalize_or_reschedule(key, result, candidate.pair, self._now())
             stats.analyzed += 1
             processed_this_cycle.add(token.address.lower())
             await self._process_result(
@@ -514,6 +532,12 @@ class ContinuousScanner:
             and cycle % self._settings.workflow.watchlist_recheck_cycles == 0
         ):
             await self._recheck_watchlist(stats, skip=processed_this_cycle)
+
+        # Give young, data-starved tokens a second look (2026-07-11 fix): each
+        # entry paces itself via its own due-time, so this is cheap to call
+        # every cycle even though most passes find nothing due yet.
+        if self._market is not None:
+            await self._retry_insufficient_data(stats, skip=processed_this_cycle)
 
         # Periodic learning (Section 4/7): the classifier warm-starts once
         # enough coins have resolved. Cheap when not due; error-isolated so a
@@ -1035,6 +1059,79 @@ class ContinuousScanner:
             await self._process_result(result, stats, source="watchlist_recheck", thesis=None)
         if rechecked:
             self._logger.info("watchlist recheck: %d tracked token(s) re-analyzed", rechecked)
+
+    def _finalize_or_reschedule(self, key: tuple[str, str], result: PipelineResult,
+                                pair, now: datetime) -> None:
+        """Decide whether ``key`` is permanently done (``_seen``) or deserves
+        another look later, once more data has likely populated (2026-07-11
+        fix — see ``WorkflowSettings.insufficient_data_retry_enabled``).
+
+        A CONFIRMED red-flag AVOID (``result.master.overrides`` non-empty —
+        destructive security, fake community, extreme risk) is real evidence
+        and is never retried. An AVOID from merely-unverified categories
+        (``coverage`` below the floor) on a still-young pool is not a
+        verdict, it is a data gap (Rule 8) — a 1-minute-old launch usually
+        has no GoPlus/community data yet. That case gets rescheduled, up to
+        a bounded age and paced by ``insufficient_data_retry_minutes``, so
+        the exact same token is not permanently blacklisted for the life of
+        the process the moment it is analyzed too early."""
+        ws = self._settings.workflow
+        insufficient = (
+            ws.insufficient_data_retry_enabled
+            and result.master.classification is Classification.AVOID
+            and not result.master.overrides
+            and result.master.coverage < ws.insufficient_data_min_coverage
+        )
+        if insufficient and pair.pair_created_at is not None:
+            age_minutes = (now - pair.pair_created_at).total_seconds() / 60.0
+            if age_minutes < ws.insufficient_data_max_age_minutes:
+                # The VALUE carries the real, case-preserved address (Solana
+                # addresses are case-sensitive base58 — `key`'s address is
+                # lowercased for dedup only, same convention as `_seen`, and
+                # is never valid to hand back to a live API call).
+                self._retry_pending.add(
+                    key, (now + timedelta(minutes=ws.insufficient_data_retry_minutes),
+                          pair.base_token.address))
+                return  # NOT marked _seen — eligible for another look later
+        self._seen.add(key)
+
+    async def _retry_insufficient_data(self, stats: CycleStats, *,
+                                       skip: set[str] = frozenset()) -> None:
+        """Re-analyze tokens whose first look was too early to judge, once
+        their scheduled retry time has arrived (2026-07-11 fix, see
+        ``_finalize_or_reschedule``). Each entry paces itself, so this scan
+        is cheap even when nothing is due yet."""
+        now = self._now()
+        due = [(key, address) for key, (until, address) in self._retry_pending.items()
+               if until <= now]
+        for key, address in due:
+            if key in self._seen:
+                # A finalized key's _retry_pending entry is never deleted
+                # (the bounded set has no remove — stale is harmless dead
+                # weight, same tolerance as _seen's own FIFO eviction) — skip
+                # it here so a finalized token is never re-fetched pointlessly.
+                continue
+            chain = key[0]
+            if address.lower() in skip:
+                continue  # analyzed moments ago this cycle; nothing new to learn
+            try:
+                pairs = await self._market.get_token_pairs(address, chain=chain)
+            except (CollectorError, AllProvidersFailedError) as exc:
+                self._logger.warning(
+                    "insufficient-data retry for %s skipped: market data unavailable (%s)",
+                    address, exc)
+                continue  # stays pending at its old due time; tried again next pass
+            if not pairs:
+                self._seen.add(key)  # pool is gone — nothing left to wait for
+                continue
+            pair = max(pairs, key=lambda p: p.liquidity_usd or 0.0)
+            result = await self._pipeline.analyze_pair(pair, regime=self._regime)
+            if result is None:
+                continue  # security data still not indexed; try again next pass
+            stats.analyzed += 1
+            self._finalize_or_reschedule(key, result, pair, now)
+            await self._process_result(
+                result, stats, source="insufficient_data_retry", thesis=None)
 
     @staticmethod
     def _annotate_with_ai(event: AlertEvent, judgment) -> AlertEvent:

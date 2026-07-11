@@ -47,7 +47,7 @@ cd ~/meme-intelligence
 .venv/bin/python -m pytest tests/ -q
 ```
 
-Expect `747 passed` (count as of 2026-07-11; update this number when you
+Expect `765 passed` (count as of 2026-07-11; update this number when you
 add tests).
 
 ## `.env` on the droplet (state as of 2026-07-11)
