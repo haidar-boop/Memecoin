@@ -1063,6 +1063,35 @@ learning memory grows unboundedly with resolved coins — when steady-state
 nears ~800M, either bound the analog index or move to the 2GB droplet;
 do not keep raising the cap on 1GB.
 
+## 2026-07-11 — Liquidity/market-cap floor for buy-side alerts
+
+The operator dropped his phone threshold to MEDIUM (to see opportunities
+again after HIGH strong_candidate alerts dried up — see the delivery trace)
+and immediately started getting buy-side alerts on 0-liquidity / 0-market-cap
+coins: "it's not using its mind." Root cause: `strong_candidate_min_liquidity_usd`
+only DOWNGRADES a thin candidate HIGH→MEDIUM, and there was no absolute floor
+on MEDIUM opportunity/momentum alerts — so an untradeable pool's pump artifact
+still fired at MEDIUM.
+
+Fix (`AlertThresholds.opportunity_min_liquidity_usd` /
+`_min_market_cap_usd`, both default 0.0 = OFF, Rule 18): in
+`AutomationRules.evaluate`, below a set floor the BUY-SIDE alert types
+(`_BUY_SIDE_ALERT_TYPES`: high_priority_opportunity, strong_candidate,
+early_opportunity, momentum, smart_money_accumulation) are dropped entirely.
+Protective alerts (death/risk/whale-exit/insider/…) are NEVER floored — a
+thin dying coin's holder still needs the warning. Unknown/NaN liquidity or
+mcap counts as below a set floor (a buy you cannot size is not phone-worthy,
+Rule 8), matching the strong-candidate depth veto's own convention.
+Verified end-to-end: an $800-liquidity coin's momentum alert is suppressed
+while its risk_warning survives; a $90k coin is unaffected. Operator sets
+`MEMEINTEL_ALERTS_OPPORTUNITY_MIN_LIQUIDITY_USD` (~10000 to start).
+
+NB (separate follow-up, not yet fixed): the delivery trace also found that
+`NotificationEngine.dispatch` counts a console-only or min-priority-filtered
+(None) sink result as "delivered" (notification_engine.py:711-716), so the
+`alerts` table's presence of a row does NOT prove phone delivery. Confirm
+real phone delivery with `alerts --test`, not DB counts.
+
 ## Notable implementation choices (Rule 19)
 
 - **Python 3.11 + asyncio** over Node.js (both allowed by spec): the

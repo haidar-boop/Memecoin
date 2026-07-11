@@ -66,6 +66,16 @@ _PROTECTIVE_ALERT_TYPES = frozenset({
     "whale_exit", "insider_risk", "community_fake", "security_change",
 })
 
+# BUY-SIDE alert types — a positive "this is worth entering" signal. These are
+# the only ones subject to the operator liquidity/market-cap floor: below a
+# tradeable pool depth, such a signal is a pump artifact on a coin you could
+# not actually buy, not an opportunity. Protective types (above) are never
+# floored — a dying/thin coin's holder still needs the warning.
+_BUY_SIDE_ALERT_TYPES = frozenset({
+    "high_priority_opportunity", "strong_candidate", "early_opportunity",
+    "momentum", "smart_money_accumulation",
+})
+
 _NO_INTEREST_NOTE = ("informational only: this token never earned an "
                      "opportunity alert, so no operator decision is exposed "
                      "to it (interest gate)")
@@ -198,9 +208,34 @@ class AutomationRules:
         drop = self._score_drop_rule(result, previous_score)
         if drop is not None:
             events.append(drop)
+        # Operator liquidity/market-cap floor: below a tradeable pool depth,
+        # buy-side signals are pump artifacts on an untradeable coin, not
+        # opportunities — drop them so the phone never buzzes for a coin the
+        # operator could not actually enter. Protective alerts pass through.
+        if self._below_opportunity_floor(result):
+            events = [e for e in events if e.alert_type not in _BUY_SIDE_ALERT_TYPES]
         return gate_events_by_interest(
             events, operator_interest=operator_interest,
             enabled=self._s.risk_alerts_require_interest)
+
+    def _below_opportunity_floor(self, result: PipelineResult) -> bool:
+        """True when the pool is too thin/small for a real, tradeable entry, so
+        buy-side alerts are suppressed regardless of score. Both floors default
+        to 0.0 (off) — existing behavior is unchanged until the operator sets
+        one (Rule 18). A SET floor treats unknown/NaN liquidity or market cap as
+        below it: a buy signal you cannot even size is not phone-worthy
+        (Rule 8), matching the strong-candidate depth veto's own convention."""
+        min_liq = self._t.opportunity_min_liquidity_usd
+        if min_liq > 0.0:
+            liq = result.pair.liquidity_usd
+            if liq is None or not math.isfinite(liq) or liq < min_liq:
+                return True
+        min_mcap = self._t.opportunity_min_market_cap_usd
+        if min_mcap > 0.0:
+            mcap = result.pair.market_cap
+            if mcap is None or not math.isfinite(mcap) or mcap < min_mcap:
+                return True
+        return False
 
     # IF liquidity has collapsed below the dead floor THEN the failure is a
     # completed event, not a warning — emit one post-mortem (Part 29 S1).

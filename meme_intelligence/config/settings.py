@@ -191,6 +191,16 @@ class AlertThresholds:
     copycat_veto_enabled: bool = True
     copycat_liquidity_ratio: float = 10.0
     copycat_min_liquidity_usd: float = 100000.0
+    # Operator "don't send me untradeable coins" floor for BUY-SIDE alerts
+    # (opportunity / momentum / smart-money accumulation). Below these, the
+    # pool is too thin/small to be a real tradeable opportunity — the buy
+    # signal is a pump artifact, not information — so the alert is suppressed.
+    # Protective warnings (death/risk/whale-exit/insider) still fire: a dying
+    # coin's holder needs to know. Unknown liquidity/mcap counts as below a SET
+    # floor (a buy you cannot size is not phone-worthy, Rule 8). Both default
+    # 0.0 = OFF, so existing behavior is unchanged until set (Rule 18).
+    opportunity_min_liquidity_usd: float = 0.0
+    opportunity_min_market_cap_usd: float = 0.0
 
     def __post_init__(self) -> None:
         for name in ("security", "community", "liquidity", "onchain", "overall",
@@ -207,6 +217,11 @@ class AlertThresholds:
             if not math.isfinite(value) or value <= 0:
                 raise ConfigurationError(
                     f"alert threshold '{name}' must be positive, got {value}")
+        for name in ("opportunity_min_liquidity_usd", "opportunity_min_market_cap_usd"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value < 0:
+                raise ConfigurationError(
+                    f"alert threshold '{name}' must be >= 0, got {value}")
 
 
 @dataclass(frozen=True)

@@ -421,3 +421,81 @@ def test_event_renders():
                        scores={"security": 0.0, "community": None})
     text = event.render()
     assert "CRITICAL" in text and "honeypot confirmed" in text and "community=?" in text
+
+
+# ---- Operator liquidity / market-cap floor for buy-side alerts (2026-07-11) ----
+
+from meme_intelligence.alerts.notification_engine import (  # noqa: E402
+    _BUY_SIDE_ALERT_TYPES,
+    _PROTECTIVE_ALERT_TYPES,
+)
+from meme_intelligence.core.errors import ConfigurationError  # noqa: E402
+
+
+async def test_liquidity_floor_suppresses_buy_side_alerts():
+    """Below a tradeable pool depth, buy-side signals are suppressed entirely
+    (not just downgraded) — the fix for 0-liquidity 'opportunities' reaching
+    the phone."""
+    rules = AutomationRules(
+        AlertThresholds(opportunity_min_liquidity_usd=200_000.0),  # fixture has 90k
+        AlertEngineSettings())
+    result = await pipeline_result()
+    assert result.master.final_score >= 88.0   # would otherwise be a strong candidate
+    types = {e.alert_type for e in rules.evaluate(result)}
+    assert not (types & _BUY_SIDE_ALERT_TYPES)  # no strong_candidate/early_opp/momentum
+
+
+async def test_market_cap_floor_suppresses_buy_side_alerts():
+    rules = AutomationRules(
+        AlertThresholds(opportunity_min_market_cap_usd=5_000_000.0),  # fixture has 400k
+        AlertEngineSettings())
+    result = await pipeline_result()
+    types = {e.alert_type for e in rules.evaluate(result)}
+    assert not (types & _BUY_SIDE_ALERT_TYPES)
+
+
+async def test_unknown_liquidity_with_floor_set_suppresses_buy_side():
+    """A SET floor treats unknown liquidity as below it — a buy you cannot
+    even size is not phone-worthy (Rule 8)."""
+    rules = AutomationRules(
+        AlertThresholds(opportunity_min_liquidity_usd=10_000.0),
+        AlertEngineSettings())
+    result = await pipeline_result(pair=make_pair(liquidity_usd=None))
+    types = {e.alert_type for e in rules.evaluate(result)}
+    assert not (types & _BUY_SIDE_ALERT_TYPES)
+
+
+async def test_floor_does_not_suppress_protective_alerts():
+    """The floor silences buy-side signals only — a holder's warning on a thin
+    or dangerous coin still fires."""
+    rules = AutomationRules(
+        AlertThresholds(opportunity_min_liquidity_usd=1_000_000.0),
+        AlertEngineSettings())
+    # honeypot at $800 liquidity: above the dead floor (not a death post-mortem)
+    # but destructive -> a protective emergency alert on the normal path.
+    result = await pipeline_result(honeypot=True, pair=make_pair(liquidity_usd=800.0))
+    types = {e.alert_type for e in rules.evaluate(result)}
+    assert types & _PROTECTIVE_ALERT_TYPES     # the warning survives the floor
+    assert not (types & _BUY_SIDE_ALERT_TYPES)
+
+
+async def test_floor_off_by_default_leaves_alerts_unchanged():
+    """Default floors are 0.0 (off): a strong candidate still fires (Rule 18)."""
+    result = await pipeline_result()
+    types = {e.alert_type for e in make_rules().evaluate(result)}
+    assert "strong_candidate" in types         # unchanged from pre-floor behavior
+
+
+def test_opportunity_floor_validates_and_loads_from_env():
+    with pytest.raises(ConfigurationError, match="opportunity_min_liquidity_usd"):
+        AlertThresholds(opportunity_min_liquidity_usd=-1.0)
+    with pytest.raises(ConfigurationError, match="opportunity_min_market_cap_usd"):
+        AlertThresholds(opportunity_min_market_cap_usd=-5.0)
+    s = Settings.from_env(env={
+        "MEMEINTEL_ALERTS_OPPORTUNITY_MIN_LIQUIDITY_USD": "15000",
+        "MEMEINTEL_ALERTS_OPPORTUNITY_MIN_MARKET_CAP_USD": "50000",
+    })
+    assert s.alerts.opportunity_min_liquidity_usd == 15000.0
+    assert s.alerts.opportunity_min_market_cap_usd == 50000.0
+    # default stays off
+    assert Settings.from_env(env={}).alerts.opportunity_min_liquidity_usd == 0.0
