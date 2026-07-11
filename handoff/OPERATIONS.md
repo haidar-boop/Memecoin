@@ -80,12 +80,14 @@ Set and working:
   wallet — the funding IS the risk cap), plus small
   `MEMEINTEL_EXECUTION_MAX_BUY_SOL` / `_BUY_PRESETS_SOL` values he set.
 
+- `MEMEINTEL_ANTHROPIC_API_KEY` — **re-enabled by the operator overnight
+  2026-07-11** (was removed 2026-07-10 to conserve credits). The credit
+  gate still applies: free deterministic screens run first, AI is a final
+  second opinion on survivors only. Watch the Anthropic console spend for
+  the first days. The system runs fully with OR without this key — a
+  missing key is never a bug, and he may toggle it freely.
+
 Deliberately OFF:
-- `MEMEINTEL_ANTHROPIC_API_KEY` — **removed by the operator (2026-07-10) to
-  conserve credits.** The system is designed for this: all screens/gates are
-  deterministic and free; AI is only ever a final second opinion. Do not
-  treat the missing key as a bug. If he re-enables it, no other change is
-  needed — the verify layer picks it up on restart.
 - `MEMEINTEL_WALLET_ENABLE_IN_MONITOR=false` — **wallet-intel / smart-money
   paused by the operator (2026-07-11)**: it exhausted the main Helius
   account's credits and produced only 429 noise. Do not flip it back on;

@@ -34,8 +34,10 @@
   Helius account's monthly free credits and produced only 429 noise.
   Deliberate operator decision — see "Money & keys" below and
   DECISIONS_LOG 2026-07-11. Do not "fix" it back on.
-- **Anthropic API key is OFF** — the operator's deliberate choice to save
-  credits (2026-07-10). The system runs fully without it; do not "fix" that.
+- **Anthropic AI layer is ON** — the operator turned it back on overnight
+  (2026-07-11) after keeping it off to save credits since 2026-07-10. The
+  free deterministic screens still run FIRST (credit gate); watch the spend
+  with him for a few days. He may toggle it either way — follow his lead.
 - **Learning layer is live and accumulating**; report card via `/mind` or
   `mind metrics`.
 
