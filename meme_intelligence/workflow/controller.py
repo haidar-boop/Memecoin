@@ -33,6 +33,7 @@ from meme_intelligence.alerts.notification_engine import (
     AlertEvent,
     AutomationRules,
     NotificationEngine,
+    _BUY_SIDE_ALERT_TYPES,
     events_from_security_changes,
     gate_events_by_interest,
 )
@@ -613,29 +614,42 @@ class ContinuousScanner:
 
         # Free deterministic screens + AI verification of gate-passing
         # opportunities (Part 32.5 Section 8: deep analysis only after
-        # initial requirements). The free screens (rug engine, risk alerts
-        # already firing, copycat lookup) run whenever a HIGH opportunity is
-        # about to fire — they used to be reachable ONLY through the
-        # AI-verification gate, so removing the API key silently removed
-        # the rug-engine check from HIGH alerts and rug pulls got
-        # recommended unscreened (live finding, 2026-07-10). A screen veto
-        # downgrades BOTH HIGH tiers via deterministic_risk_veto.
+        # initial requirements).
+        #
+        # The rug-engine/mind-layer screen (_deterministic_risk_veto) is
+        # ZERO-API-COST — pure local computation over data already collected
+        # (its own docstring says so) — so it now runs whenever ANY buy-side
+        # alert is about to fire (momentum, early_opportunity,
+        # smart_money_accumulation, not just the two rare HIGH tiers).
+        # Gating it behind the HIGH tiers only used to mean the largest alert
+        # category by far (momentum — thousands/day) reached the operator
+        # completely unscreened by the rug engine: a rug classically pumps
+        # hard right before it dumps, so exactly the coins momentum was
+        # excited about were the ones never checked (2026-07-11 fix).
+        # Copycat search DOES cost a real market-search API call (Rule 11),
+        # so it stays gated to the rare HIGH-tier candidates only, same as
+        # AI verification below — a screen veto SUPPRESSES the buy-side
+        # alert (AutomationRules.evaluate), it no longer merely downgrades.
         verify_key = (token.chain, token.address.lower())
         ai_inconclusive = self._ai_verified.get(verify_key, False)
         deterministic_veto: str | None = None
         if not result.security.is_destructive:
             provisional = self._rules.evaluate(result, previous_score=previous_score)
-            if any(e.alert_type in ("high_priority_opportunity", "strong_candidate")
-                   for e in provisional):
+            fires_buy_side = any(e.alert_type in _BUY_SIDE_ALERT_TYPES for e in provisional)
+            fires_high_tier = any(
+                e.alert_type in ("high_priority_opportunity", "strong_candidate")
+                for e in provisional)
+            if fires_buy_side:
                 deterministic_veto = self._deterministic_risk_veto(
                     result, provisional, creator)
-                if deterministic_veto is None:
-                    deterministic_veto = await self._copycat_veto(result)
-                if deterministic_veto is not None:
-                    self._logger.info(
-                        "HIGH opportunity for %s vetoed by free screen: %s — "
-                        "alert downgraded", token.address, deterministic_veto)
-                elif (self._ai_verifier is not None
+            if deterministic_veto is None and fires_high_tier:
+                deterministic_veto = await self._copycat_veto(result)
+            if deterministic_veto is not None:
+                self._logger.info(
+                    "buy-side alert for %s vetoed by free screen: %s — "
+                    "alert suppressed", token.address, deterministic_veto)
+            if fires_high_tier:
+                if (deterministic_veto is None and self._ai_verifier is not None
                       and verify_key not in self._ai_verified):
                     # Credit conservation: a paid call is the LAST check,
                     # never the first — every free screen above was clean

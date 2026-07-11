@@ -1412,3 +1412,69 @@ async def test_retry_pass_skips_a_stale_already_finalized_entry():
         history = await scanner.run(max_cycles=1)
         assert market.recheck_calls == 0     # never re-fetched
         assert history[0].analyzed == 0
+
+
+async def test_rug_screen_now_covers_momentum_and_medium_alerts_too():
+    """The bigger 2026-07-11 finding: the free rug-engine screen used to run
+    ONLY when a token would fire a HIGH opportunity tier -- so momentum
+    (the largest alert category by far) and early_opportunity reached the
+    operator completely unscreened by the rug engine, even for a blacklisted
+    deployer. A rug classically pumps hard right before it dumps, so exactly
+    the coins momentum got excited about were the ones never checked. The
+    screen now runs for ANY buy-side alert (it costs zero extra API calls)."""
+    from meme_intelligence.learning.service import LearningService
+    from meme_intelligence.learning.store import LearningStore
+
+    settings = Settings.from_env(env={
+        "MEMEINTEL_LEARNING_ENABLE_IN_MONITOR": "true",
+        "MEMEINTEL_LEARNING_STATE_DIR": ":memory:",
+    })
+    learning = LearningService(
+        settings, store=LearningStore(":memory:", now_func=lambda: NOW),
+        now_func=lambda: NOW)
+    learning.store.blacklist_deployer("devBad", "solana")
+
+    sink = RecordingSink()
+    # $6,000 liquidity keeps the master score below the strong-candidate bar
+    # (fires momentum + early_opportunity only, confirmed no HIGH tier) while
+    # still clearing the momentum gate -- exactly the "exciting pump, unknown
+    # safety" shape a rug takes right before it dumps.
+    pair = _dc.replace(make_pair(), liquidity_usd=6_000.0)
+    profile = _dc.replace(clean_profile(pair.base_token), creator_address="devBad")
+
+    async def fake_sleep(seconds):
+        pass
+
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        notifier = NotificationEngine([sink], AlertEngineSettings(), time_func=lambda: 0.0)
+        scanner = ContinuousScanner(
+            settings, storage, notifier,
+            gecko_client=FakeGecko([pair]),
+            goplus_client=FakeGoPlus({pair.base_token.address: profile}),
+            ai_service=None,
+            learning_service=learning,
+            now_func=lambda: NOW, sleep_func=fake_sleep,
+        )
+        await scanner.run(max_cycles=1)
+
+    # Confirm the fixture really does fire momentum/early_opportunity with a
+    # CLEAN deployer -- proving the suppression below is the veto's doing,
+    # not a fixture that never fires anything.
+    with Storage(":memory:", now_func=lambda: NOW) as storage2:
+        clean_sink = RecordingSink()
+        clean_notifier = NotificationEngine([clean_sink], AlertEngineSettings(),
+                                            time_func=lambda: 0.0)
+        clean_scanner = ContinuousScanner(
+            SETTINGS, storage2, clean_notifier,
+            gecko_client=FakeGecko([pair]),
+            goplus_client=FakeGoPlus({pair.base_token.address: clean_profile(pair.base_token)}),
+            now_func=lambda: NOW, sleep_func=fake_sleep,
+        )
+        await clean_scanner.run(max_cycles=1)
+    clean_types = {e.alert_type for e in clean_sink.sent}
+    assert clean_types & {"momentum", "early_opportunity"}   # fixture sanity check
+    assert not (clean_types & {"high_priority_opportunity", "strong_candidate"})
+
+    # With the blacklisted deployer, the SAME fixture must now be fully
+    # suppressed -- proof the free screen ran even though no HIGH tier fired.
+    assert not any(e.alert_type in _BUY_SIDE_ALERT_TYPES for e in sink.sent)

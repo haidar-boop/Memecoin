@@ -1166,6 +1166,46 @@ test suite, not by inspection):
 
 15 new tests (`test_controller.py`, `test_settings.py`); suite 754 -> 765.
 
+## 2026-07-11 — The rug engine now screens EVERY buy-side alert, not just HIGH
+
+Following the "no permanent blacklist for young coins" fix, the operator
+asked to "fix where it thinks rug pulls are new coins." Investigation of
+`workflow/controller.py::_process_result` found a bigger, pre-existing gap
+than the age question implied:
+
+`_deterministic_risk_veto()` (the rug engine + mind-layer p(rug) screen) was
+only ever COMPUTED when the token's provisional alerts included one of the
+two rare HIGH tiers (`high_priority_opportunity` / `strong_candidate`). If
+a token instead only fired `momentum` or `early_opportunity` — by far the
+largest alert categories (momentum alone: ~7,000/day in the operator's own
+DB) — `deterministic_veto` stayed `None` for the whole function, so the
+rug engine NEVER RAN on it, veto-suppression or not. A rug pull classically
+pumps hard right before it dumps, so exactly the coins momentum got excited
+about were the ones the rug engine never checked. This predates today's
+suppress-vs-downgrade fix and would have limited its effect to the rare
+HIGH tier regardless.
+
+The rug-engine/mind-layer screen is genuinely zero-API-cost (pure local
+computation over already-collected data — its own docstring said so); the
+HIGH-tier gating was a CPU-conservation choice, not a cost one (Rule 12,
+not Rule 11). Only the copycat screen (`_copycat_veto`) makes a real
+market-search API call.
+
+**Fix:** `_process_result` now computes two independent trigger flags —
+`fires_buy_side` (any `_BUY_SIDE_ALERT_TYPES`) and `fires_high_tier` (the
+original two-tier check). The free rug-engine/mind-layer screen runs
+whenever `fires_buy_side`; the costed copycat search stays gated behind
+`fires_high_tier` only (Rule 11 preserved); AI verification likewise stays
+HIGH-tier-gated (unchanged cost behavior). A veto now suppresses ANY
+buy-side alert type via the existing `deterministic_risk_veto is not None`
+check in `AutomationRules.evaluate` (today's earlier fix).
+
+Verified with a regression test that fails against the pre-fix code and
+passes against the fix: a $6,000-liquidity coin (fires momentum +
+early_opportunity, confirmed never HIGH tier) with a blacklisted deployer
+is now fully suppressed; the same fixture with a clean deployer still fires
+normally (fixture sanity-checked both ways). 1 new test; suite 765 → 766.
+
 ## Notable implementation choices (Rule 19)
 
 - **Python 3.11 + asyncio** over Node.js (both allowed by spec): the
