@@ -59,7 +59,8 @@ its measured accuracy earns authority) ·
 build** · **5)** paid Twitter/X social intelligence — ⏸ **PARKED** until
 the bot makes money (explicit cost approval required).
 Plus the unplanned **Project 6** (operator-requested): live buy/dump from
-Telegram — ✅ BUILT, ARMED, first live buy validated 2026-07-11.
+Telegram — ✅ BUILT, ARMED, fully validated 2026-07-11 (live buy AND dump
+round trip confirmed).
 Smart-money wallet intelligence is temporarily **paused** (Helius credits
 exhausted; re-enable criteria in DECISIONS_LOG 2026-07-11).
 

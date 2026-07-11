@@ -23,12 +23,12 @@
 - **Branch that matters**: `claude/memecoin-onboarding-yrvjbg` — the
   authoritative tip; the droplet pulls it. (Supersedes
   `claude/session-rules-preferences-kc71bf` from the 2026-07-10 handoff.)
-- **LIVE TRADING IS ARMED.** Project 6 is real money now: the operator's
-  first live `/buy` executed successfully on 2026-07-11 from a DEDICATED
+- **LIVE TRADING IS ARMED AND FULLY VALIDATED.** Project 6 is real money
+  now: on 2026-07-11 the operator executed a live `/buy` AND a live
+  `/dump` (full round trip — buy and sell both confirmed) from a DEDICATED
   fresh Phantom wallet funded with ~$20 CAD (never his main wallet), small
   per-trade caps in the droplet `.env`. It NEVER auto-trades — every trade
-  is a button he taps. **Open validation step: `/dump` the test position
-  back to SOL** to prove selling works before he trusts it on a real alert.
+  is a button he taps.
 - **Wallet intelligence (smart-money, Part 17) is OFF in the monitor**
   (`MEMEINTEL_WALLET_ENABLE_IN_MONITOR=false`): it exhausted the main
   Helius account's monthly free credits and produced only 429 noise.
@@ -103,12 +103,9 @@ sudo systemctl restart meme-intelligence
 
 ## First moves for the next session
 
-1. **Finish the round-trip validation:** have him `/dump` the test token
-   (`9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump`). If it confirms and the
-   SOL returns to the trading wallet, live trading is fully validated. If
-   Jupiter finds no route, run `/why` on the token first — a fresh pump.fun
-   token can legitimately lose its route — and validate the dump leg on a
-   different, liquid token instead.
+1. **Round-trip validation is DONE** (2026-07-11): live `/buy` and live
+   `/dump` both executed and confirmed. The bot is trusted for real
+   alerts within its caps. Nothing is owed here.
 2. **Check the phone experience:** duplicate replies should be gone
    (`85ed00d` is deployed), 429 spam in the journal should be gone
    (wallet-intel off). `/status` should show `trading LIVE`.

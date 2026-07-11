@@ -956,15 +956,15 @@ Two-step resolution (Rules 4/9/11/17/18):
 
 ## 2026-07-11 — First live trade; double-reply fix; wallet intelligence paused
 
-**First live buy succeeded.** With the dedicated trading Helius key in
-place (previous entry), the operator's `/buy <token> 0.001` executed end to
-end from Telegram — cap check → balance read → fresh quote → sign →
-broadcast → on-chain confirmation — on the dedicated ~$20 Phantom trading
-wallet. This validates the whole Project 6 money path in production. The
-**`/dump` half of the round-trip validation is still owed**: selling the
-test position back must be confirmed before the operator trusts live
-trading on a real alert (a buy that can't be sold is exactly the failure
-mode this system exists to catch).
+**First live buy succeeded — and the round trip completed.** With the
+dedicated trading Helius key in place (previous entry), the operator's
+`/buy <token> 0.001` executed end to end from Telegram — cap check →
+balance read → fresh quote → sign → broadcast → on-chain confirmation —
+on the dedicated ~$20 Phantom trading wallet. Later the same day the
+operator confirmed the **`/dump` sell-back also executed successfully**,
+completing the full buy-and-sell round-trip validation. Project 6's money
+path is fully validated in production; live trading is trusted for real
+alerts within its caps.
 
 **Double-reply fix (commit `85ed00d`).** Typed `/buy` and `/dump` commands
 produced two Telegram messages: `_do_buy`/`_do_dump` replied directly AND

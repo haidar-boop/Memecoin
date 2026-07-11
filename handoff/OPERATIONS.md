@@ -200,9 +200,9 @@ Setup is deliberately manual because it involves a hot wallet.
 
 **First live test:** buy a tiny amount (e.g. `/buy <a well-known token> 0.01`)
 and confirm it shows in the Phantom trading account before trusting it on a
-fresh meme coin. **Status 2026-07-11: the buy leg passed live** (first real
-/buy executed and confirmed); the `/dump` sell-back leg is the remaining
-validation step. To disable instantly: set `MEMEINTEL_EXECUTION_LIVE_ENABLED=false`
+fresh meme coin. **Status 2026-07-11: FULLY VALIDATED live** — a real
+`/buy` and a real `/dump` both executed and confirmed on-chain (complete
+round trip). To disable instantly: set `MEMEINTEL_EXECUTION_LIVE_ENABLED=false`
 (or `BUY_BUTTON_ENABLED=false` to hide the buttons) and restart.
 
 ## Mind-layer P(rug) veto (Project 3 — enable only when EARNED)

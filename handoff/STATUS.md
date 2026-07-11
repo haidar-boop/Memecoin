@@ -741,12 +741,12 @@ execution. NEVER auto-trades; a trade only happens on a button/command.
 
 ## New (2026-07-11): live trading ARMED and validated; Helius split; wallet-intel paused
 
-Project 6 went from "built, off by default" to **armed and working in
-production**: the operator's first real `/buy` executed successfully from
-Telegram (dedicated fresh Phantom wallet, funded ~$20 CAD, small per-trade
-caps in the droplet `.env`). The `/dump` half of the round-trip validation
-is the open next step. Never auto-trades — every trade is a button the
-operator taps.
+Project 6 went from "built, off by default" to **armed, working, and
+fully validated in production**: the operator executed a real `/buy` AND a
+real `/dump` from Telegram — the complete buy-and-sell round trip
+confirmed on-chain (dedicated fresh Phantom wallet, funded ~$20 CAD, small
+per-trade caps in the droplet `.env`). Never auto-trades — every trade is
+a button the operator taps.
 
 Getting there surfaced and fixed real issues (each with tests, all on
 `claude/memecoin-onboarding-yrvjbg`):
