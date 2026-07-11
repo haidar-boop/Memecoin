@@ -69,15 +69,116 @@ def make_rules() -> AutomationRules:
     return AutomationRules(AlertThresholds(), AlertEngineSettings())
 
 
-async def test_healthy_token_gets_provisional_opportunity_alert():
-    result = await pipeline_result()
+async def test_strong_fresh_token_gets_high_strong_candidate_alert():
+    """A fresh launch that clears the raised overall bar with every
+    measurable gate passing (only community unverified) earns a HIGH
+    strong_candidate alert — not capped at MEDIUM (Part 2 S4)."""
+    result = await pipeline_result()  # this fixture scores ~93 overall
+    assert result.master.final_score >= 88.0  # sanity: it IS a strong candidate
     events = make_rules().evaluate(result)
     types = {e.alert_type: e for e in events}
-    # community gate is unverified -> MEDIUM provisional, never HIGH
+    assert "strong_candidate" in types
+    assert types["strong_candidate"].priority is AlertPriority.HIGH
+    assert any("community" in r or "unverified" in r.lower()
+               for r in (types["strong_candidate"].title,) + types["strong_candidate"].reasons)
+    # the full "every gate verified" tier still requires community data
+    assert "high_priority_opportunity" not in types
+
+
+async def test_shallow_liquidity_vetoes_strong_candidate():
+    """A gate-passing fresh launch with pool depth below the floor is
+    downgraded to MEDIUM with the depth named — the liquidity GATE scores
+    lock safety, not depth, so this veto is what keeps $16k pools off a
+    HIGH-filtered phone."""
+    rules = AutomationRules(
+        AlertThresholds(strong_candidate_min_liquidity_usd=100_000.0),  # fixture has 90k
+        AlertEngineSettings())
+    result = await pipeline_result()
+    assert result.master.final_score >= 88.0  # would otherwise be a strong candidate
+    events = rules.evaluate(result)
+    types = {e.alert_type: e for e in events}
+    assert "strong_candidate" not in types
+    assert types["early_opportunity"].priority is AlertPriority.MEDIUM
+    assert any("liquidity depth" in r for r in types["early_opportunity"].reasons)
+
+
+async def test_low_ai_confidence_vetoes_strong_candidate():
+    """A lukewarm AI verification (below the confidence floor) downgrades the
+    alert instead of riding along as a footnote."""
+    import dataclasses
+    from types import SimpleNamespace
+
+    result = await pipeline_result()
+    judged = dataclasses.replace(result, ai_judgment=SimpleNamespace(confidence=22.0))
+    events = make_rules().evaluate(judged)
+    types = {e.alert_type: e for e in events}
+    assert "strong_candidate" not in types
+    assert any("AI verification confidence" in r
+               for r in types["early_opportunity"].reasons)
+
+
+async def test_deterministic_veto_downgrades_fully_verified_tier():
+    """Bug-hunt: the fully-verified HIGH tier bypassed every veto — a
+    blacklisted deployer / rug-engine hit with community data still fired
+    HIGH, unchecked. The deterministic veto now downgrades it too."""
+    import dataclasses
+    from types import SimpleNamespace
+
+    result = await pipeline_result()
+    # Give it a community score so it clears the fully-verified tier.
+    verified = dataclasses.replace(
+        result, community=SimpleNamespace(overall_score=85.0, is_artificial=False,
+                                          findings=()))
+    events = make_rules().evaluate(
+        verified, deterministic_risk_veto="rug engine score 25 (deployer_blacklisted)")
+    types = {e.alert_type: e for e in events}
+    assert "high_priority_opportunity" not in types
+    assert "strong_candidate" not in types
+    assert any("deterministic risk veto" in r for r in types["early_opportunity"].reasons)
+
+
+async def test_inconclusive_ai_verification_vetoes_strong_candidate():
+    """Bug-hunt regression: a judgment DISCARDED below the confidence floor
+    left ai_judgment None, so a 15/100 judgment fired HIGH while 22/100
+    vetoed — inverted protection. The scanner now reports 'verification ran
+    but was inconclusive' and the rules treat it as unconfirmed."""
+    result = await pipeline_result()
+    events = make_rules().evaluate(result, ai_verification_inconclusive=True)
+    types = {e.alert_type: e for e in events}
+    assert "strong_candidate" not in types
+    assert any("no usable judgment" in r for r in types["early_opportunity"].reasons)
+    # Default (verification never ran, e.g. no API key) is unchanged: HIGH fires.
+    default_events = make_rules().evaluate(result)
+    assert "strong_candidate" in {e.alert_type for e in default_events}
+
+
+async def test_confident_ai_keeps_strong_candidate_high():
+    import dataclasses
+    from types import SimpleNamespace
+
+    result = await pipeline_result()
+    judged = dataclasses.replace(result, ai_judgment=SimpleNamespace(confidence=80.0))
+    events = make_rules().evaluate(judged)
+    types = {e.alert_type: e for e in events}
+    assert "strong_candidate" in types
+    assert types["strong_candidate"].priority is AlertPriority.HIGH
+
+
+async def test_good_but_not_strong_token_stays_medium_provisional():
+    """A token that passes the gates but does NOT clear the raised strong
+    bar stays a MEDIUM early_opportunity (Rule 8 — unverified community).
+    Uses a high strong-candidate bar so the healthy fixture (~93) passes
+    'overall' but falls below it, landing deterministically in the MEDIUM
+    provisional tier."""
+    from meme_intelligence.config.settings import AlertThresholds
+    rules = AutomationRules(AlertThresholds(strong_candidate_overall=99.0),
+                            AlertEngineSettings())
+    result = await pipeline_result()
+    events = rules.evaluate(result)
+    types = {e.alert_type: e for e in events}
     assert "early_opportunity" in types
     assert types["early_opportunity"].priority is AlertPriority.MEDIUM
-    assert any("community" in r or "unverified" in r.lower()
-               for r in (types["early_opportunity"].title,) + types["early_opportunity"].reasons)
+    assert "strong_candidate" not in types
     assert "high_priority_opportunity" not in types
 
 
@@ -127,6 +228,153 @@ async def test_score_drop_rule():
 
     events_small = make_rules().evaluate(result, previous_score=result.master.final_score + 5)
     assert not any(e.alert_type == "score_drop_review" for e in events_small)
+
+
+# ---- Dead-token post-mortem (Part 29 Section 1) ----
+
+async def test_dead_token_gets_single_postmortem_not_warning_spam():
+    """A collapsed pool is a completed failure: one MEDIUM post-mortem, not
+    a HIGH risk-warning + HIGH score-drop pair on a token nobody holds."""
+    result = await pipeline_result(pair=make_pair(liquidity_usd=30.0))
+    events = make_rules().evaluate(result, previous_score=90.0)
+    assert [e.alert_type for e in events] == ["token_death"]
+    death = events[0]
+    assert death.priority is AlertPriority.MEDIUM
+    assert any("collapsed" in r for r in death.reasons)
+    assert any("90" in r for r in death.reasons)  # score history preserved
+
+
+async def test_dead_honeypot_still_raises_critical_emergency():
+    """Anyone already holding still needs the destructive finding."""
+    result = await pipeline_result(honeypot=True, pair=make_pair(liquidity_usd=10.0))
+    events = make_rules().evaluate(result)
+    types = {e.alert_type for e in events}
+    assert "emergency_review" in types
+    assert "token_death" in types
+    assert "risk_warning" not in types
+    assert not any("opportunity" in t or t == "momentum" for t in types)
+
+
+async def test_nan_liquidity_is_not_death():
+    """Bug-hunt: `nan >= dead_floor` is always False (same hazard as
+    `nan <= 0` elsewhere), so the bail-out check let NaN liquidity fall
+    through to 'dead' instead of being excluded like unknown liquidity —
+    misclassifying a token with simply-unmeasurable liquidity as dead and
+    suppressing every real alert for it."""
+    result = await pipeline_result(pair=make_pair(liquidity_usd=float("nan")))
+    events = make_rules().evaluate(result)
+    assert not any(e.alert_type == "token_death" for e in events)
+
+
+async def test_unknown_liquidity_is_not_death():
+    """Absence of data never becomes a conclusion (Rule 8)."""
+    result = await pipeline_result(pair=make_pair(liquidity_usd=None))
+    events = make_rules().evaluate(result)
+    assert not any(e.alert_type == "token_death" for e in events)
+
+
+async def test_sinking_but_alive_token_keeps_high_risk_warning():
+    """Below the $5k minimum but above the dead floor is still a live,
+    decision-relevant deterioration — the HIGH warning stays (for a token
+    the operator was pointed at; see the interest-gate tests below)."""
+    result = await pipeline_result(pair=make_pair(liquidity_usd=3_000.0))
+    events = make_rules().evaluate(result)
+    warnings = [e for e in events if e.alert_type == "risk_warning"]
+    assert warnings and warnings[0].priority is AlertPriority.HIGH
+    assert not any(e.alert_type == "token_death" for e in events)
+
+
+# ---- Interest gate (Part 29 Section 1: alerts protect decisions) ----
+# The operator only learns about tokens through HIGH opportunity alerts, so
+# protective alerts on a token that never earned one guard no possible
+# decision — they demote to LOW (logged, recorded, but below every external
+# sink's minimum priority). This is what stops dying pump.fun garbage from
+# re-warning the phone every recheck.
+
+
+async def test_interest_gate_demotes_risk_alerts_on_unrecommended_tokens():
+    """A junk token the operator was never pointed at: HIGH risk_warning and
+    HIGH score_drop_review both demote to LOW with the reason named."""
+    result = await pipeline_result(pair=make_pair(liquidity_usd=3_000.0))
+    events = make_rules().evaluate(result, previous_score=result.master.final_score + 20,
+                                   operator_interest=False)
+    by_type = {e.alert_type: e for e in events}
+    assert by_type["risk_warning"].priority is AlertPriority.LOW
+    assert by_type["score_drop_review"].priority is AlertPriority.LOW
+    assert any("interest gate" in r for r in by_type["risk_warning"].reasons)
+
+
+async def test_interest_keeps_protective_alerts_at_full_priority():
+    """The same junk token WITH prior operator interest keeps the HIGH pair —
+    a token the operator may be holding still gets its warnings."""
+    result = await pipeline_result(pair=make_pair(liquidity_usd=3_000.0))
+    events = make_rules().evaluate(result, previous_score=result.master.final_score + 20,
+                                   operator_interest=True)
+    by_type = {e.alert_type: e for e in events}
+    assert by_type["risk_warning"].priority is AlertPriority.HIGH
+    assert by_type["score_drop_review"].priority is AlertPriority.HIGH
+
+
+async def test_interest_gate_demotes_critical_emergency_on_unrecommended_tokens():
+    """Even a CRITICAL honeypot finding is informational on a token the
+    operator was never told about — he cannot be holding it."""
+    result = await pipeline_result(honeypot=True)
+    events = make_rules().evaluate(result, operator_interest=False)
+    emergency = next(e for e in events if e.alert_type == "emergency_review")
+    assert emergency.priority is AlertPriority.LOW
+
+
+async def test_interest_gate_demotes_death_postmortem_on_unrecommended_tokens():
+    result = await pipeline_result(pair=make_pair(liquidity_usd=30.0))
+    events = make_rules().evaluate(result, previous_score=90.0, operator_interest=False)
+    death = next(e for e in events if e.alert_type == "token_death")
+    assert death.priority is AlertPriority.LOW
+
+
+async def test_same_batch_opportunity_grants_interest():
+    """A HIGH opportunity firing in the SAME batch counts as interest:
+    contradictory signals on a just-recommended token must both arrive at
+    full priority."""
+    result = await pipeline_result()  # fires HIGH strong_candidate
+    events = make_rules().evaluate(result, previous_score=result.master.final_score + 20,
+                                   operator_interest=False)
+    by_type = {e.alert_type: e for e in events}
+    assert by_type["strong_candidate"].priority is AlertPriority.HIGH
+    assert by_type["score_drop_review"].priority is AlertPriority.HIGH  # not demoted
+
+
+async def test_interest_gate_never_touches_opportunity_or_momentum_alerts():
+    """Only protective alert types demote — opportunity/momentum signals on a
+    new token ARE the operator's introduction to it."""
+    hot_pair = make_pair(volume_1h=20_000.0, buys_1h=60, sells_1h=10,
+                         price_change_24h=25.0, price_change_6h=12.0, price_change_1h=5.0)
+    result = await pipeline_result(pair=hot_pair)
+    events = make_rules().evaluate(result, operator_interest=False)
+    momentum = next(e for e in events if e.alert_type == "momentum")
+    assert momentum.priority is AlertPriority.MEDIUM  # unchanged
+
+
+async def test_interest_gate_configurable_off():
+    """Rule 17: the gate is a setting, not a hardcode — disabling it restores
+    full-priority protective alerts on every token."""
+    rules = AutomationRules(AlertThresholds(),
+                            AlertEngineSettings(risk_alerts_require_interest=False))
+    result = await pipeline_result(pair=make_pair(liquidity_usd=3_000.0))
+    events = rules.evaluate(result, operator_interest=False)
+    warnings = [e for e in events if e.alert_type == "risk_warning"]
+    assert warnings and warnings[0].priority is AlertPriority.HIGH
+
+
+def test_gate_events_by_interest_covers_security_changes_and_is_idempotent():
+    from meme_intelligence.alerts.notification_engine import gate_events_by_interest
+
+    change = AlertEvent(AlertPriority.CRITICAL, "security_change", TOKEN,
+                        "became honeypot", ("honeypot: False -> True",))
+    gated = gate_events_by_interest([change], operator_interest=False)
+    assert gated[0].priority is AlertPriority.LOW
+    # Idempotent: a second pass adds no duplicate note.
+    again = gate_events_by_interest(gated, operator_interest=False)
+    assert again[0].reasons == gated[0].reasons
 
 
 class RecordingSink:

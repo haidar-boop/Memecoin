@@ -39,6 +39,7 @@ EVM_FIXTURE = {
             "honeypot_with_same_creator": "2",
             "holder_count": "1523",
             "creator_percent": "0.08",
+            "creator_address": "0xdeployer1",
             "owner_percent": "0.01",
             "holders": [
                 {"address": "0xdead000000000000000000000000000000000000", "percent": "0.5", "is_locked": 0},
@@ -115,6 +116,7 @@ async def test_evm_profile_normalized(monkeypatch):
     assert profile.top_holder_percent == pytest.approx(12.0)
     assert profile.top10_holder_percent == pytest.approx(18.0)
     assert profile.creator_percent == pytest.approx(8.0)
+    assert profile.creator_address == "0xdeployer1"
     assert profile.lp_locked_percent == pytest.approx(70.0)
 
 
@@ -147,6 +149,7 @@ async def test_solana_profile_normalized(monkeypatch):
     assert profile.cannot_sell_all is False
     assert profile.top_holder_percent == pytest.approx(15.0)
     assert profile.creator_percent == pytest.approx(3.0)
+    assert profile.creator_address == "So1Creator"
     assert profile.lp_locked_percent == pytest.approx(100.0)
 
 

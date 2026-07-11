@@ -95,14 +95,35 @@ async def test_missing_fields_become_none(client):
     assert young.pair_created_at is None
 
 
+async def test_huge_pair_created_at_does_not_crash_the_batch(monkeypatch):
+    """Bug-hunt: OverflowError from an out-of-range pairCreatedAt escaped
+    _from_ms_timestamp and killed the whole normalization batch."""
+    client = make_client()
+    bad_fixture = {"pairs": [
+        {**FIXTURE["pairs"][0], "pairAddress": "PairBad", "pairCreatedAt": 1e30},
+    ]}
+
+    async def fake_get_json(path, params=None, *, cache_key=None, cache_ttl=None):
+        return bad_fixture
+
+    monkeypatch.setattr(client, "_get_json", fake_get_json)
+    pairs = await client.get_token_pairs("BaseAddr1")  # must not raise
+    assert pairs[0].pair_created_at is None
+
+
 async def test_malformed_entry_skipped_not_fatal(client):
-    pairs = await client.get_token_pairs("anything")
-    assert len(pairs) == 2  # third fixture entry silently skipped (and logged)
+    # The malformed third entry is skipped during parsing (logged); the
+    # base-token filter then keeps only pairs whose BASE is the queried token
+    # (quote-side pairs describe the counterparty — bug-hunt finding).
+    pairs = await client.get_token_pairs("BaseAddr1")
+    assert len(pairs) == 1
+    assert pairs[0].base_token.address == "BaseAddr1"
 
 
 async def test_chain_filter(client):
-    pairs = await client.get_token_pairs("anything", chain="base")
+    pairs = await client.get_token_pairs("BaseAddr2", chain="base")
     assert [p.chain for p in pairs] == ["base"]
+    assert await client.get_token_pairs("BaseAddr2", chain="solana") == []
 
 
 async def test_search_uses_query_param(client):

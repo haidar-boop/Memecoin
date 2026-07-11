@@ -13,7 +13,11 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
 
-from meme_intelligence.core.errors import AllProvidersFailedError, CollectorError
+from meme_intelligence.core.errors import (
+    AllProvidersFailedError,
+    CollectorError,
+    TransientCollectorError,
+)
 
 
 @dataclass
@@ -78,6 +82,18 @@ class ProviderPool:
         when every provider fails or is cooling down — callers should treat
         that as "data unavailable", not as a zero value (Rule 8).
         """
+        result, _name = await self.call_with_provider(method, *args, **kwargs)
+        return result
+
+    async def call_with_provider(self, method: str, /, *args: Any, **kwargs: Any) -> tuple[Any, str]:
+        """Like :meth:`call`, but also returns which provider answered.
+
+        Needed by callers that must later verify the result against a
+        genuinely *different* source (Part 15 Section 10) — without
+        knowing who actually served ``result``, a caller that guesses
+        "not the first provider" can end up asking the same provider that
+        already answered to confirm its own data.
+        """
         now = self._time()
         causes: dict[str, Exception] = {}
 
@@ -89,16 +105,31 @@ class ProviderPool:
 
             try:
                 result = await getattr(provider, method)(*args, **kwargs)
-            except CollectorError as exc:
+            except TransientCollectorError as exc:
+                # Provider-level trouble (5xx/timeout/network/429 after
+                # retries) — counts toward the cooldown threshold.
                 causes[name] = exc
                 self._record_failure(name, state, method, exc)
+                continue
+            except CollectorError as exc:
+                # Permanent, item-specific errors (a 404 for a token this
+                # provider simply hasn't indexed, a missing required kwarg)
+                # say nothing about the provider's HEALTH. Counting them put
+                # a healthy provider on cooldown after 3 fresh unindexed
+                # tokens in a row, blacking out the whole pool for every
+                # token (bug-hunt finding). Fail over, record the cause,
+                # leave health untouched.
+                causes[name] = exc
+                state.total_failures += 1
+                self._logger.info("provider '%s' has no data for '%s': %s",
+                                  name, method, exc)
                 continue
 
             if state.consecutive_failures:
                 self._logger.info("provider '%s' recovered", name)
             state.consecutive_failures = 0
             state.total_successes += 1
-            return result
+            return result, name
 
         raise AllProvidersFailedError(method, causes)
 

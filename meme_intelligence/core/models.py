@@ -61,6 +61,60 @@ class DexPair:
 
 
 @dataclass(frozen=True)
+class PumpFunLaunch:
+    """One token-creation event from a launchpad stream (Spec Part 32.5 Section 3).
+
+    Emitted by the PumpPortal WebSocket the moment a Pump.fun (or
+    compatible launchpad) token is created. This is a *discovery* record
+    only — per Part 32.5 Section 2 a launch is never confirmation; it
+    enters analysis only after independent market data exists.
+
+    Monetary values are SOL-denominated because the launch event carries
+    no USD conversion; converting with an assumed SOL price would be
+    fabrication (Rule 8).
+    """
+
+    token: TokenIdentity          # chain="solana", address=mint
+    source: str                   # e.g. "pumpportal"
+    launchpad: str | None = None  # provider pool id, e.g. "pump", "bonk"
+    creator: str | None = None    # creator wallet (the launch transaction signer)
+    created_at: datetime | None = None
+    initial_buy_tokens: float | None = None    # creator dev-buy, token units
+    initial_buy_sol: float | None = None       # creator dev-buy, SOL spent
+    initial_buy_percent: float | None = None   # dev-buy as % of total supply (0-100)
+    market_cap_sol: float | None = None        # implied market cap at creation
+    bonding_curve: str | None = None           # bonding curve account address
+    signature: str | None = None               # creation transaction signature
+
+
+@dataclass(frozen=True)
+class PumpFunCoinState:
+    """Traction snapshot of one launchpad token (Spec Part 32.5 Sections 3/8).
+
+    Normalized from the Pump.fun frontend API by the launch monitor's
+    recheck pass to judge whether a tracked launch shows the "evidence of
+    organic interest / increasing attention" Section 8 requires before
+    deep analysis. Every field is optional — the frontend API is an
+    unofficial surface and absent fields must stay observable (Rule 8).
+    """
+
+    token: TokenIdentity
+    source: str
+    fetched_at: datetime
+    market_cap_sol: float | None = None
+    usd_market_cap: float | None = None
+    reply_count: int | None = None             # community comments on the coin page
+    complete: bool | None = None               # bonding curve finished (graduated)
+    curve_progress_percent: float | None = None  # 0-100, derived from curve reserves
+    is_banned: bool | None = None
+    nsfw: bool | None = None
+    created_at: datetime | None = None
+    last_trade_at: datetime | None = None
+    ath_market_cap_sol: float | None = None
+    creator: str | None = None
+
+
+@dataclass(frozen=True)
 class SecurityProfile:
     """Normalized contract-security facts about one token (Spec Parts 4/18/33).
 
@@ -116,6 +170,7 @@ class SecurityProfile:
     # Developer (Part 4 Section 8)
     creator_percent: float | None = None
     owner_percent: float | None = None
+    creator_address: str | None = None  # deployer wallet (feeds reputation checks)
 
     # Liquidity safety (Part 4 Section 4; USD depth comes from market data)
     lp_locked_percent: float | None = None

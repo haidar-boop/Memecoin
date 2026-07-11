@@ -21,6 +21,7 @@ See ``.env.example`` at the repository root for the full list of variables.
 from __future__ import annotations
 
 import dataclasses
+import math
 import os
 from dataclasses import dataclass, field
 from typing import Any, Mapping
@@ -38,7 +39,10 @@ def _check_range(name: str, value: float, low: float, high: float) -> None:
 
 def _check_weight_sum(group: str, values: Mapping[str, float]) -> None:
     total = sum(values.values())
-    if abs(total - 1.0) > _WEIGHT_SUM_TOLERANCE:
+    # A NaN weight makes `abs(nan - 1.0) > tolerance` False (NaN comparisons
+    # are always False), silently passing an invalid config — check
+    # finiteness explicitly rather than relying on the comparison to catch it.
+    if not math.isfinite(total) or abs(total - 1.0) > _WEIGHT_SUM_TOLERANCE:
         detail = ", ".join(f"{k}={v}" for k, v in values.items())
         raise ConfigurationError(f"{group} weights must sum to 1.0, got {total} ({detail})")
 
@@ -68,12 +72,20 @@ class ScoringWeights:
 
 @dataclass(frozen=True)
 class SecuritySubWeights:
-    """Sub-weights inside the security score (Part 33, Section 10)."""
+    """Sub-weights inside the security score (Part 33, Section 11).
+
+    Match Part 33 Section 11's literal rug-risk weighting exactly (Rule 1 —
+    the spec is the source of truth): Contract Safety /25, Liquidity Safety
+    /20, Developer Safety /20, Distribution Safety /20, Social Authenticity
+    (manipulation) /15. An earlier build shipped liquidity 0.25 / developer
+    0.15, which matched neither the spec nor its own handoff note; corrected
+    here during the Parts 20-33 verification pass.
+    """
 
     contract: float = 0.25
-    liquidity: float = 0.25
+    liquidity: float = 0.20
     distribution: float = 0.20
-    developer: float = 0.15
+    developer: float = 0.20
     manipulation: float = 0.15
 
     def __post_init__(self) -> None:
@@ -152,10 +164,49 @@ class AlertThresholds:
     onchain: float = 75.0
     overall: float = 85.0
     momentum: float = 70.0  # momentum score gate for momentum alerts (Part 15, Section 5)
+    # A fresh launch (pump.fun-era) can pass security/on-chain/liquidity
+    # with data but has no CoinGecko community data for days — so it never
+    # hits the "every gate verified" HIGH tier. When such a token clears
+    # THIS raised overall bar with every measurable gate passing, it earns
+    # a HIGH "strong candidate" alert (community explicitly unverified),
+    # so a genuinely strong launch still reaches the operator (Part 2 S4;
+    # Rule 8 — the missing gate is named, never assumed passed).
+    strong_candidate_overall: float = 88.0
+    # Depth veto: the "liquidity" gate scores lock SAFETY, not pool depth, so
+    # a $16k pool could clear every gate and fire a HIGH alert while being
+    # trivially manipulable. Below this absolute USD depth (or with unknown
+    # liquidity — Rule 8), a strong candidate downgrades to MEDIUM.
+    strong_candidate_min_liquidity_usd: float = 25000.0
+    # AI veto: when an AI verification ran, a lukewarm judgment (confidence
+    # below this) downgrades the alert instead of riding along as a footnote.
+    # No AI configured -> no veto (Rule 9 — degrade gracefully).
+    strong_candidate_min_ai_confidence: float = 40.0
+    # Copycat veto (free screen before any HIGH opportunity alert): a fresh
+    # token whose symbol/name duplicates an ESTABLISHED token — one with at
+    # least ``copycat_min_liquidity_usd`` of liquidity AND at least
+    # ``copycat_liquidity_ratio`` times the candidate's — is likely a
+    # knock-off farming that name, and the alert downgrades to MEDIUM with
+    # the duplicate named. Two small coins sharing a symbol never fire this
+    # (symbols collide constantly); only a large size gap is evidence.
+    copycat_veto_enabled: bool = True
+    copycat_liquidity_ratio: float = 10.0
+    copycat_min_liquidity_usd: float = 100000.0
 
     def __post_init__(self) -> None:
-        for name, value in dataclasses.asdict(self).items():
-            _check_range(f"alert threshold '{name}'", value, 0.0, 100.0)
+        for name in ("security", "community", "liquidity", "onchain", "overall",
+                     "momentum", "strong_candidate_overall",
+                     "strong_candidate_min_ai_confidence"):
+            _check_range(f"alert threshold '{name}'", getattr(self, name), 0.0, 100.0)
+        if self.strong_candidate_overall < self.overall:
+            raise ConfigurationError(
+                "strong_candidate_overall must be >= overall "
+                f"({self.strong_candidate_overall} < {self.overall})")
+        for name in ("strong_candidate_min_liquidity_usd",
+                     "copycat_liquidity_ratio", "copycat_min_liquidity_usd"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value <= 0:
+                raise ConfigurationError(
+                    f"alert threshold '{name}' must be positive, got {value}")
 
 
 @dataclass(frozen=True)
@@ -169,7 +220,7 @@ class ScanIntervals:
 
     def __post_init__(self) -> None:
         for name, value in dataclasses.asdict(self).items():
-            if value <= 0:
+            if not math.isfinite(value) or value <= 0:
                 raise ConfigurationError(f"scan interval '{name}' must be positive, got {value}")
 
 
@@ -185,10 +236,23 @@ class HttpSettings:
     cache_max_entries: int = 2048
 
     def __post_init__(self) -> None:
-        if self.timeout_seconds <= 0:
+        if not math.isfinite(self.timeout_seconds) or self.timeout_seconds <= 0:
             raise ConfigurationError(f"timeout_seconds must be positive, got {self.timeout_seconds}")
         if self.retry_attempts < 1:
             raise ConfigurationError(f"retry_attempts must be >= 1, got {self.retry_attempts}")
+        # Previously unvalidated: a bad cache_ttl_seconds/cache_max_entries
+        # value reached TTLCache's constructor and raised a raw ValueError
+        # far from the setting that caused it; negative retry delays
+        # silently disabled backoff instead of erroring (Rule 6).
+        for name in ("retry_base_delay", "retry_max_delay", "cache_ttl_seconds"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value <= 0:
+                raise ConfigurationError(f"http setting '{name}' must be positive, got {value}")
+        if self.cache_max_entries < 1:
+            raise ConfigurationError(
+                f"cache_max_entries must be >= 1, got {self.cache_max_entries}")
+        if self.retry_max_delay < self.retry_base_delay:
+            raise ConfigurationError("retry_max_delay must be >= retry_base_delay")
 
 
 @dataclass(frozen=True)
@@ -212,16 +276,23 @@ class ProviderSettings:
     helius_requests_per_minute: float = 120.0         # free tier allows ~10 rps; stay far below
     birdeye_base_url: str = "https://public-api.birdeye.so"
     birdeye_requests_per_minute: float = 20.0         # free tier ~1 rps + monthly CU budget
+    pumpportal_ws_url: str = "wss://pumpportal.fun/api/data"  # free data WS (Part 32.5 S3)
+    pumpfun_base_url: str = "https://frontend-api-v3.pump.fun"  # unofficial; can change
+    pumpfun_requests_per_minute: float = 30.0         # no documented limit; stay conservative
     failure_threshold: int = 3      # consecutive failures before a provider cools down
     cooldown_seconds: float = 60.0  # how long an unhealthy provider is skipped
 
     def __post_init__(self) -> None:
         for name in ("dexscreener", "geckoterminal", "goplus", "coingecko",
-                     "helius", "birdeye"):
-            if getattr(self, f"{name}_requests_per_minute") <= 0:
+                     "helius", "birdeye", "pumpfun"):
+            value = getattr(self, f"{name}_requests_per_minute")
+            if not math.isfinite(value) or value <= 0:
                 raise ConfigurationError(f"{name}_requests_per_minute must be positive")
         if self.failure_threshold < 1:
             raise ConfigurationError("failure_threshold must be >= 1")
+        if not math.isfinite(self.cooldown_seconds) or self.cooldown_seconds <= 0:
+            raise ConfigurationError(
+                f"cooldown_seconds must be positive, got {self.cooldown_seconds}")
 
 
 @dataclass(frozen=True)
@@ -241,12 +312,63 @@ class DiscoverySettings:
 
     def __post_init__(self) -> None:
         for name, value in dataclasses.asdict(self).items():
-            if value <= 0:
+            if not math.isfinite(value) or value <= 0:
                 raise ConfigurationError(f"discovery setting '{name}' must be positive, got {value}")
         if self.target_liquidity_usd < self.min_liquidity_usd:
             raise ConfigurationError("target_liquidity_usd must be >= min_liquidity_usd")
         if self.target_volume_24h_usd < self.min_volume_24h_usd:
             raise ConfigurationError("target_volume_24h_usd must be >= min_volume_24h_usd")
+
+
+@dataclass(frozen=True)
+class PumpFunSettings:
+    """Pump.fun early-launch discovery (Part 32.5 Section 3).
+
+    Launch events arrive over the free PumpPortal WebSocket; tracked
+    launches are rechecked against the Pump.fun frontend API and promoted
+    into the normal analysis pipeline only after meeting the Section 8
+    deep-analysis threshold AND being confirmed by an independent market
+    data source (Section 2 — discovery is never confirmation).
+
+    "The system must not alert on every new launch. Most launches should
+    be filtered out." (Section 3) — the defaults below are deliberately
+    strict; loosen only with data showing they drop real opportunities.
+    """
+
+    enable_in_monitor: bool = False           # opt-in for the continuous scanner
+    launchpads: str = "pump"                  # comma-separated accepted pool ids from the stream
+    max_creator_buy_percent: float = 20.0     # basic filter: bigger dev-buy = insider grab
+    max_pending: int = 500                    # bounded launch-tracking memory
+    pending_ttl_hours: float = 24.0           # drop unpromoted launches after this window
+    recheck_interval_seconds: float = 120.0   # per-token traction recheck cadence (Section 5)
+    max_rechecks_per_cycle: int = 8           # frontend-API budget per scanner cycle (Rule 11)
+    min_market_cap_growth_ratio: float = 1.5  # SOL mcap vs launch mcap = "increasing attention"
+    min_usd_market_cap: float = 10000.0       # promotion gate: evidence of real buying
+    min_reply_count: int = 5                  # promotion gate: community interest exists
+    max_last_trade_age_minutes: float = 30.0  # promotion gate: still actively trading
+    # A promoted (READY) candidate whose market confirmation never succeeds is
+    # dropped after this window — longer than pending_ttl_hours because market
+    # indexing can lag, but bounded so dead bonding-curve tokens can't retry
+    # forever, hammer providers, and exhaust max_pending slots (Rules 7/11).
+    ready_ttl_hours: float = 72.0
+
+    @property
+    def launchpad_list(self) -> list[str]:
+        return [pool.strip() for pool in self.launchpads.split(",") if pool.strip()]
+
+    def __post_init__(self) -> None:
+        for name in ("max_creator_buy_percent", "max_pending", "pending_ttl_hours",
+                     "recheck_interval_seconds", "max_rechecks_per_cycle",
+                     "min_market_cap_growth_ratio", "min_usd_market_cap",
+                     "min_reply_count", "max_last_trade_age_minutes",
+                     "ready_ttl_hours"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value <= 0:
+                raise ConfigurationError(f"pumpfun setting '{name}' must be positive")
+        if self.max_creator_buy_percent > 100.0:
+            raise ConfigurationError("max_creator_buy_percent must be within (0, 100]")
+        if not self.launchpad_list:
+            raise ConfigurationError("pumpfun launchpads must name at least one pool")
 
 
 @dataclass(frozen=True)
@@ -273,7 +395,7 @@ class SecurityThresholds:
 
     def __post_init__(self) -> None:
         for name, value in dataclasses.asdict(self).items():
-            if value <= 0:
+            if not math.isfinite(value) or value <= 0:
                 raise ConfigurationError(f"security threshold '{name}' must be positive, got {value}")
         if self.extreme_tax_percent < self.max_tax_percent:
             raise ConfigurationError("extreme_tax_percent must be >= max_tax_percent")
@@ -327,7 +449,7 @@ class TokenThresholds:
 
     def __post_init__(self) -> None:
         for name, value in dataclasses.asdict(self).items():
-            if value <= 0:
+            if not math.isfinite(value) or value <= 0:
                 raise ConfigurationError(f"token threshold '{name}' must be positive, got {value}")
         if self.early_stage_mcap_usd >= self.mature_stage_mcap_usd:
             raise ConfigurationError("early_stage_mcap_usd must be below mature_stage_mcap_usd")
@@ -356,12 +478,109 @@ class TradingSettings:
 
     def __post_init__(self) -> None:
         for name, value in dataclasses.asdict(self).items():
-            if value <= 0:
+            if not math.isfinite(value) or value <= 0:
                 raise ConfigurationError(f"trading setting '{name}' must be positive, got {value}")
         if self.medium_conviction_min_score >= self.high_conviction_min_score:
             raise ConfigurationError("medium_conviction_min_score must be below high_conviction_min_score")
         if not (0 < self.min_confirmation_coverage <= 1):
             raise ConfigurationError("min_confirmation_coverage must be within (0, 1]")
+
+
+@dataclass(frozen=True)
+class AISettings:
+    """AI reasoning layer configuration (Part 23; Part 22 Section 11).
+
+    The layer activates only when ``anthropic_api_key`` is set on
+    :class:`Settings` (Rule 16 — key from the environment). Rate limiting
+    is deliberately conservative (Rule 11), and the layer never runs in
+    the continuous scanner unless explicitly enabled (Rule 10 — expensive
+    analysis only after filtering).
+    """
+
+    model: str = "claude-opus-4-8"
+    max_tokens: int = 4096
+    effort: str = "high"                 # low | medium | high | xhigh | max
+    requests_per_minute: float = 10.0
+    timeout_seconds: float = 120.0       # judgments can take a while at high effort
+    min_confidence: float = 20.0         # below this the judgment is discarded (Part 23 S6)
+    enable_in_monitor: bool = False      # AI judges EVERY analyzed token (expensive)
+    # Part 32.5 Section 8 middle mode: one AI judgment only when a token
+    # passes ALL review gates (high-priority opportunity), re-scored before
+    # the alert dispatches — deep analysis strictly after initial
+    # requirements. Gate-passing tokens are rare, so cost stays near zero.
+    verify_opportunities: bool = True
+    # Credit conservation: a paid verification call is the LAST check, never
+    # the first. If the deterministic rug engine scores at/above this before
+    # the call, the call is skipped (the alert is downgraded instead). The
+    # smallest signal weight is 10, so the default means ANY fired rug signal
+    # blocks the spend; raise it to tolerate weak signals.
+    verify_skip_rug_score: float = 10.0
+
+    def __post_init__(self) -> None:
+        if self.model.strip() == "":
+            raise ConfigurationError("ai model must be non-empty")
+        if self.effort not in ("low", "medium", "high", "xhigh", "max"):
+            raise ConfigurationError(f"ai effort must be a valid level, got {self.effort!r}")
+        for name in ("max_tokens", "requests_per_minute", "timeout_seconds"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value <= 0:
+                raise ConfigurationError(f"ai setting '{name}' must be positive")
+        _check_range("ai min_confidence", self.min_confidence, 0.0, 100.0)
+        _check_range("ai verify_skip_rug_score", self.verify_skip_rug_score, 0.0, 100.0)
+
+
+@dataclass(frozen=True)
+class BacktestSettings:
+    """Backtesting & self-improvement thresholds (Part 24).
+
+    A positive prediction (Elite/Strong Candidate) counts as successful when
+    the best measured window gains ``success_price_change_percent``; it
+    counts as failed at ``failure_price_change_percent`` or token death
+    (liquidity under ``survival_min_liquidity_usd``). An Avoid call is
+    graded with the same thresholds inverted. Everything in between stays
+    honestly "undetermined" (Rule 8 — one week of sideways price proves
+    nothing either way).
+    """
+
+    windows_hours: str = "1,24,168,720"      # 1h / 24h / 7d / 30d (Part 24 S2)
+    window_tolerance_fraction: float = 0.35  # snapshot within +/-35% of the window counts
+    success_price_change_percent: float = 50.0
+    failure_price_change_percent: float = -50.0
+    survival_min_liquidity_usd: float = 1000.0
+    signal_high_score: float = 70.0          # "high" bucket for signal analysis (S6)
+    signal_low_score: float = 50.0           # below this = "low" bucket
+    alert_useful_drift_points: float = 10.0  # score drift that labels an alert useful (S12/29)
+    alert_outcome_min_hours: float = 24.0    # alerts younger than this stay unlabeled
+    min_predictions_for_weights: int = 10    # weight experiments need a real sample (S1)
+
+    def __post_init__(self) -> None:
+        windows = [w.strip() for w in self.windows_hours.split(",") if w.strip()]
+        if not windows:
+            raise ConfigurationError("backtest windows_hours must be non-empty")
+        try:
+            parsed = [float(w) for w in windows]
+        except ValueError as exc:
+            raise ConfigurationError(f"invalid backtest window: {exc}") from exc
+        if (any(not math.isfinite(w) or w <= 0 for w in parsed)
+                or parsed != sorted(parsed)):
+            raise ConfigurationError("backtest windows must be positive and ascending")
+        if not (0 < self.window_tolerance_fraction < 1):
+            raise ConfigurationError("window_tolerance_fraction must be within (0, 1)")
+        if self.success_price_change_percent <= 0:
+            raise ConfigurationError("success_price_change_percent must be positive")
+        if self.failure_price_change_percent >= 0:
+            raise ConfigurationError("failure_price_change_percent must be negative")
+        if self.signal_low_score >= self.signal_high_score:
+            raise ConfigurationError("signal_low_score must be below signal_high_score")
+        for name in ("survival_min_liquidity_usd", "alert_useful_drift_points",
+                     "alert_outcome_min_hours", "min_predictions_for_weights"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value <= 0:
+                raise ConfigurationError(f"backtest setting '{name}' must be positive")
+
+    @property
+    def window_list(self) -> list[float]:
+        return [float(w.strip()) for w in self.windows_hours.split(",") if w.strip()]
 
 
 @dataclass(frozen=True)
@@ -392,14 +611,18 @@ class WorkflowSettings:
     monitor_interval_seconds: float = 45.0    # continuous-scanner cycle cadence (fast layer)
     watchlist_recheck_cycles: int = 10        # re-check tracked tokens every N cycles
                                               # (secondary cadence, Part 15 Section 2)
+    max_tracked_keys: int = 50000             # cap on the scanner's in-memory dedupe /
+                                              # verified caches (bounds weeks-long memory)
 
     def __post_init__(self) -> None:
         if not self.networks.strip():
             raise ConfigurationError("workflow networks must be non-empty")
         for name in ("top_candidates", "watchlist_review_limit",
                      "risk_on_btc_change_percent", "risk_off_btc_drop_percent",
-                     "monitor_interval_seconds", "watchlist_recheck_cycles"):
-            if getattr(self, name) <= 0:
+                     "monitor_interval_seconds", "watchlist_recheck_cycles",
+                     "max_tracked_keys"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value <= 0:
                 raise ConfigurationError(f"workflow setting '{name}' must be positive")
 
     @property
@@ -443,11 +666,17 @@ class WalletIntelSettings:
     def __post_init__(self) -> None:
         for name in ("whale_min_percent", "risk_whale_percent", "top_holders_limit",
                      "recent_trades_limit", "target_accumulating_wallets"):
-            if getattr(self, name) <= 0:
+            value = getattr(self, name)
+            if not math.isfinite(value) or value <= 0:
                 raise ConfigurationError(f"wallet setting '{name}' must be positive")
         for name in ("artificial_same_size_fraction", "dominant_buyer_volume_fraction"):
             if not (0 < getattr(self, name) <= 1):
                 raise ConfigurationError(f"wallet setting '{name}' must be within (0, 1]")
+        if (not math.isfinite(self.min_buy_volume_for_dominance_usd)
+                or self.min_buy_volume_for_dominance_usd <= 0):
+            raise ConfigurationError(
+                "wallet setting 'min_buy_volume_for_dominance_usd' must be positive, "
+                f"got {self.min_buy_volume_for_dominance_usd}")
 
 
 @dataclass(frozen=True)
@@ -464,6 +693,28 @@ class MomentumSubWeights:
 
 
 @dataclass(frozen=True)
+class OpportunityWeights:
+    """Watchlist opportunity-ranking weights (Part 28, Section 5).
+
+    A SECOND, upside-tilted ranking axis, distinct from the Part 31-locked
+    master score: it decides which tracked tokens deserve attention/recheck
+    priority, and never changes the master score or its Elite/Strong/Avoid
+    classification. Literal Section 5 weights:
+    Growth Potential 30 / Current Momentum 25 / Foundation Quality 20 /
+    Risk Level 15 / Timing 10.
+    """
+
+    growth_potential: float = 0.30
+    momentum: float = 0.25
+    foundation: float = 0.20
+    risk: float = 0.15
+    timing: float = 0.10
+
+    def __post_init__(self) -> None:
+        _check_weight_sum("opportunity", dataclasses.asdict(self))
+
+
+@dataclass(frozen=True)
 class MomentumThresholds:
     """Momentum analysis anchors (Parts 14 and 26)."""
 
@@ -477,7 +728,7 @@ class MomentumThresholds:
 
     def __post_init__(self) -> None:
         for name, value in dataclasses.asdict(self).items():
-            if value <= 0:
+            if not math.isfinite(value) or value <= 0:
                 raise ConfigurationError(f"momentum threshold '{name}' must be positive, got {value}")
         if self.volume_fade_ratio >= self.volume_acceleration_ratio:
             raise ConfigurationError("volume_fade_ratio must be below volume_acceleration_ratio")
@@ -489,11 +740,57 @@ class AlertEngineSettings:
 
     cooldown_seconds: float = 900.0  # same token+type alert suppressed within this window
     score_drop_review_points: float = 15.0  # score drop vs last snapshot triggering review
+    # Below this, liquidity has collapsed and the token is treated as dead:
+    # one MEDIUM post-mortem replaces the HIGH warning/score-drop pair, and
+    # the token is archived instead of re-warned every recheck (Part 29
+    # Section 1 — alerts exist to protect decisions, and there is no
+    # decision left to protect on a completed rug).
+    dead_liquidity_usd: float = 500.0
+    # Interest gate (Part 29 Section 1 — alerts exist to protect DECISIONS).
+    # The scanner never trades and the operator only learns about tokens
+    # through HIGH opportunity alerts, so a risk warning / score drop /
+    # emergency on a token that never earned one protects no decision: it is
+    # background telemetry about garbage dying, not actionable intelligence.
+    # When enabled, protective alerts on such tokens are demoted to LOW
+    # priority — still logged and recorded in alert history, but below every
+    # external sink's minimum priority, so the phone stays quiet.
+    risk_alerts_require_interest: bool = True
 
     def __post_init__(self) -> None:
         for name, value in dataclasses.asdict(self).items():
-            if value <= 0:
+            if isinstance(value, bool):
+                continue  # switches are not magnitudes — positivity is meaningless
+            if not math.isfinite(value) or value <= 0:
                 raise ConfigurationError(f"alert setting '{name}' must be positive, got {value}")
+
+
+@dataclass(frozen=True)
+class AlertDeliverySettings:
+    """External alert delivery (Part 29, Section 8).
+
+    Sinks activate only when their secrets exist on :class:`Settings`
+    (telegram_bot_token + telegram_chat_id; discord_webhook_url).
+    ``*_routes`` optionally split Section 8's channel categories
+    (discoveries / smart_money / security / momentum / reports) across
+    destinations: ``"security=-100123,momentum=-100456"``. External sinks
+    deliver ``external_min_priority`` and above so phones only buzz for
+    decision-relevant alerts (Section 1); the console still shows all.
+    """
+
+    telegram_routes: str = ""     # category=chat_id[,category=chat_id...]
+    discord_routes: str = ""      # category=webhook_url[,...]
+    external_min_priority: str = "medium"  # critical | high | medium | low
+    requests_per_minute: float = 20.0      # per external sink (Rule 11)
+
+    def __post_init__(self) -> None:
+        if self.external_min_priority not in ("critical", "high", "medium", "low"):
+            raise ConfigurationError(
+                f"external_min_priority must be a valid priority, got {self.external_min_priority!r}")
+        if not math.isfinite(self.requests_per_minute) or self.requests_per_minute <= 0:
+            raise ConfigurationError(
+                f"requests_per_minute must be positive, got {self.requests_per_minute}")
+        if self.requests_per_minute <= 0:
+            raise ConfigurationError("alert delivery requests_per_minute must be positive")
 
 
 @dataclass(frozen=True)
@@ -530,7 +827,7 @@ class RiskSettings:
 
     def __post_init__(self) -> None:
         for name, value in dataclasses.asdict(self).items():
-            if value <= 0:
+            if not math.isfinite(value) or value <= 0:
                 raise ConfigurationError(f"risk setting '{name}' must be positive, got {value}")
         if self.reduced_daily_loss_percent >= self.defensive_daily_loss_percent:
             raise ConfigurationError("reduced_daily_loss_percent must be below defensive_daily_loss_percent")
@@ -559,8 +856,57 @@ class CommunityThresholds:
 
     def __post_init__(self) -> None:
         for name, value in dataclasses.asdict(self).items():
-            if value <= 0:
+            if not math.isfinite(value) or value <= 0:
                 raise ConfigurationError(f"community threshold '{name}' must be positive, got {value}")
+
+
+@dataclass(frozen=True)
+class ViralSubWeights:
+    """Sub-weights inside the viral potential score (Part 19, Section 3 — 5 x 20)."""
+
+    memorability: float = 0.20
+    shareability: float = 0.20
+    emotional_impact: float = 0.20
+    cultural_timing: float = 0.20
+    community_participation: float = 0.20
+
+    def __post_init__(self) -> None:
+        _check_weight_sum("viral", dataclasses.asdict(self))
+
+
+@dataclass(frozen=True)
+class NarrativeSubWeights:
+    """Sub-weights inside the narrative intelligence score (Part 19, Section 11 — 5 x 20)."""
+
+    meme_strength: float = 0.20
+    cultural_timing: float = 0.20
+    viral_potential: float = 0.20
+    community_creativity: float = 0.20
+    long_term_strength: float = 0.20
+
+    def __post_init__(self) -> None:
+        _check_weight_sum("narrative", dataclasses.asdict(self))
+
+
+@dataclass(frozen=True)
+class NarrativeThresholds:
+    """Narrative-analysis anchors (Part 19, Section 6).
+
+    Sentiment above ``positive_sentiment_percent`` classifies POSITIVE,
+    below ``negative_sentiment_percent`` classifies NEGATIVE, in between
+    NEUTRAL.
+    """
+
+    positive_sentiment_percent: float = 60.0
+    negative_sentiment_percent: float = 40.0
+
+    def __post_init__(self) -> None:
+        for name, value in dataclasses.asdict(self).items():
+            _check_range(f"narrative threshold '{name}'", value, 0.0, 100.0)
+        if self.negative_sentiment_percent >= self.positive_sentiment_percent:
+            raise ConfigurationError(
+                "negative_sentiment_percent must be below positive_sentiment_percent"
+            )
 
 
 @dataclass(frozen=True)
@@ -579,12 +925,209 @@ class OnChainThresholds:
 
     def __post_init__(self) -> None:
         for name, value in dataclasses.asdict(self).items():
-            if value <= 0:
+            if not math.isfinite(value) or value <= 0:
                 raise ConfigurationError(f"on-chain threshold '{name}' must be positive, got {value}")
         if self.wash_trades_per_trader <= self.healthy_trades_per_trader:
             raise ConfigurationError("wash_trades_per_trader must exceed healthy_trades_per_trader")
         if not (0 < self.buy_ratio_weak < self.buy_ratio_strong < 1):
             raise ConfigurationError("buy ratios must satisfy 0 < weak < strong < 1")
+
+
+@dataclass(frozen=True)
+class LearningSettings:
+    """Self-learning "mind" layer configuration (analog + model + rug).
+
+    Every threshold, horizon, neighbor count, half-life, and retrain cadence
+    the mind layer uses lives here so nothing is hardcoded (Rule 17). All
+    time-decay half-lives are expressed in days; horizons in hours.
+
+    ``horizons_hours`` is a comma-separated list rather than a scalar so it
+    can still be overridden by a single ``MEMEINTEL_LEARNING_HORIZONS_HOURS``
+    env var (the config loader only understands scalar fields); it is parsed
+    into a tuple of floats by :meth:`horizon_hours`.
+    """
+
+    enabled: bool = False              # opt-in; off by default (Rule 11 — extra work)
+    enable_in_monitor: bool = False    # feed the 24/7 scanner into the mind layer
+
+    # Outcome label buckets (return %, relative to detection price) — Section 1
+    pump_return_percent: float = 50.0        # >= this at a horizon -> PUMP
+    dump_return_percent: float = -50.0       # <= this -> DUMP (else FLAT)
+    horizons_hours: str = "0.25,1,6,24"      # +15m / +1h / +6h / +24h
+
+    # Analog / FAISS k-NN forecasting — Section 3
+    knn_neighbors: int = 25                  # k
+    recency_half_life_days: float = 30.0     # neighbor recency decay half-life
+    min_analog_neighbors: int = 5            # below this the analog vote abstains
+
+    # Archetype clustering + novelty — Section 3
+    archetype_min_cluster_size: int = 15     # HDBSCAN min_cluster_size
+    novelty_percentile: float = 90.0         # novelty at/above this flags "new pattern"
+
+    # LightGBM warm-start classifier — Section 4
+    retrain_every_n: int = 200               # warm-start after N newly resolved coins
+    model_half_life_days: float = 30.0       # sample time-decay half-life
+    min_train_samples: int = 50              # below this the classifier abstains
+
+    # Adaptive ensemble — Section 6
+    accuracy_window: int = 200               # M: rolling window for source accuracy
+    min_ensemble_confidence: float = 0.0     # floor; kept configurable
+
+    # Continuous learning / drift — Section 7
+    drift_accuracy_floor: float = 0.40       # ensemble accuracy below -> full retrain
+    drift_min_samples: int = 30              # graded finals needed before drift can fire
+    scaler_refit_every_n: int = 500          # re-fit StandardScaler cadence
+
+    # Trajectory capture cadence — Section 1 (drives external snapshot callers)
+    fast_snapshot_seconds: int = 60          # snapshot cadence in the first window
+    fast_window_minutes: int = 60            # duration of the fast cadence
+    slow_snapshot_minutes: int = 60          # cadence after the fast window
+    capture_until_hours: float = 24.0        # stop capturing after this age
+
+    # Cold start — Section 11
+    min_snapshots_for_confidence: int = 3    # fewer snapshots -> low confidence
+    cold_start_samples: int = 100            # resolved coins below this = cold start
+
+    # Persistence — Section 9 (db + FAISS index + models live together)
+    state_dir: str = "learning_state"
+
+    def __post_init__(self) -> None:
+        if self.dump_return_percent >= self.pump_return_percent:
+            raise ConfigurationError(
+                "learning: dump_return_percent must be below pump_return_percent")
+        for name in ("knn_neighbors", "min_analog_neighbors",
+                     "retrain_every_n", "min_train_samples", "accuracy_window",
+                     "drift_min_samples", "scaler_refit_every_n",
+                     "fast_snapshot_seconds", "fast_window_minutes",
+                     "slow_snapshot_minutes", "min_snapshots_for_confidence",
+                     "cold_start_samples"):
+            value = getattr(self, name)
+            if value <= 0:
+                raise ConfigurationError(f"learning setting '{name}' must be positive, got {value}")
+        # HDBSCAN requires min_cluster_size >= 2; 1 is not a meaningful cluster
+        # size and would crash the archetype pass, so reject it at config time.
+        if self.archetype_min_cluster_size < 2:
+            raise ConfigurationError(
+                "learning archetype_min_cluster_size must be >= 2, got "
+                f"{self.archetype_min_cluster_size}")
+        for name in ("recency_half_life_days", "model_half_life_days", "capture_until_hours"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value <= 0:
+                raise ConfigurationError(f"learning setting '{name}' must be positive, got {value}")
+        _check_range("learning drift_accuracy_floor", self.drift_accuracy_floor, 0.0, 1.0)
+        _check_range("learning novelty_percentile", self.novelty_percentile, 0.0, 100.0)
+        _check_range("learning min_ensemble_confidence", self.min_ensemble_confidence, 0.0, 1.0)
+        if not self.horizon_hours():
+            raise ConfigurationError("learning: horizons_hours must list at least one horizon")
+
+    def horizon_hours(self) -> tuple[float, ...]:
+        """Parse ``horizons_hours`` into an ordered tuple of positive floats."""
+        hours: list[float] = []
+        for piece in self.horizons_hours.split(","):
+            piece = piece.strip()
+            if not piece:
+                continue
+            try:
+                value = float(piece)
+            except ValueError as exc:
+                raise ConfigurationError(
+                    f"learning: invalid horizon {piece!r} in horizons_hours") from exc
+            if not math.isfinite(value) or value <= 0:
+                raise ConfigurationError(f"learning: horizon must be positive, got {value}")
+            hours.append(value)
+        return tuple(sorted(set(hours)))
+
+
+@dataclass(frozen=True)
+class LightGBMSettings:
+    """Hyperparameters for the warm-started outcome classifier (Section 4).
+
+    Kept small and configurable (Rule 17). ``full_retrain_rounds`` is the tree
+    budget for a from-scratch train; ``warm_start_rounds`` is how many trees
+    each warm-start adds on top of the prior model (``init_model``) so recent
+    data refines rather than replaces. Defaults are conservative for the small
+    datasets the layer starts with — deeper/greedier settings would overfit a
+    young dataset (Rule 8/21).
+    """
+
+    full_retrain_rounds: int = 120
+    warm_start_rounds: int = 30
+    learning_rate: float = 0.05
+    num_leaves: int = 31
+    min_child_samples: int = 5
+    # Rugs/pumps are rare next to flats; balanced weighting (sklearn's
+    # N / (n_classes_present * class_count) formula) stops the model from
+    # buying accuracy by always predicting the majority class.
+    balanced_class_weights: bool = True
+
+    def __post_init__(self) -> None:
+        for name in ("full_retrain_rounds", "warm_start_rounds", "num_leaves",
+                     "min_child_samples"):
+            value = getattr(self, name)
+            if value <= 0:
+                raise ConfigurationError(f"lightgbm setting '{name}' must be positive, got {value}")
+        if not (0.0 < self.learning_rate <= 1.0):
+            raise ConfigurationError(
+                f"lightgbm learning_rate must be in (0, 1], got {self.learning_rate}")
+
+
+@dataclass(frozen=True)
+class RugThresholds:
+    """Firing thresholds for the hard rug signals (Section 5a).
+
+    Separate from :class:`RugSignalWeights` (which sets how many points a fired
+    signal contributes): these decide *whether* each signal fires. All
+    configurable (Rule 17). Percentages are 0-100.
+    """
+
+    min_lp_locked_percent: float = 50.0        # below this -> "liquidity not locked"
+    top_holder_percent_max: float = 30.0       # single holder above -> concentration
+    top10_holder_percent_max: float = 70.0     # top 10 above -> concentration
+    liquidity_drop_percent: float = 50.0       # fall from peak -> "liquidity removed"
+    liquidity_removal_usd: float = 1000.0      # single LP-remove event magnitude
+    sell_tax_max_percent: float = 20.0         # sell tax at/above -> "high sell tax"
+    dev_dump_usd: float = 1000.0               # creator outflow at/above -> "dev dumping"
+    fake_volume_per_holder_usd: float = 5000.0  # volume/holder above -> "fake volume"
+    fake_volume_min_volume_usd: float = 1000.0  # only flag fake volume above this volume
+
+    def __post_init__(self) -> None:
+        for name in ("min_lp_locked_percent", "top_holder_percent_max",
+                     "top10_holder_percent_max", "liquidity_drop_percent",
+                     "sell_tax_max_percent"):
+            _check_range(f"rug threshold '{name}'", getattr(self, name), 0.0, 100.0)
+        for name in ("liquidity_removal_usd", "dev_dump_usd",
+                     "fake_volume_per_holder_usd", "fake_volume_min_volume_usd"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value <= 0:
+                raise ConfigurationError(f"rug threshold '{name}' must be positive, got {value}")
+
+
+@dataclass(frozen=True)
+class RugSignalWeights:
+    """Point contributions for each hard rug signal (Section 5a).
+
+    Unlike the framework's normalized category weights, these are additive
+    *points* summed into a 0-100 rug-risk score (clamped at 100). Higher
+    points = a stronger standalone rug indicator. Kept configurable (Rule 17)
+    and non-normalized on purpose — the spec sums signals to a score rather
+    than averaging them.
+    """
+
+    liquidity_unlocked: float = 20.0         # LP not locked / lock expiring soon
+    mint_authority_active: float = 20.0      # owner can print supply
+    freeze_authority_active: float = 15.0    # owner can freeze holders
+    top_holder_concentration: float = 15.0   # single/cluster holds large supply %
+    liquidity_removed: float = 30.0          # real-time LP burn/withdraw
+    unsellable: float = 30.0                 # honeypot / failed sell simulation
+    high_sell_tax: float = 15.0              # sell tax above threshold
+    dev_wallet_dumping: float = 20.0         # large creator outbound transfers
+    fake_volume: float = 10.0                # volume vs holder count (wash trading)
+    deployer_blacklisted: float = 25.0       # creator linked to prior rugs
+
+    def __post_init__(self) -> None:
+        for name, value in dataclasses.asdict(self).items():
+            if not math.isfinite(value) or value < 0:
+                raise ConfigurationError(f"rug signal weight '{name}' must be >= 0, got {value}")
 
 
 @dataclass(frozen=True)
@@ -599,6 +1142,7 @@ class Settings:
     http: HttpSettings = field(default_factory=HttpSettings)
     providers: ProviderSettings = field(default_factory=ProviderSettings)
     discovery: DiscoverySettings = field(default_factory=DiscoverySettings)
+    pumpfun: PumpFunSettings = field(default_factory=PumpFunSettings)
     security: SecurityThresholds = field(default_factory=SecurityThresholds)
     community: CommunityThresholds = field(default_factory=CommunityThresholds)
     onchain: OnChainThresholds = field(default_factory=OnChainThresholds)
@@ -615,15 +1159,33 @@ class Settings:
     workflow: WorkflowSettings = field(default_factory=WorkflowSettings)
     momentum: MomentumThresholds = field(default_factory=MomentumThresholds)
     momentum_weights: MomentumSubWeights = field(default_factory=MomentumSubWeights)
+    opportunity_weights: OpportunityWeights = field(default_factory=OpportunityWeights)
+    narrative: NarrativeThresholds = field(default_factory=NarrativeThresholds)
+    narrative_weights: NarrativeSubWeights = field(default_factory=NarrativeSubWeights)
+    viral_weights: ViralSubWeights = field(default_factory=ViralSubWeights)
     alert_engine: AlertEngineSettings = field(default_factory=AlertEngineSettings)
+    alert_delivery: AlertDeliverySettings = field(default_factory=AlertDeliverySettings)
     wallet: WalletIntelSettings = field(default_factory=WalletIntelSettings)
     smart_money_weights: SmartMoneySubWeights = field(default_factory=SmartMoneySubWeights)
+    ai: AISettings = field(default_factory=AISettings)
+    backtest: BacktestSettings = field(default_factory=BacktestSettings)
+    learning: LearningSettings = field(default_factory=LearningSettings)
+    lightgbm: LightGBMSettings = field(default_factory=LightGBMSettings)
+    rug_thresholds: RugThresholds = field(default_factory=RugThresholds)
+    rug_signal_weights: RugSignalWeights = field(default_factory=RugSignalWeights)
     log_level: str = "INFO"
     log_dir: str = "logs"
-    # API keys (Rule 16): read from MEMEINTEL_HELIUS_API_KEY / MEMEINTEL_BIRDEYE_API_KEY
-    # (or a local .env). Empty string = the wallet-intelligence layer stays off.
+    # API keys (Rule 16): read from MEMEINTEL_HELIUS_API_KEY / MEMEINTEL_BIRDEYE_API_KEY /
+    # MEMEINTEL_ANTHROPIC_API_KEY (or a local .env). Empty string = that layer stays off.
     helius_api_key: str = ""
     birdeye_api_key: str = ""
+    anthropic_api_key: str = ""
+    # Optional free demo key: raises CoinGecko's rate limit for community data.
+    coingecko_api_key: str = ""
+    # Alert delivery secrets (Part 29): sinks stay off while these are empty.
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+    discord_webhook_url: str = ""
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Settings":
@@ -638,6 +1200,7 @@ class Settings:
             http=_load_group(HttpSettings, "HTTP", env),
             providers=_load_group(ProviderSettings, "PROVIDERS", env),
             discovery=_load_group(DiscoverySettings, "DISCOVERY", env),
+            pumpfun=_load_group(PumpFunSettings, "PUMPFUN", env),
             security=_load_group(SecurityThresholds, "SECURITY", env),
             community=_load_group(CommunityThresholds, "COMMUNITY", env),
             onchain=_load_group(OnChainThresholds, "ONCHAIN", env),
@@ -654,13 +1217,29 @@ class Settings:
             workflow=_load_group(WorkflowSettings, "WORKFLOW", env),
             momentum=_load_group(MomentumThresholds, "MOMENTUM", env),
             momentum_weights=_load_group(MomentumSubWeights, "MOMENTUM_WEIGHTS", env),
+            opportunity_weights=_load_group(OpportunityWeights, "OPPORTUNITY_WEIGHTS", env),
+            narrative=_load_group(NarrativeThresholds, "NARRATIVE", env),
+            narrative_weights=_load_group(NarrativeSubWeights, "NARRATIVE_WEIGHTS", env),
+            viral_weights=_load_group(ViralSubWeights, "VIRAL_WEIGHTS", env),
             alert_engine=_load_group(AlertEngineSettings, "ALERT_ENGINE", env),
+            alert_delivery=_load_group(AlertDeliverySettings, "ALERT_DELIVERY", env),
             wallet=_load_group(WalletIntelSettings, "WALLET", env),
             smart_money_weights=_load_group(SmartMoneySubWeights, "SMART_MONEY_WEIGHTS", env),
+            ai=_load_group(AISettings, "AI", env),
+            backtest=_load_group(BacktestSettings, "BACKTEST", env),
+            learning=_load_group(LearningSettings, "LEARNING", env),
+            lightgbm=_load_group(LightGBMSettings, "LIGHTGBM", env),
+            rug_thresholds=_load_group(RugThresholds, "RUG_THRESHOLDS", env),
+            rug_signal_weights=_load_group(RugSignalWeights, "RUG_SIGNAL_WEIGHTS", env),
             log_level=env.get(f"{_ENV_PREFIX}_LOG_LEVEL", "INFO"),
             log_dir=env.get(f"{_ENV_PREFIX}_LOG_DIR", "logs"),
             helius_api_key=env.get(f"{_ENV_PREFIX}_HELIUS_API_KEY", ""),
             birdeye_api_key=env.get(f"{_ENV_PREFIX}_BIRDEYE_API_KEY", ""),
+            anthropic_api_key=env.get(f"{_ENV_PREFIX}_ANTHROPIC_API_KEY", ""),
+            coingecko_api_key=env.get(f"{_ENV_PREFIX}_COINGECKO_API_KEY", ""),
+            telegram_bot_token=env.get(f"{_ENV_PREFIX}_TELEGRAM_BOT_TOKEN", ""),
+            telegram_chat_id=env.get(f"{_ENV_PREFIX}_TELEGRAM_CHAT_ID", ""),
+            discord_webhook_url=env.get(f"{_ENV_PREFIX}_DISCORD_WEBHOOK_URL", ""),
         )
 
 
@@ -668,7 +1247,17 @@ def _convert(raw: str, default: Any, key: str) -> Any:
     """Convert an env string to the type of the field's default value."""
     try:
         if isinstance(default, bool):  # bool is a subclass of int; check first
-            return raw.strip().lower() in ("1", "true", "yes", "on")
+            normalized = raw.strip().lower()
+            if normalized in ("1", "true", "yes", "on"):
+                return True
+            if normalized in ("0", "false", "no", "off"):
+                return False
+            # An unrecognized string silently became False before this fix —
+            # a typo like "MEMEINTEL_AI_ENABLE_IN_MONITOR=treu" would quietly
+            # disable a feature the user meant to enable (Rule 6/13: fail
+            # loudly, don't guess). Numeric fields already raise on garbage;
+            # booleans should too.
+            raise ValueError(f"expected a boolean (true/false/yes/no/1/0/on/off), got {raw!r}")
         if isinstance(default, int):
             return int(raw)
         if isinstance(default, float):

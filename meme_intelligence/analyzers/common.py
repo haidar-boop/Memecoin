@@ -43,12 +43,20 @@ class SubScore:
     reported, not scored.
     """
 
-    def __init__(self, category: str):
+    def __init__(self, category: str, *, requires_signal: bool = False):
+        """``requires_signal=True`` opts a category out of the deduction-style
+        base-100 default: with no explicit :meth:`signal` call, ``score()``
+        returns ``None`` (unknown) rather than treating "no quality judgment,
+        only risk flags" as a fabricated perfect score (Rule 8). Deduction-
+        style analyzers (start at 100, subtract per finding) keep the
+        original default.
+        """
         self.category = category
         self.findings: list[Finding] = []
         self.unknowns: list[str] = []
         self.known_count = 0
         self._signals: list[float] = []
+        self._requires_signal = requires_signal
 
     def observe(self, field_name: str, value: object) -> bool:
         """Record whether a fact is known; returns True when it can be evaluated."""
@@ -70,6 +78,8 @@ class SubScore:
 
     def score(self) -> float | None:
         if self.known_count == 0:
+            return None
+        if self._requires_signal and not self._signals:
             return None
         base = sum(self._signals) / len(self._signals) if self._signals else 100.0
         total = base - sum(f.deduction for f in self.findings)

@@ -1,80 +1,57 @@
 # Handoff Folder — Meme Coin Intelligence System
 
-This folder is a complete snapshot of project state as of **2026-07-08**,
-written so that any developer (or a fresh AI session with no memory of
-prior conversations) can pick up exactly where this session left off.
+Complete project handoff as of **2026-07-10**, written so a fresh session
+(human or AI, with zero memory of prior conversations) can operate, debug,
+and extend the system without re-learning anything the hard way.
 
-## Start here
+**The system is LIVE**: Parts 1–33 + the Self-Learning Mind Layer are built,
+**626 tests pass**, and it runs 24/7 on the operator's droplet sending
+Telegram alerts. Branch: `claude/session-rules-preferences-kc71bf`.
 
-**[FULL_PROJECT_HANDOFF.md](./FULL_PROJECT_HANDOFF.md)** is the single
-portable handoff file — hand this one file to a new session and nothing
-else is required. It contains the 21 Project Rules and the complete
-original project specification (Parts 1–32.5), copied verbatim with no
-paraphrasing or added commentary mixed into the text. A short, clearly
-separated status preamble sits at the top of that file only.
+## Read in this order
 
-Everything else in this folder (below) is supplementary reference material
-that breaks the same information into smaller, topic-specific files.
+| # | File | What it gives you | Read when |
+|---|---|---|---|
+| 1 | **[PROJECT_RULES.md](./PROJECT_RULES.md)** | The 21 engineering rules, verbatim. Mandatory in every session, for every change. | Always, first |
+| 2 | **[OPERATOR.md](./OPERATOR.md)** | Who runs this, his constraints (phone-only, three budgets, agent caps), decisions already made | Always, second |
+| 3 | **[SESSION_HANDOFF.md](./SESSION_HANDOFF.md)** | Current state, recent fixes, open threads, first moves | Always, third |
+| 4 | **[ARCHITECTURE.md](./ARCHITECTURE.md)** | The mental model: package map, monitor loop, the full alert decision pipeline, learning layer, invariants that must never regress | Before touching code |
+| 5 | **[OPERATIONS.md](./OPERATIONS.md)** | Live-deployment runbook: update procedure, `.env` state, verification, troubleshooting | Before/after any deploy |
+| 6 | **[ROADMAP.md](./ROADMAP.md)** | **The agreed plan: 5 major upgrades**, fully specced, in build order + backlog | Before building anything new |
+| 7 | [STATUS.md](./STATUS.md) | Part-by-part build status, file by file — ground truth for "is X done?" | When checking coverage |
+| 8 | [DECISIONS_LOG.md](./DECISIONS_LOG.md) | Every architectural decision, spec-ambiguity resolution, and live-feedback tuning, with rationale | Before re-deciding anything |
+| 9 | [SETUP.md](./SETUP.md) | Fresh local install + full CLI reference | Setting up a dev machine |
+| 10 | [FULL_PROJECT_HANDOFF.md](./FULL_PROJECT_HANDOFF.md) + [next_steps/](./next_steps/) | The ORIGINAL specification, verbatim (rules + Parts 1–32.5). Historical source of truth for features. | When spec text is needed |
 
-## Read these in order
-
-1. **[STATUS.md](./STATUS.md)** — what has been built (Parts 1–18), file
-   by file, with test counts and what's been live-verified against real
-   APIs. This is the ground truth for "is X done?"
-2. **[SETUP.md](./SETUP.md)** — how to run the system locally: Python
-   setup, API keys, `.env`, the full CLI command list.
-3. **[DECISIONS_LOG.md](./DECISIONS_LOG.md)** — architectural decisions,
-   places where the spec was ambiguous or self-contradictory and how it
-   was resolved, and things intentionally deferred with the reason why.
-4. **[next_steps/](./next_steps/)** — the original project specification
-   text for every part **not yet built** (Parts 19–33), copied verbatim
-   from the source prompt, unmodified. See `next_steps/INDEX.md` for the
-   list. **These files are the literal spec, not a summary** — build
-   against them directly the same way Parts 1–18 were built.
+Note on `next_steps/`: those files are the verbatim spec for parts that were
+unbuilt when the folder was created — **almost all are now built**
+(STATUS.md is the ground truth). They are kept because Rule 1 makes the
+literal spec text the reference for any future rework.
 
 ## The one-paragraph summary
 
-This is a meme coin research/intelligence platform — **never an
-auto-trader** — built in Python 3.11 (async), SQLite, and a set of free
-and low-cost APIs (DexScreener, GeckoTerminal, GoPlus Security, CoinGecko,
-Helius, Birdeye). It discovers new token launches, screens them for
-security risk, scores them across seven weighted categories (security,
-community, on-chain/wallet behavior, foundation, momentum, narrative,
-timing), generates trade plans and full intelligence reports, tracks a
-tiered watchlist, runs as either a one-shot daily routine or a continuous
-24/7 scanner, and dispatches alerts (console today, Telegram/Discord
-planned). 18 of the ~33 specification parts are built, tested (274
-passing tests), and have been verified against live data.
+A meme-coin research and intelligence platform — **never an auto-trader; it
+never holds funds** — in Python 3.11 (async) + SQLite + free/low-cost APIs
+(DexScreener, GeckoTerminal, GoPlus, CoinGecko, Helius, Birdeye, pump.fun,
+optional Anthropic). It discovers new launches, screens security, scores
+across weighted categories, tracks a tiered watchlist, **learns from
+outcomes** (analog memory + classifier + rug engine + ensemble), and sends
+prioritized Telegram alerts filtered so the operator's phone buzzes only
+for vetted opportunities or trouble on coins it previously recommended.
+16 CLI commands; the 24/7 entry point is `monitor`.
+
+## What's next (the operator's chosen plan)
+
+The five upgrades in [ROADMAP.md](./ROADMAP.md), in order:
+**1)** Jupiter live sell-simulation rug check (free) · **2)** two-way
+Telegram control + feedback (free) · **3)** mind-layer P(rug) as an alert
+veto once its accuracy is proven (free) · **4)** read-only web dashboard
+(free) · **5)** paid Twitter/X social intelligence (only with his explicit
+cost approval).
 
 ## Where the code lives
 
-Repository: `haidar-boop/memecoin`
-Branch: `claude/large-prompt-review-l49wp1`
-Root: `/home/user/Memecoin` (or wherever this repo is cloned)
-
-## The 21 project rules (still in force)
-
-The original `PROJECT_RULES.md` governs how this codebase is built and
-must continue to be followed for all future work:
-
-1. Follow the specification; explain assumptions on ambiguity
-2. Build in small steps — one logical section per response
-3. Never break working code
-4. Modular design — one purpose per module
-5. Prioritize readability
-6. Production quality — handle errors, missing data, API failures, timeouts
-7. Build for reliability — crash recovery, retry logic, graceful shutdown
-8. Data before assumptions — no fabricated data, flag uncertainty
-9. Multi-source intelligence — never rely on one source when avoidable
-10. Efficient data collection — WebSockets/caching over polling, filter before expensive analysis
-11. Avoid API abuse — rate limiting, backoff, caching
-12. Keep performance high
-13. Log every important action
-14. Test every new feature; verify no regressions
-15. Document new modules, APIs, config, DB changes, architecture decisions
-16. Security — never expose API keys/secrets; env vars only
-17. Configuration — no hardcoding; config files/env vars
-18. Backward compatibility — extend, don't rewrite, unless there's a clear benefit
-19. Explain major architectural decisions (why, benefits, trade-offs)
-20. Ask before major changes when the spec is ambiguous or two valid paths exist
-21. Development mindset — reliable, maintainable, extensible; simple over clever
+Repository: `haidar-boop/Memecoin` · Branch:
+`claude/session-rules-preferences-kc71bf` · Implementation:
+`meme_intelligence/` · Tests: `tests/` · Deployment kit: `deploy/` ·
+Live host: the operator's DigitalOcean droplet (see OPERATIONS.md).

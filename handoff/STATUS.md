@@ -1,7 +1,11 @@
-# Build Status — Parts 1 through 18
+# Build Status — Parts 1 through 33 (built or verified-satisfied)
 
-**274 tests passing.** ~9,450 lines of source, ~4,150 lines of tests.
-13 commits on `claude/large-prompt-review-l49wp1`.
+**626 tests passing.** ~14,000 lines of source, ~8,000 lines of tests.
+Parts 20-33 completed a verification pass (see `next_steps/INDEX.md`);
+the only unbuilt items are the web dashboard and creator-history
+intelligence (data-source-blocked).
+Parts 1–18 were built on `claude/large-prompt-review-l49wp1`; Parts 19
+and 23 on `claude/handoff-folder-review-fuu9dq`.
 
 Legend: ✅ built and tested · 🟡 built partially (documented gap) ·
 ⏳ blocked on something outside the code (API key, data source that
@@ -65,10 +69,14 @@ The classification/scoring framework, config system, and logging.
 - `analyzers/foundation_analyzer.py` — `FoundationAnalyzer`: combines
   qualitative judgment slots (meme strength, narrative, brand, dev comms,
   long-term) with community quality
-- **Gap:** no live social-data collector (X/Twitter/Telegram/Discord/
-  Reddit APIs). `CommunityProfile` and the qualitative foundation slots
-  are ready to receive data — nothing is currently feeding them. This is
-  the single largest open gap in the system. See DECISIONS_LOG.md.
+- `collectors/market_data.py::CoinGeckoClient.get_community_profile()`
+  — free community data by contract address (telegram members, sentiment
+  votes, reddit activity), wired through the pipeline so the community
+  category, the fake-community red flag, and decision-tree Q3 run live.
+- **Gap (why still 🟡):** Twitter engagement, Discord, bot detection, and
+  growth rates aren't tracked by the free source; very new tokens aren't
+  listed on CoinGecko yet. Upgrade path: LunarCrush once the system
+  proves itself (user decision — see DECISIONS_LOG.md).
 
 ## Part 6 — On-Chain Intelligence & Wallet Behavior Analysis → ✅
 
@@ -247,10 +255,287 @@ The classification/scoring framework, config system, and logging.
 
 ---
 
+## Part 19 — Narrative Intelligence & Viral Potential Prediction Engine → 🟡
+
+- `analyzers/narrative_analyzer.py` — two Part 19 rubrics: the **viral
+  score** (§3: memorability / shareability / emotional impact / cultural
+  timing / community participation, 5×20%) and the **narrative
+  intelligence score** (§11: meme strength / cultural timing / viral
+  potential / community creativity / long-term strength, 5×20%). The
+  viral score feeds the intelligence score's `viral_potential` component;
+  the intelligence score fills the master framework's 15% `narrative`
+  category — the last empty slot in the Part 31 locked weighting.
+- `NarrativeInputs` — validated 0-100 qualitative judgment slots
+  (`FoundationInputs` pattern; the AI layer fills them later), plus
+  category (§2), life-cycle stage (§7), the three §10 risk flags, and
+  §9 viral catalysts (description + probability/impact grading).
+- Evidence-driven pieces: participation/creativity cross-fill from the
+  community engine's creativity sub-score; artificial-community verdict
+  zeroes participation (§5 organic-vs-artificial); stage timing signals
+  and distribution-risk findings (§7); sentiment classification (§6);
+  narrative risk Low/Medium/High/Unknown derived from the risk flags with
+  late-stage escalation (§10/§12); evidence-derived strengths/weaknesses
+  and the full §12 report format in `summary()`.
+- `core/enums.py` — `NarrativeCategory`, `NarrativeStage`,
+  `NarrativeRating` (Excellent/Strong/Average/Weak on the house
+  85/70/50 ladder), `NarrativeRisk`, `SentimentLabel`, `CatalystLevel`
+- `config/settings.py` — `NarrativeThresholds` (sentiment bands),
+  `NarrativeSubWeights`, `ViralSubWeights` (env groups
+  `MEMEINTEL_NARRATIVE*`, `MEMEINTEL_VIRAL_WEIGHTS_*`)
+- Wired through `ResearchPipeline.analyze_pair(narrative_inputs=...)`
+  (optional; without inputs the narrative category reports "no data"
+  exactly as before), `PipelineResult.narrative`, the report generator
+  (section + bull/bear bullets + opinion-changers), and the `report`/
+  `plan` CLI output. Snapshots already persist the narrative category
+  score via the `category_scores` JSON — no schema change.
+- **Gap (why 🟡):** nothing feeds the judgment slots automatically yet —
+  they await the AI layer (Part 23) and social collectors (same gap as
+  Part 5). §5 social-trend monitoring (mentions, search interest) and
+  §8/§9 automated competition/catalyst detection need those sources;
+  until then coverage/confidence report the missing evidence honestly.
+
+---
+
+## Part 23 — AI Agent Integration Blueprint & Intelligence Pipeline → 🟡
+
+- `ai/reasoning.py` — the LLM reasoning layer, live against the Anthropic
+  API (key verified). `AIJudgmentService.judge()` makes one structured-
+  output request per token (§4 prompt structure: role = the tested
+  `ANALYST_SYSTEM_PROMPT`, objective, §3 structured snapshot, rules
+  including the §9 bias warnings, JSON-schema output format) and returns
+  a validated `AIJudgment`: `FoundationInputs` + `NarrativeInputs`
+  (nullable slots — null over guessing, Rule 8), bull/bear evidence
+  bullets, and the §6 confidence score with its reason.
+- `build_intelligence_snapshot()` — condenses a `PipelineResult` into the
+  §3 token/market/security/community/wallets format; the model never sees
+  raw API payloads and is told exactly which sources are missing.
+- Validation is layered: API-level JSON schema → range/enum checks →
+  Part 16 banned-language guard → configurable confidence floor. Any
+  failure discards the judgment; the pipeline continues on deterministic
+  evidence (Rules 6/9).
+- `ResearchPipeline` runs the AI pass only after the deterministic chain,
+  skips destructive-security tokens entirely (Rule 10), fills whichever
+  foundation/narrative slots are empty (explicit analyst inputs win), and
+  re-scores through the Part 31 locked weighting. Off in the continuous
+  scanner unless `MEMEINTEL_AI_ENABLE_IN_MONITOR=true`.
+- §10 research modes (`fast_scan` / `standard` / `deep_investigation`)
+  select prompt depth; CLI: `report --ai [--ai-mode ...]`, `plan --ai`.
+- `config/settings.py::AISettings` — model (default `claude-opus-4-8`),
+  max tokens, effort, rate limit (Rule 11), timeout, confidence floor;
+  key via `MEMEINTEL_ANTHROPIC_API_KEY` only (Rule 16).
+- **Gaps (why 🟡):** §7 memory / §8 feedback loop ride on the snapshot
+  tables and activate as learning in Part 24; community judgment slots
+  stay thin until the social collectors exist (the model sees the gap and
+  lowers confidence — observed live).
+
+---
+
+## Part 29 — Real-Time Alert Intelligence & Notification System → 🟡
+
+- `alerts/sinks.py` — `TelegramSink` (bot API) and `DiscordSink`
+  (webhooks), built on the shared collector machinery (rate limit /
+  retry / timeout for free); delivery failures are logged and swallowed —
+  a dead messenger never stops the scanner (Rule 7). §8 channel
+  organization: every alert type maps to one of the five spec categories
+  (discoveries / smart_money / security / momentum / reports) with
+  optional per-category routing (`MEMEINTEL_ALERT_DELIVERY_*_ROUTES`);
+  external sinks deliver MEDIUM+ by default (§1 noise doctrine),
+  configurable.
+- `format_alert()` — the full §7 message format: §2 priority header,
+  token block, time detected, event summary, why it matters, evidence,
+  current scores, risk assessment (derived from the priority grading),
+  recommended monitoring. `AlertEvent` gained `why_it_matters` and
+  `detected_at` (stamped at dispatch).
+- §10 ranking — `rank_alert()`: impact 40% / confidence 30% / urgency
+  20% / novelty 10%; dispatch sends the most decision-relevant alert
+  first. Component scales are documented implementation choices.
+- §§11-12 — `alerts` table (every delivered alert, with score-at-alert);
+  `Storage.alert_history()` and `alert_performance()` (score drift after
+  each alert, per type — the measurement layer Part 24's learning loop
+  builds on). Wired into the continuous scanner.
+- Community rules went live with the collector: the opportunity gate now
+  reads the real community score (full HIGH qualification is finally
+  reachable), and a confirmed-fake community fires a `community_fake`
+  HIGH alert.
+- CLI: `alerts` (history + performance), `alerts --test` (synthetic
+  delivery check through every configured sink).
+- §§4-6 (filtering, confirmation, cooldown) were already built in Parts
+  13/15; §9's daily summary is Part 11's `DailyReport`.
+- **Interest gate (live-feedback tuning, 2026-07-10):** protective
+  alerts (risk_warning, score_drop_review, emergency_review, whale_exit,
+  insider_risk, community_fake, security_change, token_death) demote to
+  LOW on tokens that never earned a HIGH opportunity alert — the
+  operator was never pointed at them, so the warnings protect no
+  decision (§1). Still logged and recorded for grading; silent on the
+  phone. Config `MEMEINTEL_ALERT_ENGINE_RISK_ALERTS_REQUIRE_INTEREST`
+  (default true). See DECISIONS_LOG.md for the full rationale.
+- **Opportunity screens (live-feedback tuning, 2026-07-10):** every
+  HIGH opportunity alert must now clear two FREE deterministic screens
+  regardless of whether an Anthropic key is configured: the rug-engine
+  screen (previously reachable only through the AI-verification gate —
+  turning the key off silently unscreened HIGH alerts) and a new
+  copycat veto (`MarketDataService.search_pairs` + the
+  `_find_established_duplicate` rule: same symbol/name as a coin with
+  ≥$100k and ≥10× the candidate's liquidity → downgrade with the
+  original named). Config `MEMEINTEL_ALERTS_COPYCAT_*`. See
+  DECISIONS_LOG.md.
+- **Gap (why 🟡):** no Telegram bot token / Discord webhook configured
+  yet — sinks are built, tested against mocks, and activate the moment
+  `MEMEINTEL_TELEGRAM_BOT_TOKEN` + `MEMEINTEL_TELEGRAM_CHAT_ID` (or
+  `MEMEINTEL_DISCORD_WEBHOOK_URL`) land in `.env`. Verify with
+  `python -m meme_intelligence alerts --test`.
+
+---
+
+## Part 24 — Backtesting, Performance Tracking & Self-Improvement → 🟡
+
+- `analytics/backtesting.py` — the measurement loop. Every first snapshot
+  per token is the §3 *prediction record*; `refresh_outcomes()` measures
+  the §2 windows (1h/24h/7d/30d, configurable) preferring stored
+  snapshots near each window target and falling back to a live pair
+  fetch (a vanished pair records token death). Windows are never
+  measured early and never twice (§14).
+- Grading: positive calls (Elite/Strong) correct on +50% best-window,
+  incorrect on -50%/death; Avoid grades inverted; Watchlist/Speculative
+  stay ungraded (middle calls); sideways stays honestly undetermined
+  (Rule 8). Thresholds in `BacktestSettings` (env `MEMEINTEL_BACKTEST_*`).
+- §4 metrics (accuracy, opportunity detection, false-positive rate, risk
+  detection) with sample sizes everywhere (§1), split by classification,
+  market regime (§9 — snapshots now store the regime), and confidence
+  level (§12 calibration).
+- §6 signal performance (high-vs-low bucket outcome per category), §5
+  weight experiments (locked baseline vs security/community/narrative-
+  heavy variants; top-vs-bottom-half discrimination; refuses tiny
+  samples; **report-only under the Part 31 lock** — humans apply env
+  overrides and record them), §§7-8 failure/success signal patterns,
+  §11 `record_strategy_change()` journal.
+- Part 29 bridge: `label_alert_outcomes()` fills `alerts.outcome`
+  (useful / noise / correct_warning) from measured score drift.
+- Storage: `outcomes` table; snapshots gained price/liquidity/mcap/regime
+  columns via `_migrate()` (old databases upgrade in place, Rule 18);
+  every snapshot call site now records market facts.
+- CLI: `backtest` (grade + report), `backtest --refresh` (measure due
+  windows via live market data).
+- **Gap (why 🟡):** measurements need elapsed time — judgments become
+  meaningful only after `monitor`/`daily` have run for days-to-weeks
+  (§1: hundreds of examples). §10's rule-adjustment step stays human-in-
+  the-loop by design.
+
+## Part 32.5 — Multi-Source Discovery & Anti-Throttling (Pump.fun §3) → ✅
+
+- `collectors/pumpfun.py` — `PumpPortalClient`: single-connection
+  listener on the **free, keyless PumpPortal WebSocket** (§6 event-driven
+  monitoring, Rule 10), subscribed to token-creation and bonding-curve
+  migration events; reconnect with exponential backoff (Rule 7); bounded
+  buffers drained by the scanner each cycle. `PumpFunFrontendClient`:
+  per-coin traction snapshots from the unofficial frontend API (payload
+  shape verified live 2026-07-08); 404 = honest gap; the base URL is
+  config because the host has rotated before (Rule 17).
+- `scanners/launch_monitor.py` — `LaunchMonitor`, the §7 funnel front:
+  **basic filtering** on the launch event itself (accepted launchpad,
+  anonymous launches rejected, creator dev-buy above 20% of supply
+  rejected as an insider grab — a real launch was rejected on exactly
+  this in the live smoke test), then bounded traction rechecks
+  (§5 refresh control: per-token cadence, per-cycle API budget, TTL
+  expiry, capacity cap), then **§8 promotion gates** where every gate
+  needs data to pass (Rule 8): min USD market cap, SOL-cap growth vs
+  launch, community replies, recent trading; graduation (`complete` or a
+  migration event) is the fast path.
+- **§2 discovery ≠ confirmation, enforced structurally:** a promoted
+  candidate enters `ResearchPipeline` only after `MarketDataService`
+  (DexScreener/GeckoTerminal — independent providers) returns a real
+  pair; until then it stays tracked and retries. Without a market
+  service the launch stage refuses to run at all.
+- Scanner wiring: optional `pumpportal_client`/`pumpfun_client` on
+  `ContinuousScanner`; a failing launch stage never fails the cycle
+  (Rule 9); `CycleStats.launches_tracked` reports funnel depth.
+- Off by default (Rule 11): `MEMEINTEL_PUMPFUN_ENABLE_IN_MONITOR=true`
+  or `monitor --pumpfun`. All thresholds in `PumpFunSettings`
+  (env `MEMEINTEL_PUMPFUN_*`).
+- The rest of Part 32.5 (§§1-2, 4-11) was already satisfied by Parts
+  13/15/21 (caching, provider pools, prioritization, 24/7 recovery) —
+  verified against the spec text rather than rebuilt (Rule 18).
+
+## Part 28 — Portfolio Management & Opportunity Rotation (§5/§6) → ✅
+
+- `analyzers/opportunity_ranker.py` — `OpportunityRanker`: the Section 5
+  upside-tilted ranking (Growth 30 / Momentum 25 / Foundation 20 / Risk
+  15 / Timing 10), composed from already-computed category scores,
+  coverage-honest (missing factor renormalizes, never scored 0). A
+  **second axis deliberately separate from the Part 31-locked master
+  score** — it orders *which watchlist tokens deserve attention*, never
+  changes the Elite/Strong/Avoid classification.
+- Persisted per snapshot (`snapshots.opportunity_rank`, in-place
+  migration) at every scan/recheck/report; `Storage.top_opportunities()`
+  ranks active watchlist tokens by their latest value.
+- CLI: `watchlist --top` (Section 6 "strongest available opportunities").
+  Weights configurable via `OpportunityWeights` / `MEMEINTEL_OPPORTUNITY_
+  WEIGHTS_*`.
+- Part 25 §10's near-identical opportunity rating is treated as satisfied
+  by this ranking (owner direction to consolidate overlapping formulas).
+
+## Parts 20-33 verification pass → ✅ (see `next_steps/INDEX.md`)
+
+Every remaining spec part was read against the code. Parts 20, 22, 26,
+30, 31, 32 are satisfied as-is (Part 31's locked weights match exactly).
+Part 33's security sub-weights were corrected to the literal §11 text
+(Liquidity /20, Developer /20 — an undocumented drift from 0.25/0.15) and
+locked with a test. Part 28 §5/§6 built (above). The only remaining
+unbuilt items are the **web dashboard** (deferred; CLI + Telegram today)
+and Part 27's **creator-track-record intelligence** (blocked on a data
+source neither current API exposes).
+
+---
+
+## Self-Learning "Mind" Layer (analog + continuous learning + rug) → ✅
+
+An analog pattern-recognition + continuous-learning reasoning layer on top of
+the scanner (package `meme_intelligence/learning/`). For every coin it answers
+"which past coins does this most resemble right now, and how did those end
+up?", forecasts the outcome, and flags rugs — getting measurably smarter as
+coins resolve. Off by default (`MEMEINTEL_LEARNING_ENABLED` /
+`_ENABLE_IN_MONITOR`); needs `numpy/scikit-learn/faiss-cpu/lightgbm/hdbscan`.
+
+- `learning/models.py` — coin lifecycle model: `OutcomeBucket`
+  (PUMP/FLAT/DUMP/RUG), `CoinSnapshot` trajectory point, `OutcomeLabel`,
+  `RugSignal`/`RugAssessment`, `AnalogNeighbor`, `CoinRecord`, `CoinVerdict`.
+- `learning/features.py` — `FingerprintExtractor`: a variable-length snapshot
+  series → a fixed-length vector (7 trajectory summaries per metric + ratios +
+  scalars), with coverage tracking + a persisted `StandardScaler`.
+- `learning/analog.py` — `AnalogMemory`: append-only FAISS cosine index +
+  recency-weighted k-NN voting (`similarity × exp(-age/half_life)`); the
+  instant-learning path (§3).
+- `learning/archetypes.py` — HDBSCAN archetypes labeled by dominant outcome +
+  a bounded novelty percentile ("catch what's coming next").
+- `learning/classifier.py` — `OutcomeClassifier`: LightGBM multiclass, num_class
+  pinned to 4, warm-start via `init_model`, time-decay sample weights (§4).
+- `learning/rug_engine.py` — hard-signal rug score (0-100) reusing
+  `SecurityProfile` + trajectory + deployer blacklist; rug-by-analogy is the
+  analog index itself (§5).
+- `learning/ensemble.py` — adaptive accuracy-weighted blend of analog + model +
+  rug (§6); `learning/metrics.py` — self-evaluation (hit-rate, rug P/R/F1,
+  Brier, calibration, per-archetype, novelty) (§8).
+- `learning/store.py` — SQLite (records, snapshots, labels, rug signals,
+  deployer blacklist, predictions, metrics); `learning/service.py` —
+  `LearningService.evaluate_coin()` + `record_detection`/`capture_snapshot`/
+  `resolve_outcome`/`retrain_if_due`/`refresh_archetypes`/`get_learning_metrics`.
+  Every artifact persists so learning compounds across restarts (§9).
+- **Integration:** CLI `mind evaluate <address>` / `mind metrics`; opt-in
+  scanner hook (`monitor --learn`) that feeds analyzed coins in with zero extra
+  API calls; the backtester's `refresh_outcomes` resolves the mind layer's
+  coins from the same measurements. All hooks are additive and error-isolated —
+  a learning failure never breaks a scan cycle (Rule 7).
+- **Never trades** — decision-support only (Rule 21). ~150 new tests.
+
+---
+
 ## What's NOT built yet
 
-Everything in `next_steps/` — **Parts 19 through 33** (see
-`next_steps/INDEX.md`). Some of these (20, 21, 22, 23, 30, 31, 32, 32.5)
+The **web/monitoring dashboard** (Part 21 §10 / 22 / 27 §12 / 28 §11) and
+Part 27's **creator launch-history intelligence** (data-source-blocked).
+Everything else in `next_steps/` has been built or verified-satisfied
+(see the verification-pass section in `next_steps/INDEX.md`). Some parts
+(20, 21, 22, 23, 30, 31, 32)
 substantially overlap with what's already built, since they're
 architecture/consolidation parts written before the earlier build parts
 existed in code — read them anyway, since they sometimes add specific
@@ -260,24 +545,24 @@ earlier parts.
 
 ## Known cross-cutting gaps (affect multiple parts)
 
-1. **No social-data collector.** Community/narrative scoring runs on
-   partial/no data everywhere. This blocks full realization of Parts 5,
-   19, and the "community" gate in every alert rule. Needs a decision on
-   budget (see DECISIONS_LOG.md) — X API is $200/mo; cheaper aggregators
-   exist.
-2. **No outcome-tracking / backtesting loop yet (Part 24).** Every
-   snapshot is being recorded (`snapshots`, `wallet_sightings`,
-   `security_facts` tables) specifically so that once Part 24 is built,
-   historical predictions can be joined against actual outcomes. The data
-   pipeline is ready; the join/scoring logic isn't written.
+1. **Partial social-data collector.** The free CoinGecko community
+   collector (see DECISIONS_LOG.md — "cheap aggregator" decision) now
+   feeds telegram size, sentiment votes, and reddit activity into the
+   community/narrative engines and the AI snapshot. Twitter engagement,
+   Discord, bot detection, and growth rates remain untracked until a
+   paid aggregator (LunarCrush) is added — planned once the system
+   proves itself. Very new tokens aren't listed on CoinGecko yet and
+   report "no data" honestly.
+2. ~~No outcome-tracking / backtesting loop yet~~ **Resolved — Part 24
+   built.** Predictions are graded against measured outcomes; meaningful
+   metrics accumulate as the scanner runs.
 3. **EVM wallet intelligence** (Alchemy or similar) is not built — Part
    17 is Solana-only.
-4. **No Telegram/Discord alert sinks yet** — `NotificationEngine`
-   supports pluggable sinks; only `ConsoleSink` exists. Needs a Telegram
-   bot token (see SETUP.md — not created yet).
-5. **No Anthropic/LLM integration yet.** All qualitative judgment slots
-   (meme strength, narrative scoring, bull/bear prose enrichment) are
-   wired to accept AI-layer input but currently run on deterministic
-   heuristics or report "no data." Needs an Anthropic API key (not
-   created yet) plus the actual prompt-calling code (Parts 22 §4, 23).
+4. ~~No Telegram/Discord alert sinks yet~~ **Resolved — Part 29 built.**
+   Sinks activate when the bot token / webhook URL lands in `.env`
+   (still pending on the user's side).
+5. ~~No Anthropic/LLM integration yet.~~ **Resolved — Part 23 built and
+   live.** The AI reasoning layer fills the qualitative judgment slots
+   via `report --ai` / `plan --ai`; only the social-data half of those
+   judgments (gap #1) remains thin.
 6. **No dashboard/web UI** — CLI only, per the phased roadmap.

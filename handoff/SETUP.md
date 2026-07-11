@@ -10,7 +10,7 @@
 ```bash
 git clone https://github.com/haidar-boop/Memecoin.git
 cd Memecoin
-git checkout claude/large-prompt-review-l49wp1
+git checkout claude/session-rules-preferences-kc71bf   # the authoritative branch
 
 python3 -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
@@ -31,10 +31,11 @@ committed). The app loads it automatically on startup
 | CoinGecko | ✅ no key needed | — | market-environment check |
 | **Helius** | ✅ **live, verified** | `MEMEINTEL_HELIUS_API_KEY` | Solana wallet/holder data |
 | **Birdeye** | ✅ **live, verified** | `MEMEINTEL_BIRDEYE_API_KEY` | Solana trades/overview |
-| Anthropic (LLM layer) | ⏳ **not set up** | (not yet defined in settings) | AI-judgment slots (Parts 22/23) |
-| Telegram bot | ⏳ **not set up** | (not yet defined in settings) | alert delivery (Part 29) |
-| Discord webhook | ⏳ **not set up, optional** | (not yet defined in settings) | alert delivery (Part 29) |
-| X/Twitter or social aggregator | ⏳ **not set up, budget decision pending** | (not yet defined) | community/narrative scoring (Part 5, 19) |
+| **Anthropic (LLM layer)** | 🟡 optional — **operator keeps it OFF to save credits** (system fully functional without) | `MEMEINTEL_ANTHROPIC_API_KEY` | AI reasoning layer (Part 23) + opportunity verification |
+| Telegram bot | 🟡 code ready — create via @BotFather | `MEMEINTEL_TELEGRAM_BOT_TOKEN` + `MEMEINTEL_TELEGRAM_CHAT_ID` | alert delivery (Part 29); test: `alerts --test` |
+| Discord webhook | 🟡 code ready, optional | `MEMEINTEL_DISCORD_WEBHOOK_URL` | alert delivery (Part 29); test: `alerts --test` |
+| CoinGecko community data | ✅ **live** (free; optional demo key raises limits) | `MEMEINTEL_COINGECKO_API_KEY` (optional) | community/narrative scoring (Parts 5, 19) |
+| LunarCrush (upgrade path) | ⏳ deferred — revisit if the bot proves itself (~$5/day) | (not yet defined) | Twitter engagement depth |
 | Alchemy (EVM wallets) | ⏳ **not set up, optional** | (not yet defined) | EVM wallet intelligence (Part 17 extension) |
 
 Your current working `.env` should contain at minimum:
@@ -51,7 +52,7 @@ Get free keys at:
 ## Verify the install
 
 ```bash
-python -m pytest              # should print "274 passed"
+python -m pytest              # should print "626 passed" (count as of 2026-07-10)
 ```
 
 ## Full CLI command reference
@@ -71,8 +72,12 @@ python -m meme_intelligence watchlist [--refresh] [--include-archived]
                                                                   # view / re-score tracked tokens
 python -m meme_intelligence wallets <address> [--chain solana]  # smart money & whale analysis
 python -m meme_intelligence daily [--network solana]            # full daily research routine
+python -m meme_intelligence alerts [--test]                      # alert history/performance; --test sends via every sink
+python -m meme_intelligence backtest [--refresh]                 # grade predictions against measured outcomes
 python -m meme_intelligence monitor [--network solana] [--cycles N] [--interval SECONDS]
                                                                   # continuous 24/7 scanner (Ctrl-C to stop gracefully)
+python -m meme_intelligence mind evaluate <address> [--chain X]  # mind-layer verdict for one token
+python -m meme_intelligence mind metrics                         # learning report card (memory size, accuracy)
 ```
 
 ## Configuration reference
@@ -87,10 +92,11 @@ any of them by adding the line (uncommented, with your value) to `.env`.
   gitignored)
 - Logs: `logs/meme_intelligence.log` (rotating, gitignored)
 
-## Deploying for 24/7 operation (not done yet)
+## Deploying for 24/7 operation — DONE (live in production)
 
-Not required for local testing. When ready to run `monitor` continuously:
-a small VPS (Hetzner CX22 or similar, ~€4/mo) is more than sufficient —
-the system is I/O-bound and rate-limited by design. A systemd service
-file to keep it running and auto-restart on reboot has not been written
-yet; this belongs to Part 21/22's deployment step.
+The system runs 24/7 on the operator's $6/mo DigitalOcean droplet via the
+kit in `deploy/`: `meme-intelligence.service` (systemd, `Restart=always`),
+`setup.sh` (one-shot bootstrap), `install-cron.sh` (daily routine +
+backtest refresh + DB backup). **For the live system's update procedure,
+`.env` state, and troubleshooting, see [OPERATIONS.md](./OPERATIONS.md)** —
+this file covers fresh local installs only.
