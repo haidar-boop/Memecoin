@@ -128,15 +128,26 @@ def build_market_service(settings: Settings, *clients) -> MarketDataService:
     )
 
 
-def build_wallet_service(settings: Settings) -> WalletDataService | None:
-    """Wallet intelligence service, or None when no keys are configured (Part 17)."""
+def build_wallet_service(
+    settings: Settings, *, helius_rate_limiter: RateLimiter | None = None
+) -> WalletDataService | None:
+    """Wallet intelligence service, or None when no keys are configured (Part 17).
+
+    ``helius_rate_limiter`` lets a caller that also talks to Helius through
+    another client (e.g. the trading RPC client) share one token bucket —
+    two independent ``per_minute`` limiters against the same Helius account
+    each think they're within budget while their combined real traffic
+    exceeds the account's actual server-side limit (bug-hunt finding: live
+    trade balance reads got 429'd by the scanner's own wallet-intel traffic).
+    """
     helius = birdeye = None
     if settings.helius_api_key:
         helius = HeliusClient(
             settings.helius_api_key,
             rpc_url=settings.providers.helius_rpc_url,
             api_url=settings.providers.helius_api_url,
-            rate_limiter=RateLimiter.per_minute(settings.providers.helius_requests_per_minute),
+            rate_limiter=helius_rate_limiter or RateLimiter.per_minute(
+                settings.providers.helius_requests_per_minute),
             **_shared_collector_kwargs(settings),
         )
     if settings.birdeye_api_key:
@@ -179,11 +190,19 @@ def build_learning_service(settings: Settings):
     return LearningService(settings)
 
 
-def build_executor(settings: Settings, storage, jupiter_client):
+def build_executor(
+    settings: Settings, storage, jupiter_client, *, helius_rate_limiter: RateLimiter | None = None
+):
     """Pick the trade executor (Project 6): live when explicitly enabled AND a
     trading key + Jupiter client + Helius RPC are all present; dry-run
     otherwise. Returns (executor, rpc_client_or_None) — the RPC client is a
-    BaseCollector the caller must close."""
+    BaseCollector the caller must close.
+
+    ``helius_rate_limiter``: see :func:`build_wallet_service` — pass the same
+    shared limiter when a wallet-intelligence Helius client is also running
+    so both clients draw from one real account budget instead of two
+    independent ones that can together exceed it.
+    """
     from meme_intelligence.trading.execution import DryRunExecutor
 
     ex = settings.execution
@@ -198,7 +217,8 @@ def build_executor(settings: Settings, storage, jupiter_client):
 
     rpc = SolanaRpcClient(
         settings.helius_api_key, rpc_url=settings.providers.helius_rpc_url,
-        rate_limiter=RateLimiter.per_minute(settings.providers.helius_requests_per_minute),
+        rate_limiter=helius_rate_limiter or RateLimiter.per_minute(
+            settings.providers.helius_requests_per_minute),
         **_shared_collector_kwargs(settings),
     )
     try:
@@ -919,6 +939,16 @@ async def _cmd_monitor(args, settings) -> int:
         settings = _dc.replace(
             settings, learning=_dc.replace(settings.learning, enable_in_monitor=True))
 
+    # One shared token bucket for every Helius consumer in this process
+    # (wallet intelligence + the live-trading RPC client) — they hit the same
+    # Helius account, so independent per-client limiters can together exceed
+    # its real server-side limit even though each one thinks it's within
+    # budget (bug-hunt finding: 429s on live-trade balance reads).
+    helius_rate_limiter = (
+        RateLimiter.per_minute(settings.providers.helius_requests_per_minute)
+        if settings.helius_api_key else None
+    )
+
     async with contextlib.AsyncExitStack() as stack:
         gecko = await stack.enter_async_context(build_geckoterminal(settings))
         goplus = await stack.enter_async_context(build_goplus(settings))
@@ -935,7 +965,8 @@ async def _cmd_monitor(args, settings) -> int:
         # with missing keys is reported, not silently ignored (Rule 13).
         wallet_service = ai_service = None
         if settings.wallet.enable_in_monitor:
-            wallet_service = build_wallet_service(settings)
+            wallet_service = build_wallet_service(
+                settings, helius_rate_limiter=helius_rate_limiter)
             if wallet_service is None:
                 print("Note: MEMEINTEL_WALLET_ENABLE_IN_MONITOR is on but no "
                       "MEMEINTEL_HELIUS_API_KEY / MEMEINTEL_BIRDEYE_API_KEY is set — "
@@ -999,7 +1030,9 @@ async def _cmd_monitor(args, settings) -> int:
             # its command context wraps the scanner's public methods.
             if settings.telegram_commands.enabled:
                 if settings.telegram_bot_token and settings.telegram_chat_id:
-                    executor, exec_rpc = build_executor(settings, storage, jupiter_client)
+                    executor, exec_rpc = build_executor(
+                        settings, storage, jupiter_client,
+                        helius_rate_limiter=helius_rate_limiter)
                     if exec_rpc is not None:
                         stack.push_async_callback(exec_rpc.close)
                     context = CommandContext(
