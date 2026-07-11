@@ -240,7 +240,7 @@ class NarrativeAssessment:
             f"  Overall: {self.overall_score:.0f}/100 [{self.rating.value}]  "
             f"category={self.category.value}  stage={self.stage.value}  "
             f"confidence={self.confidence.value}",
-            f"  Viral score: "
+            "  Viral score: "
             + (f"{self.viral_score:.0f}/100" if self.viral_score is not None else "no data")
             + f"    sentiment={self.sentiment.value}  narrative risk={self.narrative_risk.value}",
         ]
@@ -540,7 +540,9 @@ class NarrativeAnalyzer:
         sub_scores: dict[str, float | None] = {}
         weighted_sum = 0.0
         available = 0.0
-        for name, part in zip(names, parts):
+        # strict=True: both callers pass a names tuple parallel to parts (5 and
+        # 5); a mismatch would silently drop a sub-score from the average.
+        for name, part in zip(names, parts, strict=True):
             score = part.score()
             sub_scores[name] = score
             if score is not None:

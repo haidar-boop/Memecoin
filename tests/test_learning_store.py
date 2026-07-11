@@ -1,6 +1,6 @@
 """Tests for the mind-layer SQLite persistence (Section 9)."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import pytest
 

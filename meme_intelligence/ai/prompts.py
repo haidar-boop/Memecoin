@@ -151,7 +151,10 @@ def check_language(text: str) -> list[str]:
     regardless of which component wrote it.
     """
     violations: list[str] = []
-    for phrase, pattern in zip(BANNED_PHRASES, _BANNED_PATTERNS):
+    # strict=True: _BANNED_PATTERNS is built as a comprehension over
+    # BANNED_PHRASES, so a length mismatch means a phrase lost its pattern and
+    # would silently go unchecked — fail loudly instead (banned-language guard).
+    for phrase, pattern in zip(BANNED_PHRASES, _BANNED_PATTERNS, strict=True):
         for match in pattern.finditer(text):
             preceding = text[max(0, match.start() - _NEGATION_WINDOW_CHARS):match.start()]
             # A negation only whitelists a match within the SAME clause: the

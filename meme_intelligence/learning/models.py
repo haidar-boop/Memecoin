@@ -13,7 +13,6 @@ real observations.
 
 from __future__ import annotations
 
-import dataclasses
 import math
 from dataclasses import dataclass, field
 from datetime import datetime

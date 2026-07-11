@@ -226,7 +226,7 @@ class FingerprintExtractor:
         presence_flags: list[float] = []
 
         for metric, accessor in _BASE_METRICS:
-            pairs = [(age, accessor(s)) for age, s in zip(ages_all, snaps)]
+            pairs = [(age, accessor(s)) for age, s in zip(ages_all, snaps, strict=True)]
             present = [(age, val) for age, val in pairs if val is not None]
             presence_flags.append(1.0 if present else 0.0)
             if present:
@@ -244,7 +244,7 @@ class FingerprintExtractor:
         # Scalar context.
         age_hours = float(ages_all[-1]) / 3600.0
         snapshot_count = float(len(snaps))
-        price_pairs = [(age, s.price_usd) for age, s in zip(ages_all, snaps)
+        price_pairs = [(age, s.price_usd) for age, s in zip(ages_all, snaps, strict=True)
                        if s.price_usd is not None]
         if len(price_pairs) >= 3:
             p_ages = np.array([p[0] for p in price_pairs], dtype=float)

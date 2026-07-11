@@ -7,7 +7,6 @@ that the sign->send->confirm path runs end to end.
 
 import asyncio
 import base64
-import math
 
 import pytest
 

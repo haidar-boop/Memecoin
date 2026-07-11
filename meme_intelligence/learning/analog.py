@@ -23,7 +23,7 @@ analog" (weight ~0), never a negative vote.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, Sequence
 
@@ -171,7 +171,8 @@ class AnalogMemory:
         sims, idxs = self._index.search(query_vec, k_eff)
         now = self._now()
         neighbors: list[AnalogNeighbor] = []
-        for sim, idx in zip(sims[0], idxs[0]):
+        # strict=True: FAISS returns sims and idxs of identical shape (k_eff).
+        for sim, idx in zip(sims[0], idxs[0], strict=True):
             if idx < 0:                      # FAISS pads with -1 when short
                 continue
             entry = self._entries[int(idx)]

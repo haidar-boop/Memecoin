@@ -26,7 +26,7 @@ def _series(prices, liqs, *, holders=None, step_seconds=60):
             sells=5,
             top10_holder_percent=40.0,
         )
-        for i, (p, l, h) in enumerate(zip(prices, liqs, holders))
+        for i, (p, l, h) in enumerate(zip(prices, liqs, holders, strict=True))
     ]
 
 

@@ -500,7 +500,7 @@ class Storage:
 
     def archive(self, token: TokenIdentity, reason: str) -> WatchlistChange:
         """Move a token to the archived tier, keeping its history for learning."""
-        change = self.update_watchlist(token, WatchlistTier.ARCHIVED)
+        self.update_watchlist(token, WatchlistTier.ARCHIVED)  # DB side effect only
         self.add_journal(token, "outcome", f"archived: {reason}")
         return WatchlistChange(token, "archived", WatchlistTier.ARCHIVED, reason)
 

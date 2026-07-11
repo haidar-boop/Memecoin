@@ -143,7 +143,15 @@ class HeliusClient(BaseCollector):
         if not accounts:
             return []
 
-        token_accounts = [a.get("address") for a in accounts[:limit] if a.get("address")]
+        # Keep the account OBJECTS that make it into the owner lookup, so the
+        # owner_infos response (which corresponds to token_accounts, in order)
+        # is zipped below against the SAME accounts — not the full, unfiltered
+        # `accounts` list. Zipping the full list would misalign owner→amount
+        # the moment any account inside the window was dropped for a missing
+        # address, attributing a balance to the wrong wallet (fabricated whale
+        # data, Rule 8 — bug-hunt finding, 2026-07-11).
+        kept = [a for a in accounts[:limit] if a.get("address")]
+        token_accounts = [a["address"] for a in kept]
         # Content-derived cache key (bug-hunt finding, independently confirmed
         # twice): keying by len() alone let a STALE owners response — cached a
         # rate-limiter-wait after the largest-accounts response, so their TTL
@@ -165,7 +173,11 @@ class HeliusClient(BaseCollector):
         # as several small independent holders, so 2x3% never crossed the 5%
         # risk-whale line and concentration was understated (bug-hunt finding).
         by_owner: dict[str, float] = {}
-        for account, info in zip(accounts, owner_infos):
+        # strict=False: a malformed getMultipleAccounts response could return
+        # fewer entries than requested; truncating (and under-counting) is the
+        # safe degradation here, not a crash. Alignment is guaranteed by using
+        # `kept` (the accounts that produced token_accounts).
+        for account, info in zip(kept, owner_infos, strict=False):
             ui_amount = _token_amount(account)
             owner = None
             if isinstance(info, dict):

@@ -30,7 +30,7 @@ import math
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Awaitable, Callable
+from typing import Awaitable, Callable
 
 from meme_intelligence.collectors.jupiter_data import SOL_MINT
 from meme_intelligence.core.errors import CollectorError, MemeIntelError

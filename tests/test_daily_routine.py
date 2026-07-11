@@ -6,7 +6,7 @@ import pytest
 
 from meme_intelligence.collectors.market_data import MajorsSnapshot
 from meme_intelligence.config.settings import Settings
-from meme_intelligence.core.enums import Classification, MarketRegime, WatchlistTier
+from meme_intelligence.core.enums import MarketRegime, WatchlistTier
 from meme_intelligence.core.errors import TransientCollectorError
 from meme_intelligence.core.models import DexPair, SecurityProfile, TokenIdentity
 from meme_intelligence.database.storage import Storage

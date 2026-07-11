@@ -2,7 +2,6 @@
 
 from datetime import datetime, timezone
 
-import pytest
 
 from meme_intelligence.config.settings import Settings
 from meme_intelligence.core.models import SecurityProfile, TokenIdentity

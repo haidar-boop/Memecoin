@@ -5,7 +5,6 @@ file covers only the new Jupiter liquidity-probe merge behavior (Project 1)
 plus a backward-compatibility sanity check.
 """
 
-import pytest
 
 from meme_intelligence.config.settings import Settings
 from meme_intelligence.core.models import DexPair, LiquidityProbeResult, SecurityProfile, TokenIdentity

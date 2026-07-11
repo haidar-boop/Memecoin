@@ -711,7 +711,7 @@ async def _cmd_alerts(args, settings) -> int:
         engine = NotificationEngine(sinks, settings.alert_engine)
         await engine.dispatch([event])
         external = [type(s).__name__ for s in sinks[1:]]
-        print(f"\nTest alert dispatched to: console"
+        print("\nTest alert dispatched to: console"
               + (", " + ", ".join(external) if external else
                  " only (no Telegram/Discord secrets configured)"))
         for sink in sinks[1:]:

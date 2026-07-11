@@ -1,6 +1,5 @@
 """Tests for the risk management engine (Spec Part 9)."""
 
-import pytest
 
 from meme_intelligence.analyzers.risk_analyzer import (
     PortfolioRiskManager,

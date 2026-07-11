@@ -21,7 +21,6 @@ from meme_intelligence.config.settings import (
 from meme_intelligence.core.cache import TTLCache
 from meme_intelligence.core.errors import CollectorError
 from meme_intelligence.core.models import (
-    DexPair,
     PumpFunCoinState,
     PumpFunLaunch,
     TokenIdentity,

@@ -38,7 +38,7 @@ from meme_intelligence.analyzers.security_monitor import (
 )
 from meme_intelligence.collectors.market_data import MajorsSnapshot
 from meme_intelligence.config.settings import Settings
-from meme_intelligence.core.enums import Classification, MarketRegime, RiskTier, WatchlistTier
+from meme_intelligence.core.enums import Classification, MarketRegime, RiskTier
 from meme_intelligence.core.errors import CollectorError
 from meme_intelligence.core.logging_setup import get_logger
 from meme_intelligence.core.models import DexPair

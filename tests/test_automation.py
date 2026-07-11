@@ -7,7 +7,6 @@ import pytest
 from meme_intelligence.alerts.notification_engine import (
     AlertEvent,
     AutomationRules,
-    ConsoleSink,
     NotificationEngine,
 )
 from meme_intelligence.config.settings import AlertEngineSettings, AlertThresholds, Settings

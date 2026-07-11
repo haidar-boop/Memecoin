@@ -23,7 +23,7 @@ from meme_intelligence.config.settings import (
     TokenSubWeights,
     TokenThresholds,
 )
-from meme_intelligence.core.enums import Classification, MarketCapStage, MarketPhase
+from meme_intelligence.core.enums import Classification, MarketPhase
 from meme_intelligence.core.models import (
     CommunityProfile,
     DexPair,

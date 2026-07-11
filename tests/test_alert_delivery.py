@@ -246,7 +246,7 @@ def test_format_alert_sanitizes_injection_in_token_name():
     """Bug-hunt: an on-chain token name with backticks/newlines broke out of
     Discord's code fence and injected live markdown (incl. mention pings)."""
     evil = TokenIdentity(chain="solana", address="Mint1",
-                         name="```@everyone\nCLICK", symbol="p​ump\n`x`")
+                         name="```@everyone\nCLICK", symbol="p\u200bump\n`x`")
     text = format_alert(make_event(token=evil))
     name_line = next(l for l in text.splitlines() if l.strip().startswith("Name:"))
     assert "```" not in name_line

@@ -30,7 +30,7 @@ source is available the ensemble returns an honest uniform distribution with
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Mapping
 
 from meme_intelligence.core.logging_setup import get_logger
