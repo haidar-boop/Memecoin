@@ -459,6 +459,65 @@ async def test_market_cap_floor_annotates_but_no_longer_suppresses():
     assert "Market cap" in checklist and "below your" in checklist
 
 
+# ---- Operator liquidity / market-cap CEILING for buy-side alerts ----
+
+async def test_liquidity_ceiling_suppresses_buy_side():
+    """A coin whose pool has already grown past the ceiling is no longer an
+    early opportunity — its buy-side alert is suppressed (fixture's $90k pool
+    is above a $50k ceiling). This is the '$2.8M coin dressed as early
+    opportunity' fix."""
+    rules = AutomationRules(
+        AlertThresholds(opportunity_max_liquidity_usd=50_000.0),  # fixture has 90k
+        AlertEngineSettings())
+    result = await pipeline_result()
+    types = {e.alert_type for e in rules.evaluate(result)}
+    assert not (types & _BUY_SIDE_ALERT_TYPES)
+
+
+async def test_market_cap_ceiling_suppresses_buy_side():
+    rules = AutomationRules(
+        AlertThresholds(opportunity_max_market_cap_usd=100_000.0),  # fixture has 400k
+        AlertEngineSettings())
+    result = await pipeline_result()
+    types = {e.alert_type for e in rules.evaluate(result)}
+    assert not (types & _BUY_SIDE_ALERT_TYPES)
+
+
+async def test_ceiling_off_by_default_lets_large_coin_through():
+    """Rule 18: with the ceiling unset (0), a large coin still alerts. Turning
+    the ceiling on for the same coin suppresses it — proving the ceiling, not
+    the fixture, is what changed."""
+    result = await pipeline_result()
+    off = {e.alert_type for e in make_rules().evaluate(result)}  # both ceilings 0
+    assert off & _BUY_SIDE_ALERT_TYPES                           # baseline: it alerts
+    on = {e.alert_type for e in AutomationRules(
+        AlertThresholds(opportunity_max_liquidity_usd=50_000.0),
+        AlertEngineSettings()).evaluate(result)}
+    assert not (on & _BUY_SIDE_ALERT_TYPES)
+
+
+async def test_coin_under_ceiling_still_sends():
+    """A coin below both ceilings is unaffected (no over-suppression)."""
+    rules = AutomationRules(
+        AlertThresholds(opportunity_max_liquidity_usd=500_000.0,
+                        opportunity_max_market_cap_usd=1_000_000.0),
+        AlertEngineSettings())
+    result = await pipeline_result()   # fixture 90k liq / 400k mcap — under both
+    types = {e.alert_type for e in rules.evaluate(result)}
+    assert types & _BUY_SIDE_ALERT_TYPES
+
+
+def test_negative_ceiling_rejected():
+    with pytest.raises(ConfigurationError, match="opportunity_max_liquidity_usd"):
+        AlertThresholds(opportunity_max_liquidity_usd=-1.0)
+
+
+def test_ceiling_below_floor_rejected():
+    with pytest.raises(ConfigurationError, match="must be >="):
+        AlertThresholds(opportunity_min_liquidity_usd=200_000.0,
+                        opportunity_max_liquidity_usd=100_000.0)
+
+
 async def test_unknown_liquidity_is_blocked_as_untradeable():
     """Missing liquidity is now a HARD block, not an annotation — a coin you
     cannot even size is not a real opportunity (operator rule 2026-07-12,

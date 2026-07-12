@@ -201,6 +201,16 @@ class AlertThresholds:
     # 0.0 = OFF, so existing behavior is unchanged until set (Rule 18).
     opportunity_min_liquidity_usd: float = 0.0
     opportunity_min_market_cap_usd: float = 0.0
+    # Operator "don't send me coins that already ran" CEILING for BUY-SIDE
+    # alerts. ABOVE these, the coin is no longer an early opportunity — the move
+    # the operator wants to catch already happened (a multi-million-dollar pool
+    # firing an "early opportunity" is exactly the noise this cuts) — so the
+    # buy-side alert is SUPPRESSED. Protective warnings still fire (a large coin
+    # can still rug). Unknown liquidity/mcap NEVER trips the ceiling (Rule 8 —
+    # absent data is not evidence a coin is too big; that is the floor's job).
+    # Both default 0.0 = OFF, so existing behavior is unchanged until set (Rule 18).
+    opportunity_max_liquidity_usd: float = 0.0
+    opportunity_max_market_cap_usd: float = 0.0
     # Safety checklist (operator rule 2026-07-12): a buy-side alert now SENDS
     # even when a soft check falls short — the checklist rides ON the alert so
     # the operator sees what missed and decides. Only the rug engine's COMBINED
@@ -231,11 +241,20 @@ class AlertThresholds:
                 raise ConfigurationError(
                     f"alert threshold '{name}' must be positive, got {value}")
         for name in ("opportunity_min_liquidity_usd", "opportunity_min_market_cap_usd",
+                     "opportunity_max_liquidity_usd", "opportunity_max_market_cap_usd",
                      "checklist_new_launch_minutes"):
             value = getattr(self, name)
             if not math.isfinite(value) or value < 0:
                 raise ConfigurationError(
                     f"alert threshold '{name}' must be >= 0, got {value}")
+        # A ceiling must sit above the comfort floor when both are set (>0),
+        # else the "too big" cut would swallow the "too thin" note.
+        for floor, cap in (("opportunity_min_liquidity_usd", "opportunity_max_liquidity_usd"),
+                           ("opportunity_min_market_cap_usd", "opportunity_max_market_cap_usd")):
+            lo, hi = getattr(self, floor), getattr(self, cap)
+            if hi > 0.0 and lo > 0.0 and hi < lo:
+                raise ConfigurationError(
+                    f"alert threshold '{cap}' ({hi}) must be >= '{floor}' ({lo})")
         _check_range("alert threshold 'checklist_sell_tax_max_percent'",
                      self.checklist_sell_tax_max_percent, 0.0, 100.0)
 
