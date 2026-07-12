@@ -1,4 +1,4 @@
-# Session Handoff — Current State as of 2026-07-11
+# Session Handoff — Current State as of 2026-07-12
 
 > **What this is:** the "you just woke up in this project — here's where
 > things stand" briefing. The durable knowledge lives in the sibling docs
@@ -16,7 +16,7 @@
   Telegram control + copy-address button), **Project 3** (mind-layer P(rug)
   veto — built, veto flag off until authority is earned), and **Project 6**
   (live buy/dump from Telegram — see below).
-- **766 tests passing** (`python -m pytest tests/ -q`).
+- **778 tests passing** (`python -m pytest tests/ -q`).
 - **Live in production**: 24/7 on the operator's $6/mo DigitalOcean droplet
   (systemd service `meme-intelligence`, repo at `~/meme-intelligence`),
   Telegram alerts arriving on his phone.
@@ -153,11 +153,17 @@ sudo systemctl restart meme-intelligence
 
 ## Update log for this file
 
+- 2026-07-12 — massive adversarial bug hunt: 8 fixes across the money path
+  (edited-message re-trade, double-tap double-trade, send-cancel signature
+  loss, raw-exception loop kill, synchronous retrain stall, torn-FAISS
+  crash, retry re-hammering a failing provider, non-finite probe size). All
+  fixed with regression tests; see DECISIONS_LOG 2026-07-12. 766 → 778 tests.
 - 2026-07-11 — rewritten after the live-trading arc: Project 6 armed and
   first live buy validated; dedicated trading Helius account; shared
   per-key rate limiter; double-reply fix; wallet-intel paused (operator
   decision); Projects 1-3 + 6 adversarial reviews recorded; branch moved
-  to `claude/memecoin-onboarding-yrvjbg`; 766 tests.
+  to `claude/memecoin-onboarding-yrvjbg`; 766 tests. (Superseded by the
+  2026-07-12 bug-hunt entry above.)
 - 2026-07-10 — rewritten as part of the complete handoff-folder refresh
   (added OPERATOR / ARCHITECTURE / OPERATIONS / ROADMAP / PROJECT_RULES
   docs; interest gate + opportunity screens shipped; 626 tests).

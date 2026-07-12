@@ -125,6 +125,15 @@ def test_liquidity_probe_rejects_non_positive_probe_amount():
         LiquidityProbeSettings(probe_sol_amount=-0.1)
 
 
+def test_liquidity_probe_rejects_non_finite_probe_amount():
+    """Bug-hunt 2026-07-12: NaN/inf slipped past `<= 0` (all comparisons with
+    NaN are False), so a misconfigured env could size a probe trade with a
+    non-finite SOL amount. Guard with math.isfinite."""
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ConfigurationError, match="probe_sol_amount"):
+            LiquidityProbeSettings(probe_sol_amount=bad)
+
+
 def test_liquidity_probe_rejects_out_of_range_slippage():
     with pytest.raises(ConfigurationError, match="slippage_bps"):
         LiquidityProbeSettings(slippage_bps=0)

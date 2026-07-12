@@ -56,6 +56,26 @@ def test_query_returns_at_most_index_size():
     assert len(neighbors) == 1
 
 
+def test_query_tolerates_torn_index_more_vectors_than_entries():
+    """Bug-hunt 2026-07-12: a torn/interleaved persist (daemon + retrain cron
+    racing) can leave the FAISS index with MORE vectors than the entries
+    metadata. A returned id >= len(entries) used to IndexError and crash the
+    whole verdict path; it now degrades to the valid analogs instead."""
+    mem = AnalogMemory(now_func=lambda: NOW)
+    mem.add(_entry("A", OutcomeBucket.PUMP, 1.0), _vec(1))
+    mem.add(_entry("B", OutcomeBucket.DUMP, 1.0), _vec(2))
+    # Simulate the tear: add a raw vector to the index with NO matching entry,
+    # so index.ntotal (3) exceeds len(_entries) (2).
+    from meme_intelligence.learning.analog import _normalize_rows
+    mem._index.add(_normalize_rows(_vec(3).reshape(1, -1)))
+    assert mem._index.ntotal == 3
+    assert len(mem._entries) == 2
+    # Must not raise; the surplus id is skipped, valid analogs still returned.
+    neighbors = mem.query(_vec(1), k=3)
+    assert all(n.address in ("A", "B") for n in neighbors)
+    assert len(neighbors) <= 2
+
+
 def test_vote_abstains_below_min_neighbors():
     mem = AnalogMemory(now_func=lambda: NOW)
     for i in range(3):

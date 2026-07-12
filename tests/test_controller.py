@@ -171,6 +171,32 @@ async def test_failed_cycle_backs_off_and_recovers():
         assert sleeps and sleeps[0] == 5.0  # error backoff, not the normal interval
 
 
+async def test_raw_non_project_exception_also_backs_off_not_crashes():
+    """Bug-hunt 2026-07-12: the backstop used to catch ONLY MemeIntelError, so
+    a RAW exception a lower layer forgot to wrap (e.g. sqlite3.OperationalError
+    on a full disk, or any RuntimeError) escaped and killed the 24/7 loop --
+    stranding the operator with no way to /dump. The catch is now `Exception`."""
+    pair = make_pair()
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner, sleeps = make_scanner(
+            storage, [pair],
+            {pair.base_token.address: clean_profile(pair.base_token)})
+        real_run_cycle = scanner._run_cycle
+        calls = {"n": 0}
+
+        async def flaky_cycle(cycle):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("unwrapped sqlite failure")  # NOT a MemeIntelError
+            return await real_run_cycle(cycle)
+
+        scanner._run_cycle = flaky_cycle
+        history = await scanner.run(max_cycles=2)     # must not raise
+        assert len(history) == 1                       # cycle 1 swallowed, cycle 2 ran
+        assert history[0].analyzed == 1
+        assert sleeps and sleeps[0] == 5.0             # backed off, did not crash
+
+
 async def test_seen_cache_is_bounded():
     """Bug-hunt: _seen / _ai_verified grew one entry per token forever. They
     are now capacity-bounded (FIFO eviction) so weeks of scanning can't leak
@@ -1280,9 +1306,12 @@ def test_young_insufficient_data_avoid_is_rescheduled_not_permanent():
         scanner._finalize_or_reschedule(key, result, pair, NOW)
         assert key not in scanner._seen              # NOT permanently excluded
         assert key in scanner._retry_pending          # scheduled for another look
-        due_at, saved_address = scanner._retry_pending.get(key)
+        due_at, saved_address, giveup_at = scanner._retry_pending.get(key)
         assert due_at == NOW + timedelta(minutes=SETTINGS.workflow.insufficient_data_retry_minutes)
         assert saved_address == "Fresh1"   # ORIGINAL case preserved, not the lowercased key
+        # give-up deadline is the pool's own max-age horizon (1-min-old pool here)
+        assert giveup_at == (NOW - timedelta(minutes=1)) + timedelta(
+            minutes=SETTINGS.workflow.insufficient_data_max_age_minutes)
 
 
 def test_confirmed_red_flag_avoid_is_never_retried():
@@ -1364,7 +1393,8 @@ async def test_main_loop_skips_a_key_pending_retry():
         scanner, _ = make_scanner(storage, [pair],
                                   {pair.base_token.address: clean_profile(pair.base_token)})
         key = ("solana", "pend1")
-        scanner._retry_pending.add(key, (NOW + timedelta(minutes=5), "Pend1"))  # not due yet
+        scanner._retry_pending.add(  # not due yet (3-tuple: due, address, give-up)
+            key, (NOW + timedelta(minutes=5), "Pend1", NOW + timedelta(hours=1)))
         history = await scanner.run(max_cycles=1)
         assert history[0].analyzed == 0     # skipped, not (re-)analyzed
         assert key in scanner._retry_pending  # still pending, untouched
@@ -1380,7 +1410,8 @@ async def test_retry_pass_reanalyzes_and_finalizes_a_due_token():
         scanner = make_scanner_with_market(
             storage, [], {"Due1": clean_profile(pair.base_token)}, market)
         key = ("solana", "due1")
-        scanner._retry_pending.add(key, (NOW, "Due1"))  # due now, original-case address
+        # due now, original-case address, give-up deadline an hour out
+        scanner._retry_pending.add(key, (NOW, "Due1", NOW + timedelta(hours=1)))
         history = await scanner.run(max_cycles=1)
         assert market.recheck_calls == 1
         assert history[0].analyzed == 1
@@ -1393,7 +1424,7 @@ async def test_retry_pass_gives_up_when_pool_disappears():
         market = FakeMarketService({})  # no pairs for this address
         scanner = make_scanner_with_market(storage, [], {}, market)
         key = ("solana", "gone1")
-        scanner._retry_pending.add(key, (NOW, "Gone1"))
+        scanner._retry_pending.add(key, (NOW, "Gone1", NOW + timedelta(hours=1)))
         history = await scanner.run(max_cycles=1)
         assert key in scanner._seen
         assert history[0].analyzed == 0
@@ -1408,10 +1439,58 @@ async def test_retry_pass_skips_a_stale_already_finalized_entry():
         scanner = make_scanner_with_market(storage, [], {}, market)
         key = ("solana", "stale1")
         scanner._seen.add(key)                              # already finalized
-        scanner._retry_pending.add(key, (NOW, "Stale1"))     # stale leftover, due
+        scanner._retry_pending.add(  # stale leftover, due
+            key, (NOW, "Stale1", NOW + timedelta(hours=1)))
         history = await scanner.run(max_cycles=1)
         assert market.recheck_calls == 0     # never re-fetched
         assert history[0].analyzed == 0
+
+
+def test_repace_retry_pushes_due_time_forward_before_giveup():
+    """Bug-hunt 2026-07-12: a NON-terminal retry outcome (provider outage,
+    security data not yet indexed) must re-pace the entry to its NEXT due
+    time, not leave it at the old (already-past) due time -- else the entry
+    stayed 'due' and re-hit the failing provider EVERY cycle for the whole
+    outage."""
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner = make_bare_scanner(storage)
+        key = ("solana", "outage1")
+        giveup_at = NOW + timedelta(hours=1)          # deadline still ahead
+        scanner._retry_pending.add(key, (NOW, "Outage1", giveup_at))
+        scanner._repace_retry(key, "Outage1", giveup_at, NOW)
+        assert key not in scanner._seen               # not finalized -- still waiting
+        due_at, address, saved_giveup = scanner._retry_pending.get(key)
+        # pushed to now + retry_minutes (capped by giveup_at), no longer due now
+        assert due_at == NOW + timedelta(
+            minutes=SETTINGS.workflow.insufficient_data_retry_minutes)
+        assert address == "Outage1"                   # case preserved
+        assert saved_giveup == giveup_at
+
+
+def test_repace_retry_finalizes_once_past_giveup_deadline():
+    """When the pool has aged past its give-up deadline mid-outage, re-pacing
+    finalizes it into _seen rather than pacing forever."""
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner = make_bare_scanner(storage)
+        key = ("solana", "expired1")
+        giveup_at = NOW - timedelta(minutes=1)        # already past the deadline
+        scanner._retry_pending.add(key, (NOW, "Expired1", giveup_at))
+        scanner._repace_retry(key, "Expired1", giveup_at, NOW)
+        assert key in scanner._seen                   # finalized, not re-paced
+
+
+async def test_retry_pass_repaces_on_provider_outage_not_every_cycle():
+    """End-to-end: a due retry that hits a total provider outage is re-paced
+    (not left due), so the next cycle does NOT immediately re-fetch it."""
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        market = FakeMarketService({}, all_providers_down=True)  # outage
+        scanner = make_scanner_with_market(storage, [], {}, market)
+        key = ("solana", "flaky1")
+        scanner._retry_pending.add(key, (NOW, "Flaky1", NOW + timedelta(hours=1)))
+        await scanner.run(max_cycles=1)
+        assert key not in scanner._seen               # outage != give up
+        due_at, _address, _giveup = scanner._retry_pending.get(key)
+        assert due_at > NOW                            # re-paced into the future
 
 
 async def test_rug_screen_now_covers_momentum_and_medium_alerts_too():

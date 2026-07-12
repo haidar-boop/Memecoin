@@ -445,3 +445,29 @@ async def test_confirmation_cancellation_journals_signature_and_reraises():
         journal = storage.journal_entries(limit=5)
         assert journal and "CANCELSIG" in journal[0]["content"]
         assert len(rpc.sent) == 1   # broadcast happened exactly once
+
+
+async def test_send_cancellation_journals_derived_signature_and_reraises():
+    """Bug-hunt 2026-07-12: a shutdown cancel can tear the send await while the
+    request body is already on the wire — the tx may be broadcast with no
+    return value. The send stage now journals the DERIVED signature (computed
+    from the signed bytes, deterministic and identical to what the RPC would
+    return) so a broadcast tx is never lost, then re-raises so the operator
+    verifies on-chain and does NOT blindly re-tap."""
+    kp = new_keypair()
+    jup = FakeJupiter(quote={"outAmount": "500000", "routePlan": []},
+                      swap_b64=swap_tx_b64(kp))
+
+    class CancelDuringSendRpc(FakeRpc):
+        async def send_raw_transaction(self, signed_base64):
+            raise asyncio.CancelledError()
+
+    rpc = CancelDuringSendRpc(sol=5 * LAMPORTS)
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        ex = make_live(storage, kp, jupiter=jup, rpc=rpc)
+        with pytest.raises(asyncio.CancelledError):
+            await ex.execute_buy(intent(0.1))
+        # The derived signature was journaled with a verify-on-chain note even
+        # though send() never returned.
+        journal = storage.journal_entries(limit=5)
+        assert journal and "send cancelled mid-flight" in journal[0]["content"]

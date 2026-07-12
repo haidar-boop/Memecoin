@@ -742,7 +742,13 @@ class LiquidityProbeSettings:
     sell_confirm_fraction: float = 0.05
 
     def __post_init__(self) -> None:
-        if self.probe_sol_amount <= 0:
+        # isfinite guard (bug-hunt finding, 2026-07-12): `nan <= 0` and
+        # `inf <= 0` are both False, so without it a non-finite probe amount
+        # passes config and later blows up int(amount * 1e9) at runtime —
+        # inf raises an uncaught OverflowError on every Solana token, and nan
+        # raises a ValueError that is caught and SILENTLY disables the
+        # honeypot sell-test. Match every sibling float validator.
+        if not math.isfinite(self.probe_sol_amount) or self.probe_sol_amount <= 0:
             raise ConfigurationError(
                 f"liquidity probe probe_sol_amount must be positive, got {self.probe_sol_amount}"
             )

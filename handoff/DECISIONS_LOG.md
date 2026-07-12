@@ -1206,6 +1206,67 @@ early_opportunity, confirmed never HIGH tier) with a blacklisted deployer
 is now fully suppressed; the same fixture with a clean deployer still fires
 normally (fixture sanity-checked both ways). 1 new test; suite 765 → 766.
 
+## 2026-07-12 — Massive adversarial bug hunt: 8 fixes across the money path
+
+At the user's request ("go on a massive massive bug hunt"), ran a multi-agent
+adversarial find → refute → synthesize pass over the whole codebase. 19
+candidates surfaced; 9 survived independent refutation and deduped to 8
+distinct findings (5 CONFIRMED, 3 PLAUSIBLE), all fixed here with regression
+tests. Every fix follows Rule 3 (never break working code) and Rule 7
+(reliability / graceful degradation). Suite 766 → 778 (12 new tests).
+
+1. **Edited Telegram message re-fired a real trade.** `_handle_update`
+   dispatched `update.get("message") or update.get("edited_message")`, so
+   editing a prior `/buy`/`/dump` message was re-processed as a SECOND live
+   trade with no new operator intent. Now only `message` is dispatched; edits
+   are ignored. (`alerts/telegram_commands.py`)
+
+2. **Double-tapped inline button double-traded.** Two taps of the same buy/dump
+   button (Telegram delivers both) each executed. Added `_claim_button`
+   (bounded FIFO keyed on `(message_id, data)`) claimed AFTER the trading guard
+   and BEFORE execution — a repeat tap is rejected with "already actioned". A
+   callback lacking a numeric `message_id` fails OPEN (never blocks a real
+   trade). Both `_handle_buy` and `_handle_dump` guarded.
+   (`alerts/telegram_commands.py`)
+
+3. **Send cancelled mid-flight could lose a broadcast signature.** A graceful-
+   shutdown cancel landing while the `sendTransaction` body is on the wire left
+   no record of a possibly-broadcast tx. The signature is now derived from the
+   signed bytes (`_signature_of`, deterministic and identical to the RPC's
+   return) BEFORE the send await, and a `CancelledError` during send journals
+   it with a verify-on-chain note, then re-raises — mirroring the confirm-stage
+   guard so the operator never blindly re-taps. (`trading/execution.py`)
+
+4. **A raw (non-project) exception killed the 24/7 loop.** The cycle backstop
+   caught only `MemeIntelError`, so an unwrapped `sqlite3.OperationalError` (full
+   disk / locked DB under monitor+cron contention) or any `RuntimeError` escaped
+   and stranded the operator with no way to `/dump`. Widened to `except
+   Exception` (CancelledError/KeyboardInterrupt/SystemExit are BaseException and
+   still propagate for clean shutdown). (`workflow/controller.py`)
+
+5. **Synchronous retrain stalled the event loop.** `retrain_if_due()` (lightgbm
+   retrain + HDBSCAN + faiss build, multi-second, CPU-bound) ran inline on the
+   shared event loop, so a rebuild could freeze an emergency `/dump` for its
+   whole duration. Now dispatched via `asyncio.to_thread`. (`workflow/controller.py`)
+
+6. **Torn FAISS index crashed the whole verdict path.** An interleaved persist
+   (daemon + retrain cron racing) can leave `index.ntotal` > `len(entries)`; a
+   returned id past the metadata length `IndexError`ed. `query()` now bounds-
+   checks the id and degrades to the valid analogs. (`learning/analog.py`)
+
+7. **Insufficient-data retry re-hammered a failing provider every cycle.** A
+   non-terminal retry outcome (market outage, security data not yet indexed,
+   analyzed via another path) left the entry at its old already-past due time,
+   so it re-hit the provider every cycle for the whole outage. `_retry_pending`
+   now carries a 3-tuple `(due, case-preserved address, give-up deadline)` and
+   `_repace_retry` pushes the entry to its next paced due time — or finalizes it
+   into `_seen` once the pool ages past its give-up deadline. (`workflow/controller.py`)
+
+8. **Non-finite probe size slipped past validation.** `probe_sol_amount <= 0`
+   let NaN/inf through (all comparisons with NaN are False), so a misconfigured
+   env could size a probe trade with a non-finite amount. Guarded with
+   `math.isfinite`. (`config/settings.py`)
+
 ## Notable implementation choices (Rule 19)
 
 - **Python 3.11 + asyncio** over Node.js (both allowed by spec): the

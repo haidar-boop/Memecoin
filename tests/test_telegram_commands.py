@@ -65,10 +65,17 @@ def message_update(text, chat_id=CHAT_ID, update_id=1):
             "message": {"chat": {"id": int(chat_id)}, "text": text}}
 
 
-def callback_update(data, chat_id=CHAT_ID, update_id=1):
+def callback_update(data, chat_id=CHAT_ID, update_id=1, message_id=None):
+    message = {"chat": {"id": int(chat_id)}}
+    if message_id is not None:
+        message["message_id"] = message_id
     return {"update_id": update_id,
-            "callback_query": {"id": "cbq1", "data": data,
-                               "message": {"chat": {"id": int(chat_id)}}}}
+            "callback_query": {"id": "cbq1", "data": data, "message": message}}
+
+
+def edited_message_update(text, chat_id=CHAT_ID, update_id=1):
+    return {"update_id": update_id,
+            "edited_message": {"chat": {"id": int(chat_id)}, "text": text}}
 
 
 def sent_messages(calls):
@@ -364,6 +371,74 @@ async def test_dump_button_on_routes_to_dry_run_when_not_live():
         await listener._handle_update(callback_update(f"dump:{SOL_ADDR}"))
         replies = sent_messages(calls)
         assert replies and "DRY RUN" in replies[0]["text"]
+
+
+# ---- Idempotency: edited messages and double-tapped buttons (bug-hunt 2026-07-12) ----
+
+async def test_edited_message_is_not_re_executed_as_a_trade():
+    """Bug-hunt: editing a prior '/buy ...' message arrives as `edited_message`.
+    The dispatcher used to fall back to it, so a single edit fired a SECOND
+    real trade with no new user intent. Edits are now ignored outright."""
+    settings = make_settings(MEMEINTEL_EXECUTION_BUY_BUTTON_ENABLED="true")
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage, settings=settings)
+        await listener._handle_update(edited_message_update(f"/buy {SOL_ADDR} 0.1"))
+        assert sent_messages(calls) == []               # no reply
+        assert storage.journal_entries(limit=10) == []  # NOT executed
+
+
+async def test_double_tap_same_buy_button_fires_once():
+    """Bug-hunt: two taps of the SAME inline buy button (same message_id +
+    data) must execute exactly one trade; the repeat is rejected with an
+    'already actioned' ack."""
+    settings = make_settings(MEMEINTEL_EXECUTION_BUY_BUTTON_ENABLED="true")
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage, settings=settings)
+        update = callback_update(f"buy:{SOL_ADDR}:0.05", message_id=42)
+        await listener._handle_update(update)
+        await listener._handle_update(update)           # exact same button, tapped twice
+        # Exactly one chat reply and one trade_intent journaled.
+        assert len(sent_messages(calls)) == 1
+        trade_intents = [e for e in storage.journal_entries(limit=10)
+                         if e["kind"] == "trade_intent"]
+        assert len(trade_intents) == 1
+        acks = callback_answers(calls)
+        assert len(acks) == 2                            # both taps get a popup
+        assert "already actioned" in acks[1]["text"].lower()
+
+
+async def test_double_tap_same_dump_button_fires_once():
+    """Same double-tap guard for the dump button."""
+    settings = make_settings(MEMEINTEL_EXECUTION_BUY_BUTTON_ENABLED="true")
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage, settings=settings)
+        update = callback_update(f"dump:{SOL_ADDR}", message_id=77)
+        await listener._handle_update(update)
+        await listener._handle_update(update)
+        assert len(sent_messages(calls)) == 1
+        acks = callback_answers(calls)
+        assert "already actioned" in acks[1]["text"].lower()
+
+
+async def test_taps_on_different_buttons_both_fire():
+    """The dedup key is (message_id, data): two DISTINCT buttons (different
+    messages) must each fire -- the guard must not collapse unrelated taps."""
+    settings = make_settings(MEMEINTEL_EXECUTION_BUY_BUTTON_ENABLED="true")
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage, settings=settings)
+        await listener._handle_update(callback_update(f"buy:{SOL_ADDR}:0.05", message_id=1))
+        await listener._handle_update(callback_update(f"buy:{SOL_ADDR}:0.05", message_id=2))
+        assert len(sent_messages(calls)) == 2           # both distinct buttons fired
+
+
+async def test_button_without_message_id_fails_open():
+    """A callback lacking a numeric message_id can't be deduped; it must fail
+    OPEN (execute) rather than silently swallow a legitimate trade."""
+    settings = make_settings(MEMEINTEL_EXECUTION_BUY_BUTTON_ENABLED="true")
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage, settings=settings)
+        await listener._handle_update(callback_update(f"buy:{SOL_ADDR}:0.05"))  # no message_id
+        assert len(sent_messages(calls)) == 1           # executed, not dropped
 
 
 async def test_buy_command_parses_amount():

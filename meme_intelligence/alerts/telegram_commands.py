@@ -49,6 +49,12 @@ _ERROR_BACKOFF_START = 2.0
 
 _REPLY_MAX_CHARS = 4000        # Telegram sendMessage hard limit is 4096
 _CALLBACK_ACK_MAX_CHARS = 190  # answerCallbackQuery text limit is 200
+# Only ask Telegram for fresh messages and button presses — never
+# edited_message (an edit to a /buy would be re-dispatched as a second live
+# trade; the dispatch path also guards this, this just avoids the traffic).
+_ALLOWED_UPDATES = '["message","callback_query"]'
+# How many recently-pressed trade buttons to remember for double-tap dedup.
+_ACTIONED_BUTTONS_CAP = 500
 
 # /check protections (Rule 11): one analysis at a time, and a short
 # per-token result cache so button-mashing can't burn API budget.
@@ -198,6 +204,10 @@ class TelegramCommandListener(BaseCollector):
         self._offset: int | None = None  # getUpdates cursor (in memory)
         self._task: asyncio.Task | None = None
         self._stopping = False
+        # Already-actioned trade buttons (message_id, callback_data) — a
+        # double-tap on a laggy client must not fire two real trades
+        # (bug-hunt finding, 2026-07-12). Bounded FIFO.
+        self._actioned_buttons: "OrderedDict[tuple[int, str], bool]" = OrderedDict()
         self._check_lock = asyncio.Lock()
         self._check_cache: "OrderedDict[tuple[str, str], tuple[float, str]]" = OrderedDict()
         self._handlers: dict[str, Callable[[list[str]], Awaitable[str | None]]] = {
@@ -262,7 +272,7 @@ class TelegramCommandListener(BaseCollector):
         (short poll, timeout 0), advancing the offset past it without
         handling a single update."""
         while not self._stopping:
-            params = {"timeout": "0"}
+            params = {"timeout": "0", "allowed_updates": _ALLOWED_UPDATES}
             if self._offset is not None:
                 params["offset"] = str(self._offset)
             payload = await self._get_json(f"bot{self._token}/getUpdates", params=params)
@@ -328,7 +338,8 @@ class TelegramCommandListener(BaseCollector):
 
     async def _poll_once(self) -> int:
         """One getUpdates cycle; returns the number of updates received."""
-        params = {"timeout": str(int(self._poll_timeout))}
+        params = {"timeout": str(int(self._poll_timeout)),
+                  "allowed_updates": _ALLOWED_UPDATES}
         if self._offset is not None:
             params["offset"] = str(self._offset)
         payload = await self._get_json(f"bot{self._token}/getUpdates", params=params)
@@ -380,7 +391,12 @@ class TelegramCommandListener(BaseCollector):
         if isinstance(callback, dict):
             await self._handle_callback(callback)
             return
-        message = update.get("message") or update.get("edited_message")
+        # Route ONLY fresh messages to command dispatch — never edited_message.
+        # Editing a `/buy`/`/dump` message (fixing a typo/amount) would
+        # otherwise be re-parsed as a brand-new command and fire a SECOND real
+        # on-chain trade the operator never intended (bug-hunt finding,
+        # 2026-07-12). Auth (`_authorized_chat`) still accepts edits above.
+        message = update.get("message")
         if isinstance(message, dict):
             await self._handle_message(message)
 
@@ -810,8 +826,15 @@ class TelegramCommandListener(BaseCollector):
     async def _handle_callback(self, callback: dict) -> None:
         callback_id = callback.get("id")
         data = callback.get("data")
+        # The button lives on a specific message; (message_id, data) uniquely
+        # identifies THIS button, so two taps of it dedup to one (below).
+        msg = callback.get("message") or {}
+        message_id = msg.get("message_id")
+        dedup_id = ((message_id, data)
+                    if isinstance(message_id, int) and isinstance(data, str) else None)
         try:
-            ack = await self._dispatch_callback(data if isinstance(data, str) else "")
+            ack = await self._dispatch_callback(
+                data if isinstance(data, str) else "", dedup_id)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 — a button bug must not kill the loop
@@ -821,14 +844,29 @@ class TelegramCommandListener(BaseCollector):
         # ALWAYS answer (stops the client-side spinner), even on failure.
         await self._answer_callback(callback_id, ack)
 
-    async def _dispatch_callback(self, data: str) -> str:
+    async def _dispatch_callback(self, data: str, dedup_id=None) -> str:
         if data.startswith("fb:"):
             return await self._handle_feedback(data)
         if data.startswith("buy:"):
-            return await self._handle_buy(data)
+            return await self._handle_buy(data, dedup_id)
         if data.startswith("dump:"):
-            return await self._handle_dump(data)
+            return await self._handle_dump(data, dedup_id)
         return "Unknown button."
+
+    def _claim_button(self, dedup_id) -> bool:
+        """True if this exact button press has not been actioned yet (and
+        claims it); False on a repeat — a double-tap of the SAME inline button
+        must not fire a second real trade (bug-hunt finding, 2026-07-12).
+        Updates are processed serially, so the second tap sees the first's
+        claim. A missing id fails OPEN (never blocks a legitimate trade)."""
+        if dedup_id is None:
+            return True
+        if dedup_id in self._actioned_buttons:
+            return False
+        self._actioned_buttons[dedup_id] = True
+        while len(self._actioned_buttons) > _ACTIONED_BUTTONS_CAP:
+            self._actioned_buttons.popitem(last=False)
+        return True
 
     async def _handle_feedback(self, data: str) -> str:
         parts = data.split(":", 2)
@@ -855,7 +893,7 @@ class TelegramCommandListener(BaseCollector):
         # and NOT fed into learning labels — operator opinion is an opinion.
         return f"Feedback recorded: {'👍' if verdict == 'up' else '👎'} (advisory)"
 
-    async def _handle_buy(self, data: str) -> str:
+    async def _handle_buy(self, data: str, dedup_id=None) -> str:
         """Callback ``buy:<address>:<sol>`` — an alert's preset buy button.
 
         Unlike the text commands (D4), a callback ack is a small popup, not a
@@ -874,6 +912,10 @@ class TelegramCommandListener(BaseCollector):
         guard = self._trading_guard()
         if guard:
             return guard
+        # Claimed AFTER the guard (so a guard-off tap isn't consumed) and
+        # BEFORE execution — a repeat tap of this button is rejected here.
+        if not self._claim_button(dedup_id):
+            return "Already actioned — see chat for the earlier result."
         message = await self._do_buy(parts[1], sol_amount)
         await self._reply(message)
         # The full outcome (success, refusal, or failure) is in the chat
@@ -882,7 +924,7 @@ class TelegramCommandListener(BaseCollector):
         # message it points to (bug-hunt finding, 2026-07-11).
         return "Done — see chat for the result."
 
-    async def _handle_dump(self, data: str) -> str:
+    async def _handle_dump(self, data: str, dedup_id=None) -> str:
         """Callback ``dump:<address>`` — sell the whole position back to SOL."""
         address = data.split(":", 1)[1]
         if classify_address(address) is None:
@@ -890,6 +932,11 @@ class TelegramCommandListener(BaseCollector):
         guard = self._trading_guard()
         if guard:
             return guard
+        # Claimed AFTER the guard (so a guard-off tap isn't consumed) and
+        # BEFORE execution — a repeat tap of this button is rejected here,
+        # mirroring _handle_buy (double-tap idempotency, bug-hunt 2026-07-12).
+        if not self._claim_button(dedup_id):
+            return "Already actioned — see chat for the earlier result."
         message = await self._do_dump(address)
         await self._reply(message)
         # See _handle_buy: the popup must not claim "Dump sent" when the full

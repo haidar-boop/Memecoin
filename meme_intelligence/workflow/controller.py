@@ -52,7 +52,6 @@ from meme_intelligence.core.enums import (
 from meme_intelligence.core.errors import (
     AllProvidersFailedError,
     CollectorError,
-    MemeIntelError,
 )
 from meme_intelligence.core.logging_setup import get_logger
 from meme_intelligence.database.storage import Storage
@@ -455,7 +454,15 @@ class ContinuousScanner:
                     cycle, stats.pools_seen, stats.candidates, stats.analyzed,
                     stats.launches_tracked, stats.learned, len(stats.alerts),
                 )
-            except MemeIntelError as exc:
+            except Exception as exc:  # noqa: BLE001
+                # Last-resort backstop (Rule 7): ONE failing cycle must never
+                # kill the 24/7 loop — that would strand the operator with no
+                # way to `/dump` a rugging position. Catches project errors AND
+                # raw ones a lower layer forgot to wrap (e.g. sqlite3.Operational
+                # Error on a full disk / locked DB under monitor+cron
+                # contention — bug-hunt finding, 2026-07-12). CancelledError /
+                # KeyboardInterrupt / SystemExit are BaseException and still
+                # propagate for a clean shutdown.
                 self._logger.error("cycle %d failed: %s (backing off %.0fs)", cycle, exc, backoff)
                 await self._sleep(backoff)
                 backoff = min(_ERROR_BACKOFF_MAX, backoff * 2)
@@ -542,10 +549,15 @@ class ContinuousScanner:
 
         # Periodic learning (Section 4/7): the classifier warm-starts once
         # enough coins have resolved. Cheap when not due; error-isolated so a
-        # training failure never breaks the loop (Rule 7).
+        # training failure never breaks the loop (Rule 7). Run OFF the event
+        # loop: the full-rebuild path (lightgbm retrain + HDBSCAN + faiss build)
+        # is CPU-bound and multi-second, and the Telegram poller + PumpPortal
+        # websocket share this loop — a synchronous rebuild would stall an
+        # emergency `/dump` for its whole duration (bug-hunt finding,
+        # 2026-07-12).
         if self._learning is not None:
             try:
-                if self._learning.retrain_if_due():
+                if await asyncio.to_thread(self._learning.retrain_if_due):
                     self._logger.info("mind layer retrained (cycle %d)", cycle)
             except Exception as exc:  # noqa: BLE001 — additive; must not kill the cycle
                 self._logger.warning("mind layer retrain failed: %s", exc)
@@ -996,8 +1008,9 @@ class ContinuousScanner:
         trajectory snapshot (built from data already collected — zero extra API
         calls) so the mind layer accumulates memory as the scanner runs. Any
         failure is logged and swallowed — the learning hook must never break a
-        scan cycle (Rule 7/9). The outer loop only catches ``MemeIntelError``,
-        so this catches broadly (the LearningService uses numpy/faiss/lightgbm).
+        scan cycle (Rule 7/9). This catches broadly at the source (the
+        LearningService uses numpy/faiss/lightgbm) so a learning failure is
+        contained here rather than relying on the outer cycle backstop.
         """
         if self._learning is None:
             return
@@ -1097,17 +1110,37 @@ class ContinuousScanner:
             and result.master.coverage < ws.insufficient_data_min_coverage
         )
         if insufficient and pair.pair_created_at is not None:
-            age_minutes = (now - pair.pair_created_at).total_seconds() / 60.0
-            if age_minutes < ws.insufficient_data_max_age_minutes:
-                # The VALUE carries the real, case-preserved address (Solana
-                # addresses are case-sensitive base58 — `key`'s address is
-                # lowercased for dedup only, same convention as `_seen`, and
-                # is never valid to hand back to a live API call).
+            giveup_at = pair.pair_created_at + timedelta(
+                minutes=ws.insufficient_data_max_age_minutes)
+            if now < giveup_at:
+                # VALUE = (next-due, case-preserved address, give-up deadline).
+                # Solana addresses are case-sensitive base58 — `key`'s address
+                # is lowercased for dedup only and is never valid to hand back
+                # to a live API call. `giveup_at` (the pool's own max age) lets
+                # the retry pass stop pacing this entry once it ages out, even
+                # across provider outages (bug-hunt finding, 2026-07-12).
                 self._retry_pending.add(
                     key, (now + timedelta(minutes=ws.insufficient_data_retry_minutes),
-                          pair.base_token.address))
+                          pair.base_token.address, giveup_at))
                 return  # NOT marked _seen — eligible for another look later
         self._seen.add(key)
+
+    def _repace_retry(self, key: tuple[str, str], address: str,
+                      giveup_at: datetime, now: datetime) -> None:
+        """After a NON-terminal retry outcome (market outage, security data
+        still not indexed, or the token analyzed via another path this cycle),
+        push the entry to its next paced due time — or finalize it into
+        ``_seen`` once the pool has aged past ``giveup_at``. Without this, a
+        failed retry left the entry at its old (already-past) due time and it
+        re-hit the provider EVERY cycle for the whole outage (bug-hunt finding,
+        2026-07-12)."""
+        if now >= giveup_at:
+            self._seen.add(key)
+            return
+        next_at = min(
+            now + timedelta(minutes=self._settings.workflow.insufficient_data_retry_minutes),
+            giveup_at)
+        self._retry_pending.add(key, (next_at, address, giveup_at))
 
     async def _retry_insufficient_data(self, stats: CycleStats, *,
                                        skip: set[str] = frozenset()) -> None:
@@ -1116,9 +1149,10 @@ class ContinuousScanner:
         ``_finalize_or_reschedule``). Each entry paces itself, so this scan
         is cheap even when nothing is due yet."""
         now = self._now()
-        due = [(key, address) for key, (until, address) in self._retry_pending.items()
+        due = [(key, address, giveup_at)
+               for key, (until, address, giveup_at) in self._retry_pending.items()
                if until <= now]
-        for key, address in due:
+        for key, address, giveup_at in due:
             if key in self._seen:
                 # A finalized key's _retry_pending entry is never deleted
                 # (the bounded set has no remove — stale is harmless dead
@@ -1127,21 +1161,28 @@ class ContinuousScanner:
                 continue
             chain = key[0]
             if address.lower() in skip:
-                continue  # analyzed moments ago this cycle; nothing new to learn
+                # Analyzed via another path this cycle — re-pace so it isn't
+                # re-hit immediately next cycle (bug-hunt finding).
+                self._repace_retry(key, address, giveup_at, now)
+                continue
             try:
                 pairs = await self._market.get_token_pairs(address, chain=chain)
             except (CollectorError, AllProvidersFailedError) as exc:
                 self._logger.warning(
                     "insufficient-data retry for %s skipped: market data unavailable (%s)",
                     address, exc)
-                continue  # stays pending at its old due time; tried again next pass
+                self._repace_retry(key, address, giveup_at, now)  # not every cycle
+                continue
             if not pairs:
                 self._seen.add(key)  # pool is gone — nothing left to wait for
                 continue
             pair = max(pairs, key=lambda p: p.liquidity_usd or 0.0)
             result = await self._pipeline.analyze_pair(pair, regime=self._regime)
             if result is None:
-                continue  # security data still not indexed; try again next pass
+                # Security data still not indexed — re-pace (do NOT leave it
+                # due, which re-hammered the failing provider every cycle).
+                self._repace_retry(key, address, giveup_at, now)
+                continue
             stats.analyzed += 1
             self._finalize_or_reschedule(key, result, pair, now)
             await self._process_result(

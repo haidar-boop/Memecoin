@@ -224,6 +224,11 @@ class LiveExecutor:
                 priority_fee_max_lamports=self._priority_fee_max,
                 max_slippage_bps=self._slippage_bps)
             signed = self._sign(swap_b64)
+            # The signature is DETERMINISTIC from the signed bytes (it matches
+            # what the RPC returns), so we can record it even if the send await
+            # is torn by a shutdown cancel mid-flight — see the CancelledError
+            # guard below (bug-hunt finding, 2026-07-12).
+            expected_sig = self._signature_of(signed)
         except (CollectorError, TradeError) as exc:
             return f"{action} failed before sending — nothing was spent: {self._safe(str(exc))}"
 
@@ -231,6 +236,21 @@ class LiveExecutor:
         # the network, so we must NOT invite a blind retry.
         try:
             signature = await self._rpc.send_raw_transaction(signed)
+        except asyncio.CancelledError:
+            # A graceful-shutdown cancel can land while the sendTransaction
+            # request body is already on the wire — the tx may be broadcast
+            # with no return value. Journal + log the derived signature so it
+            # is never lost, then propagate. The operator verifies on Solscan
+            # and must NOT blindly re-tap (mirrors the confirm-stage guard;
+            # the send window previously lacked it — bug-hunt finding).
+            self._journal(mint, kind,
+                          f"live {kind} {detail}: {expected_sig} "
+                          "(send cancelled mid-flight — may be broadcast, verify on-chain)")
+            self._logger.error(
+                "%s for %s cancelled during send — may already be broadcast; "
+                "verify on-chain, do NOT re-tap: %s%s",
+                action, mint, _SOLSCAN_TX, expected_sig)
+            raise
         except CollectorError as exc:
             self._logger.error("%s submission error for %s: %s", action, mint,
                                self._safe(str(exc)))
@@ -281,6 +301,21 @@ class LiveExecutor:
             return base64.b64encode(bytes(signed)).decode("ascii")
         except Exception as exc:  # noqa: BLE001 — malformed tx must not leak internals
             raise TradeError("could not sign the swap transaction") from exc
+
+    def _signature_of(self, signed_tx_base64: str) -> str:
+        """The transaction's fee-payer signature, derivable from the signed
+        bytes without broadcasting — deterministic and identical to the string
+        the RPC returns. Lets a broadcast tx be recorded even if the send await
+        is cancelled mid-flight. Returns 'unknown' if it can't be derived
+        (never blocks or fails the trade over this)."""
+        from solders.transaction import VersionedTransaction
+
+        try:
+            tx = VersionedTransaction.from_bytes(base64.b64decode(signed_tx_base64))
+            sigs = tx.signatures
+            return str(sigs[0]) if sigs else "unknown"
+        except Exception:  # noqa: BLE001 — best effort; a derive failure must not raise
+            return "unknown"
 
     async def _confirm(self, signature: str) -> bool:
         """Poll until the signature confirms/finalizes; True if it landed.

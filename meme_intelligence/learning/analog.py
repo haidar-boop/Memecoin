@@ -172,8 +172,15 @@ class AnalogMemory:
         now = self._now()
         neighbors: list[AnalogNeighbor] = []
         # strict=True: FAISS returns sims and idxs of identical shape (k_eff).
+        n_entries = len(self._entries)
         for sim, idx in zip(sims[0], idxs[0], strict=True):
-            if idx < 0:                      # FAISS pads with -1 when short
+            # idx < 0: FAISS pads with -1 when short. idx >= n_entries: the
+            # persisted index holds more vectors than the entries metadata (a
+            # torn/interleaved persist across the daemon+cron processes) —
+            # guard it so a surplus id can't IndexError and crash the whole
+            # verdict path; degrade to fewer analogs instead (bug-hunt finding,
+            # 2026-07-12).
+            if idx < 0 or int(idx) >= n_entries:
                 continue
             entry = self._entries[int(idx)]
             age_days = max(0.0, (now - entry.resolved_at).total_seconds() / 86400.0)
