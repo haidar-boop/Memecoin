@@ -77,6 +77,24 @@ def _from_iso_timestamp(value: Any) -> datetime | None:
     return parsed
 
 
+@dataclass(frozen=True)
+class TokenBoost:
+    """A token's current DexScreener paid-boost activity.
+
+    A boost is a PAID promotion, not organic traction: ``total_amount`` is the
+    cumulative boost count a token has bought. A large number means someone
+    spent to be seen — which both real projects and pump-and-dumps do — so it
+    is a measure of attention/marketing spend, never an endorsement.
+    """
+
+    chain: str
+    token_address: str
+    total_amount: float
+    amount: float | None = None       # most recent boost increment (latest feed only)
+    url: str | None = None
+    links: tuple[str, ...] = ()
+
+
 class DexScreenerClient(BaseCollector):
     """Client for the public DexScreener REST API."""
 
@@ -128,6 +146,57 @@ class DexScreenerClient(BaseCollector):
         )
         pairs = self._parse_pairs(payload)
         return pairs[0] if pairs else None
+
+    async def get_token_boost(
+        self, token_address: str, chain: str | None = None,
+    ) -> "TokenBoost | None":
+        """Current DexScreener paid-boost activity for a token, or ``None`` when
+        it is not among the actively-boosted set.
+
+        DexScreener exposes no per-token boost endpoint, so this scans the
+        top-boosted and latest-boosted lists (each ~30 entries, across all
+        chains) for the address. A boost is PAID promotion, not organic
+        traction — ``None`` means "not in the current top/latest boosted set",
+        which is NOT the same as "zero boosts" (a small or older boost may have
+        dropped off both lists). Cheap and cached; intended for on-demand
+        lookups, not the scan loop.
+        """
+        if not token_address:
+            raise ValueError("token_address must be non-empty")
+        wanted = token_address.lower()
+        for path in ("token-boosts/top/v1", "token-boosts/latest/v1"):
+            payload = await self._get_json(
+                path, cache_key=f"dexscreener:{path}", cache_ttl=60.0)
+            boost = self._find_boost(payload, wanted, chain)
+            if boost is not None:
+                return boost
+        return None
+
+    @staticmethod
+    def _find_boost(payload: Any, wanted: str, chain: str | None) -> "TokenBoost | None":
+        """Locate ``wanted`` (lowercased address) in a boosts list payload."""
+        if not isinstance(payload, list):
+            return None
+        for raw in payload:
+            if not isinstance(raw, dict):
+                continue
+            if (raw.get("tokenAddress") or "").lower() != wanted:
+                continue
+            if chain is not None and raw.get("chainId") != chain:
+                continue
+            links = tuple(
+                link["url"] for link in (raw.get("links") or [])
+                if isinstance(link, dict) and link.get("url")
+            )
+            return TokenBoost(
+                chain=raw.get("chainId") or "",
+                token_address=raw.get("tokenAddress") or "",
+                total_amount=_to_float(raw.get("totalAmount")) or 0.0,
+                amount=_to_float(raw.get("amount")),
+                url=raw.get("url"),
+                links=links,
+            )
+        return None
 
     def _parse_pairs(self, payload: Any) -> list[DexPair]:
         """Normalize a DexScreener response into ``DexPair`` models.

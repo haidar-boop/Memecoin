@@ -94,6 +94,7 @@ _HELP_TEXT = "\n".join([
     "/unhold <address> - release a holding",
     "/holdings - list active holdings (alias /positions)",
     "/watchlist - top tracked coins by tier",
+    "/boost <address> [chain] - DexScreener paid-boost amount for a coin",
     "/mind - learning-layer report card + feedback tallies",
     "/mute <address> - silence ALL alerts for a token",
     "/unmute <address> - restore alerts for a token",
@@ -119,6 +120,9 @@ class CommandContext:
     check_runner: Callable[..., Awaitable[Any]]
     learning_service: Any = None
     executor: Any = None
+    # (address, chain) -> TokenBoost|None — DexScreener paid-boost lookup for
+    # /boost. Optional (None = the command reports it is unavailable).
+    boost_lookup: Callable[..., Awaitable[Any]] | None = None
 
 
 def _fmt_duration(seconds: float | None) -> str:
@@ -221,6 +225,7 @@ class TelegramCommandListener(BaseCollector):
             "/holdings": self._cmd_holdings,
             "/positions": self._cmd_holdings,
             "/watchlist": self._cmd_watchlist,
+            "/boost": self._cmd_boost,
             "/mind": self._cmd_mind,
             "/mute": self._cmd_mute,
             "/unmute": self._cmd_unmute,
@@ -669,6 +674,37 @@ class TelegramCommandListener(BaseCollector):
         except Exception as exc:  # noqa: BLE001 — advisory only
             self._logger.warning("mind line unavailable for /check: %s", exc)
             return None
+
+    async def _cmd_boost(self, args: list[str]) -> str:
+        """DexScreener paid-boost amount for a coin (Project 5 — light social signal).
+
+        A boost is PAID promotion, not organic hype, so the reply says so — it
+        is attention/marketing spend, never an endorsement (rugs buy boosts too).
+        """
+        address, error = self._validated_address(args, "/boost <address> [chain]")
+        if error:
+            return error
+        chain = args[1] if len(args) > 1 else "solana"
+        if self._ctx.boost_lookup is None:
+            return "Boost lookup is unavailable in this build."
+        try:
+            boost = await self._ctx.boost_lookup(address, chain)
+        except Exception as exc:  # noqa: BLE001 — advisory command, never crash the poll loop
+            self._logger.warning("boost lookup failed for %s: %s", address, exc)
+            return "Couldn't reach DexScreener for boost data — try again shortly."
+        label = _sanitize_identity(address[:4] + "…" + address[-4:])
+        if boost is None:
+            return (f"🚀 No active DexScreener boost for {label}.\n"
+                    "Not in the current top/latest boosted set (a small or older "
+                    "boost may not show). Boosts are paid promotion, not organic hype.")
+        lines = [f"🚀 DexScreener boost for {label}: {boost.total_amount:.0f}"]
+        if boost.amount is not None and boost.amount != boost.total_amount:
+            lines.append(f"latest boost: +{boost.amount:.0f}")
+        lines.append("Paid promotion — someone spent to be seen. Rugs buy boosts too, "
+                     "so treat it as attention, not endorsement.")
+        if boost.url:
+            lines.append(boost.url)
+        return "\n".join(lines)
 
     async def _cmd_holding(self, args: list[str]) -> str:
         address, error = self._validated_address(args, "/holding <address>")

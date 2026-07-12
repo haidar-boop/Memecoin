@@ -727,3 +727,52 @@ async def test_dump_button_ack_does_not_claim_sent_on_refusal():
         acks = callback_answers(calls)
         assert acks and "sent" not in acks[0]["text"].lower()
         assert "see chat" in acks[0]["text"].lower()
+
+
+# ---- /boost — DexScreener paid-boost lookup (Project 5) ----
+
+async def test_boost_command_reports_amount():
+    from meme_intelligence.collectors.market_data import TokenBoost
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, _ = make_listener(storage)
+
+        async def fake_boost(address, chain=None):
+            return TokenBoost(chain="solana", token_address=address, total_amount=600.0,
+                              url="https://dexscreener.com/solana/x")
+
+        listener._ctx.boost_lookup = fake_boost
+        reply = await listener._cmd_boost([SOL_ADDR])
+        assert "600" in reply
+        # the reply must carry the honest "paid promotion, not endorsement" caveat
+        assert "endorsement" in reply.lower()
+
+
+async def test_boost_command_no_active_boost():
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, _ = make_listener(storage)
+
+        async def fake_boost(address, chain=None):
+            return None
+
+        listener._ctx.boost_lookup = fake_boost
+        reply = await listener._cmd_boost([SOL_ADDR])
+        assert "No active DexScreener boost" in reply
+
+
+async def test_boost_command_unavailable_when_not_wired():
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, _ = make_listener(storage)  # boost_lookup defaults to None
+        reply = await listener._cmd_boost([SOL_ADDR])
+        assert "unavailable" in reply.lower()
+
+
+async def test_boost_command_survives_lookup_error():
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, _ = make_listener(storage)
+
+        async def boom(address, chain=None):
+            raise RuntimeError("dexscreener down")
+
+        listener._ctx.boost_lookup = boom
+        reply = await listener._cmd_boost([SOL_ADDR])
+        assert "try again" in reply.lower()   # never raises into the poll loop

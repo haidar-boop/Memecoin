@@ -149,3 +149,70 @@ async def test_empty_arguments_rejected():
         await client.get_token_pairs("")
     with pytest.raises(ValueError):
         await client.search_pairs("")
+
+
+# ---- DexScreener paid-boost lookup (Project 5 — light social signal) ----
+
+_BOOSTS = [
+    {"chainId": "solana", "tokenAddress": "BoostedAddr1", "totalAmount": 600,
+     "url": "https://dexscreener.com/solana/boostedaddr1",
+     "links": [{"type": "twitter", "url": "https://x.com/foo"},
+               {"url": "https://t.me/foo"}]},
+    {"chainId": "ethereum", "tokenAddress": "OtherAddr", "totalAmount": 100},
+]
+
+
+async def test_get_token_boost_found(monkeypatch):
+    client = make_client()
+
+    async def fake_get_json(path, params=None, *, cache_key=None, cache_ttl=None):
+        return _BOOSTS if "top" in path else []
+
+    monkeypatch.setattr(client, "_get_json", fake_get_json)
+    boost = await client.get_token_boost("BoostedAddr1", chain="solana")
+    assert boost is not None
+    assert boost.total_amount == 600
+    assert boost.chain == "solana"
+    assert "https://x.com/foo" in boost.links
+
+
+async def test_get_token_boost_not_found_returns_none(monkeypatch):
+    client = make_client()
+
+    async def fake_get_json(path, params=None, *, cache_key=None, cache_ttl=None):
+        return _BOOSTS if "top" in path else []
+
+    monkeypatch.setattr(client, "_get_json", fake_get_json)
+    assert await client.get_token_boost("NeverBoosted", chain="solana") is None
+
+
+async def test_get_token_boost_chain_filter(monkeypatch):
+    client = make_client()
+    shared = [{"chainId": "ethereum", "tokenAddress": "SharedAddr", "totalAmount": 50}]
+
+    async def fake_get_json(path, params=None, *, cache_key=None, cache_ttl=None):
+        return shared if "top" in path else []
+
+    monkeypatch.setattr(client, "_get_json", fake_get_json)
+    assert await client.get_token_boost("SharedAddr", chain="solana") is None
+    matched = await client.get_token_boost("SharedAddr", chain="ethereum")
+    assert matched is not None and matched.total_amount == 50
+
+
+async def test_get_token_boost_falls_back_to_latest(monkeypatch):
+    client = make_client()
+
+    async def fake_get_json(path, params=None, *, cache_key=None, cache_ttl=None):
+        if "latest" in path:
+            return [{"chainId": "solana", "tokenAddress": "LatestOnly",
+                     "totalAmount": 30, "amount": 10}]
+        return []  # not in the top-boosted list
+
+    monkeypatch.setattr(client, "_get_json", fake_get_json)
+    boost = await client.get_token_boost("LatestOnly", chain="solana")
+    assert boost is not None and boost.total_amount == 30 and boost.amount == 10
+
+
+async def test_get_token_boost_empty_address_rejected():
+    with pytest.raises(ValueError):
+        await make_client().get_token_boost("")
