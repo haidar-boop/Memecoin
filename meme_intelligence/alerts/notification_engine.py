@@ -76,6 +76,19 @@ _BUY_SIDE_ALERT_TYPES = frozenset({
     "momentum", "smart_money_accumulation",
 })
 
+# The WEAK/provisional buy-side tiers — everything that does not require
+# every serious gate to be independently verified. These are what an
+# actively-declining coin re-pitches as "new" (bug-hunt finding): a coin
+# whose score just fell can still clear a loose provisional threshold.
+# ``high_priority_opportunity``/``strong_candidate`` are deliberately
+# excluded — clearing THAT bar despite a decline is a rare enough signal
+# that both alerts reaching the operator at full priority (the existing
+# same-batch-interest contract for ``score_drop_review``) is more useful
+# than hiding it; the operator sees the contradiction and decides.
+_DECLINE_SUPPRESSED_TYPES = frozenset({
+    "early_opportunity", "momentum", "smart_money_accumulation",
+})
+
 _NO_INTEREST_NOTE = ("informational only: this token never earned an "
                      "opportunity alert, so no operator decision is exposed "
                      "to it (interest gate)")
@@ -254,7 +267,8 @@ class AutomationRules:
         drop = self._score_drop_rule(result, previous_score)
         if drop is not None:
             events.append(drop)
-        # Three things — and only three — suppress a buy-side alert entirely:
+        # Three things suppress a buy-side alert ENTIRELY, whatever tier it
+        # cleared:
         #
         # 1) RUG VETO ("if it's a rug pull don't send it at all"). The
         #    ``deterministic_risk_veto`` IS the rug signal: the rug engine's
@@ -272,6 +286,27 @@ class AutomationRules:
         #    longer an early opportunity (the move already happened), so its
         #    buy-side alert is suppressed. OFF by default. See ``_oversized``.
         #
+        # A fourth condition suppresses only the WEAK/provisional tiers
+        # (``_DECLINE_SUPPRESSED_TYPES``):
+        #
+        # 4) ACTIVELY DECLINING — the score fell at least ``score_drop_review_
+        #    points`` since the last look, the same signal ``score_drop_rule``
+        #    already reports. Bug found in the field: a previously-alerted,
+        #    now-thinning coin (liquidity cut roughly in half, score 90 -> 65
+        #    a day later) still numerically cleared the loose provisional
+        #    gates and fired a fresh MEDIUM "early opportunity" in the SAME
+        #    cycle the bot's own score_drop_review flagged it as collapsing —
+        #    re-pitching a dying coin as new. A coin that still clears the
+        #    much stricter ``strong_candidate``/``high_priority_opportunity``
+        #    bar despite the decline is exempt: that is a rare enough signal
+        #    that showing both alerts at full priority (the existing
+        #    same-batch-interest contract for ``score_drop_review``) beats
+        #    hiding it — the operator sees the contradiction and decides.
+        #    ``score_drop_review`` is PROTECTIVE, not buy-side, so it always
+        #    still fires; this only stops the weak-tier re-pitch. A coin's
+        #    first-ever look has no ``previous_score`` and is never penalized
+        #    for being new. See ``_score_declining``.
+        #
         # Everything else soft (thin-but-real liquidity, mint/freeze authority,
         # sell tax, deployer history) only ANNOTATES via the checklist. Protective
         # alerts always pass — a flagged/dying coin's holder still needs the
@@ -280,13 +315,15 @@ class AutomationRules:
                 or self._untradeable(result) or self._oversized(result)):
             events = [e for e in events if e.alert_type not in _BUY_SIDE_ALERT_TYPES]
         else:
-            # NOT a rug: individual soft checks (liquidity/market-cap floor,
-            # mint/freeze authority, sell tax, deployer history) no longer
-            # SUPPRESS — that used to drop the whole alert on a single thin-pool
-            # miss. Instead the safety checklist rides ON each surviving buy-side
-            # alert so the operator sees what passed and what fell short and
-            # decides ("if just one thing misses the checklist, send it through
-            # and let me know").
+            if self._score_declining(result, previous_score):
+                events = [e for e in events if e.alert_type not in _DECLINE_SUPPRESSED_TYPES]
+            # NOT a hard veto: individual soft checks (liquidity/market-cap
+            # floor, mint/freeze authority, sell tax, deployer history) no
+            # longer SUPPRESS — that used to drop the whole alert on a single
+            # thin-pool miss. Instead the safety checklist rides ON each
+            # surviving buy-side alert so the operator sees what passed and
+            # what fell short and decides ("if just one thing misses the
+            # checklist, send it through and let me know").
             checklist = _render_checklist(self._safety_checklist(result))
             if checklist:
                 events = [dataclasses.replace(e, checklist=checklist)
@@ -776,11 +813,9 @@ class AutomationRules:
     # IF the score drops sharply vs the last snapshot THEN review (Part 13 Section 7).
     def _score_drop_rule(self, result: PipelineResult,
                          previous_score: float | None) -> AlertEvent | None:
-        if previous_score is None:
+        if not self._score_declining(result, previous_score):
             return None
         drop = previous_score - result.master.final_score
-        if drop < self._s.score_drop_review_points:
-            return None
         return AlertEvent(
             priority=AlertPriority.HIGH,
             alert_type="score_drop_review",
@@ -792,6 +827,19 @@ class AutomationRules:
             scores={"master": result.master.final_score},
             monitoring=("re-read the original thesis; archive if it no longer holds",),
         )
+
+    def _score_declining(self, result: PipelineResult,
+                         previous_score: float | None) -> bool:
+        """True when the score fell by at least the review threshold since the
+        last look. Shared by ``_score_drop_rule`` (the informational alert)
+        and the buy-side suppression below: a coin caught mid-decline is not
+        a fresh early opportunity, whatever its current absolute score still
+        clears. ``previous_score is None`` (a coin's first-ever look) never
+        counts as declining — a fresh discovery is never penalized for being
+        new."""
+        if previous_score is None:
+            return False
+        return (previous_score - result.master.final_score) >= self._s.score_drop_review_points
 
 
 def events_from_security_changes(

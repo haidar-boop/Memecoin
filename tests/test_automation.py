@@ -234,6 +234,68 @@ async def test_score_drop_rule():
     assert not any(e.alert_type == "score_drop_review" for e in events_small)
 
 
+# ---- Declining-score suppression for buy-side alerts (bug-hunt finding) ----
+
+async def test_declining_score_suppresses_the_weak_opportunity_tier():
+    """A coin whose score just collapsed is not a fresh early opportunity,
+    whatever its current absolute score still clears — the exact re-pitch a
+    real coin hit: a day-old coin, liquidity roughly halved, score 90 -> 65,
+    still fired a MEDIUM early_opportunity in the same cycle its own
+    score_drop_review flagged it as declining."""
+    rules = AutomationRules(
+        # Forces the WEAK "early_opportunity" fallback instead of the strict
+        # strong_candidate tier (fixture liquidity is 90k) — matching the
+        # real coin, which never cleared the strict bar either.
+        AlertThresholds(strong_candidate_min_liquidity_usd=100_000.0),
+        AlertEngineSettings())
+    result = await pipeline_result()
+    events = rules.evaluate(result, previous_score=result.master.final_score + 25)
+    types = {e.alert_type for e in events}
+    assert "early_opportunity" not in types        # the weak re-pitch is stopped
+    assert "score_drop_review" in types             # the protective alert still fires
+
+
+async def test_declining_score_does_not_hide_a_genuinely_strong_candidate():
+    """A coin that STILL clears the strict strong-candidate bar despite a
+    decline is a rare enough signal that both alerts should reach the
+    operator at full priority, not be hidden — matches the existing
+    same-batch-interest contract for score_drop_review."""
+    result = await pipeline_result()   # fires HIGH strong_candidate
+    events = make_rules().evaluate(result, previous_score=result.master.final_score + 25)
+    types = {e.alert_type for e in events}
+    assert "strong_candidate" in types
+    assert "score_drop_review" in types
+
+
+async def test_minor_score_dip_does_not_suppress_buy_side():
+    """A small re-scoring wobble below the review threshold is not a
+    decline — buy-side alerts are unaffected."""
+    result = await pipeline_result()
+    events = make_rules().evaluate(
+        result, previous_score=result.master.final_score + 5)  # below the 15pt threshold
+    types = {e.alert_type for e in events}
+    assert types & _BUY_SIDE_ALERT_TYPES
+    assert "score_drop_review" not in types
+
+
+async def test_fresh_discovery_never_suppressed_as_declining():
+    """A coin's first-ever look has no previous_score — it is never
+    penalized for being new."""
+    result = await pipeline_result()
+    events = make_rules().evaluate(result)  # previous_score defaults to None
+    types = {e.alert_type for e in events}
+    assert types & _BUY_SIDE_ALERT_TYPES
+
+
+async def test_score_drop_review_unaffected_by_its_own_suppression():
+    """The protective alert is unaffected by the new rule — only the
+    buy-side re-pitch is stopped, not the warning that triggered it."""
+    result = await pipeline_result()
+    events = make_rules().evaluate(result, previous_score=result.master.final_score + 25)
+    drop = [e for e in events if e.alert_type == "score_drop_review"]
+    assert drop and drop[0].priority is AlertPriority.HIGH
+
+
 # ---- Dead-token post-mortem (Part 29 Section 1) ----
 
 async def test_dead_token_gets_single_postmortem_not_warning_spam():
