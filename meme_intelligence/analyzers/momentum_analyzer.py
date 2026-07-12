@@ -51,8 +51,12 @@ _TREND_BASE_SIGNAL = 40.0
 
 # Multi-window consistency signals.
 _CONSISTENT_TREND_SIGNAL = 90.0   # 1h, 6h, and 24h all positive
+_DOWNTREND_SIGNAL = 20.0          # 1h, 6h, and 24h all negative
 _FADING_TREND_SIGNAL = 35.0       # 24h up but the last hour is red
 _MIXED_TREND_SIGNAL = 60.0
+
+# A vertical, unsupported 1h spike is weak momentum, not strength.
+_UNSUPPORTED_SPIKE_SIGNAL = 35.0
 
 # Buy-pressure shift signals (1h buy ratio vs 24h baseline).
 _BUYERS_INCREASING_SIGNAL = 85.0
@@ -184,6 +188,7 @@ class MomentumAnalyzer:
 
         if s.observe("price_change_1h", pair.price_change_1h):
             if pair.price_change_1h >= self._t.spike_1h_percent:
+                s.signal(_UNSUPPORTED_SPIKE_SIGNAL)
                 s.deduct(15, RiskTier.ACCEPTABLE_UNCERTAINTY,
                          f"+{pair.price_change_1h:.0f}% in one hour: vertical moves often retrace")
 
@@ -197,6 +202,8 @@ class MomentumAnalyzer:
         h1, h6, h24 = changes
         if h1 >= 0 and h6 >= 0 and h24 >= 0:
             return _CONSISTENT_TREND_SIGNAL
+        if h1 < 0 and h6 < 0 and h24 < 0:
+            return _DOWNTREND_SIGNAL
         if h24 > 0 and h1 < 0:
             return _FADING_TREND_SIGNAL
         return _MIXED_TREND_SIGNAL
@@ -256,11 +263,10 @@ class MomentumAnalyzer:
         # Momentum built on suspect volume is fake momentum (Part 26, Section 7).
         volume_quality = onchain.sub_scores.get("volume_quality") if onchain else None
         if s.observe("volume_quality", volume_quality):
+            s.signal(volume_quality)
             if volume_quality < _SUSPECT_VOLUME_QUALITY_BELOW:
                 s.deduct(25, RiskTier.SERIOUS_WARNING,
                          "momentum is built on suspect volume quality")
-            else:
-                s.signal(volume_quality)
 
         return s
 

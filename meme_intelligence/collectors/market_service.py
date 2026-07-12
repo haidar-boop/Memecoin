@@ -74,8 +74,15 @@ class MarketDataService:
         if len(self._providers) < 2:
             return None, "no second source configured for verification"
 
-        # Ask every *other* provider until one answers.
-        for provider in self._providers[1:]:
+        # Ask every provider until one *independently* answers. The pooled
+        # lookup may have served this pair from any provider (the primary can
+        # be in cooldown), and the pair carries no origin — so we cannot just
+        # assume it came from providers[0] and skip only that slot. Instead we
+        # skip whichever provider returns a byte-identical snapshot below: that
+        # provider IS the origin (independent snapshots are never tick-
+        # identical, per _AGREEMENT_FACTOR), so counting it would let a source
+        # "confirm" its own figure.
+        for provider in self._providers:
             try:
                 pairs = await provider.get_token_pairs(pair.base_token.address, chain=pair.chain)
             except Exception as exc:  # provider-specific failure: try the next one
@@ -87,6 +94,11 @@ class MarketDataService:
             if other is None and pairs:
                 other = max(pairs, key=lambda p: p.liquidity_usd or 0.0)
             if other is None or other.liquidity_usd is None:
+                continue
+            if other == pair:
+                # Byte-identical snapshot: this provider is the very source
+                # that served the pair (or a mirror of it), not an independent
+                # second opinion — keep looking for a real one.
                 continue
 
             low, high = sorted((pair.liquidity_usd, other.liquidity_usd))

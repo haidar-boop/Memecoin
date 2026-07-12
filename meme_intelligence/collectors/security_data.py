@@ -215,7 +215,11 @@ class GoPlusClient(BaseCollector):
             selfdestruct=_flag(raw.get("selfdestruct")),
             buy_tax_percent=_fraction_to_percent(raw.get("buy_tax")),
             sell_tax_percent=_fraction_to_percent(raw.get("sell_tax")),
-            tax_modifiable=_flag(raw.get("slippage_modifiable")),
+            # GoPlus's EVM endpoint has no distinct tax-modifiable field: its
+            # single "trading tax can be modified by the owner" signal is
+            # ``slippage_modifiable`` (scored once via slippage_modifiable below).
+            # Leave tax_modifiable as None (its default) so that one GoPlus
+            # signal is not deducted twice (contract + manipulation).
             fake_token=_flag(raw.get("fake_token")),
             is_airdrop_scam=_flag(raw.get("is_airdrop_scam")),
             anti_whale_modifiable=_flag(raw.get("anti_whale_modifiable")),

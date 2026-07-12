@@ -137,6 +137,13 @@ class RiskAnalyzer:
         ):
             category = RiskCategory.HIGH
 
+        # A confirmed honeypot/rug is EXTREME risk by definition: floor the
+        # category so favorable market/community/token components cannot dilute
+        # a destructive security finding down to MODERATE (Part 31: destructive
+        # findings pin the relevant component at maximum; unknown is not safe).
+        if security.is_destructive:
+            category = RiskCategory.EXTREME
+
         main_risks = self._main_risks(security, community, components)
         self._logger.info(
             "risk assessment %s/%s: score=%.0f category=%s coverage=%.0f%%",

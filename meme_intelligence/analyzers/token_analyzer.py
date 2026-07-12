@@ -187,8 +187,16 @@ class TokenAnalyzer:
     # ---- Stage & valuation (Part 7 Sections 2-3) ----
 
     def _effective_mcap(self, pair: DexPair) -> float | None:
-        """Market cap, falling back to FDV when circulating cap is unreported."""
-        return pair.market_cap if pair.market_cap is not None else pair.fdv
+        """Market cap, falling back to FDV when circulating cap is unreported.
+
+        A reported cap of ``0`` (or negative) is treated as missing, not as a
+        valid zero-cap anchor: otherwise the token stages EARLY and earns a
+        full valuation signal on non-existent data (Rule 8)."""
+        if pair.market_cap is not None and pair.market_cap > 0:
+            return pair.market_cap
+        if pair.fdv is not None and pair.fdv > 0:
+            return pair.fdv
+        return None
 
     def _classify_stage(self, pair: DexPair) -> MarketCapStage:
         mcap = self._effective_mcap(pair)

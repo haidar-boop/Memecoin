@@ -71,6 +71,13 @@ class SubScore:
     def score(self) -> float | None:
         if self.known_count == 0:
             return None
+        # A confirmed fatal condition is not a healthy 100: any category holding
+        # a DESTRUCTIVE finding scores 0 regardless of signals/deductions.
+        # flag_destructive records deduction=0.0, so a destructive-only category
+        # would otherwise return base=100; the overall red-flag override lives in
+        # each analyzer, but the per-category score must reflect the fatal flaw too.
+        if any(f.severity is RiskTier.DESTRUCTIVE for f in self.findings):
+            return 0.0
         base = sum(self._signals) / len(self._signals) if self._signals else 100.0
         total = base - sum(f.deduction for f in self.findings)
         return max(0.0, min(100.0, total))

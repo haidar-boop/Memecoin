@@ -63,9 +63,12 @@ class ProviderPool:
         self._cooldown_seconds = cooldown_seconds
         self._time = time_func
         self._logger = logger or logging.getLogger("meme_intelligence.provider_pool")
-        self._states: dict[str, _ProviderState] = {
-            self._name_of(p): _ProviderState() for p in self._providers
-        }
+        # Key state by position, not by name: two providers can share a
+        # display name (same client class, or duplicate `name`) and must
+        # still get independent health/failover state (Rule 9).
+        self._states: list[_ProviderState] = [
+            _ProviderState() for _ in self._providers
+        ]
 
     @staticmethod
     def _name_of(provider: Any) -> str:
@@ -81,9 +84,9 @@ class ProviderPool:
         now = self._time()
         causes: dict[str, Exception] = {}
 
-        for provider in self._providers:
+        for index, provider in enumerate(self._providers):
             name = self._name_of(provider)
-            state = self._states[name]
+            state = self._states[index]
             if state.cooldown_until > now:
                 continue
 
@@ -118,12 +121,12 @@ class ProviderPool:
         now = self._time()
         return [
             ProviderHealth(
-                name=name,
+                name=self._name_of(provider),
                 healthy=state.cooldown_until <= now,
                 consecutive_failures=state.consecutive_failures,
                 total_failures=state.total_failures,
                 total_successes=state.total_successes,
                 cooldown_remaining=max(0.0, state.cooldown_until - now),
             )
-            for name, state in self._states.items()
+            for provider, state in zip(self._providers, self._states)
         ]

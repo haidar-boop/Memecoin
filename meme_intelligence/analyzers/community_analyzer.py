@@ -176,11 +176,19 @@ class CommunityAnalyzer:
         if s.observe("discord_active_percent", p.discord_active_percent):
             s.signal(scale(p.discord_active_percent, 0.0, self._t.telegram_active_target_percent))
 
-        if s.observe("duplicate_message_percent", p.duplicate_message_percent):
-            if p.duplicate_message_percent > self._t.duplicate_message_warn_percent:
-                s.deduct(40, RiskTier.SERIOUS_WARNING,
-                         f"{p.duplicate_message_percent:.0f}% of messages are near-identical: "
-                         "engagement looks scripted")
+        # A clean duplicate-message rate is the absence of a red flag, not
+        # positive engagement quality: on its own it must not invent a perfect
+        # score (a "known" category with no signals falls back to base=100). So a
+        # clean gate scores nothing and does not make the category known; only an
+        # elevated rate is observed (-> known) and penalized, and a missing value
+        # still records as unknown.
+        if (p.duplicate_message_percent is not None
+                and p.duplicate_message_percent <= self._t.duplicate_message_warn_percent):
+            pass
+        elif s.observe("duplicate_message_percent", p.duplicate_message_percent):
+            s.deduct(40, RiskTier.SERIOUS_WARNING,
+                     f"{p.duplicate_message_percent:.0f}% of messages are near-identical: "
+                     "engagement looks scripted")
 
         return s
 
@@ -197,7 +205,15 @@ class CommunityAnalyzer:
             else:
                 s.signal(max(0.0, _GROWTH_FLOOR_SIGNAL + rate))  # decline erodes the floor
 
-        if s.observe("bot_follower_percent", p.bot_follower_percent):
+        # A clean bot-follower share is the absence of a red flag, not evidence
+        # of healthy growth: on its own it must not invent a perfect score. So a
+        # clean gate scores nothing and does not make the category known; only an
+        # elevated share is observed (-> known) and flagged, and a missing value
+        # still records as unknown.
+        if (p.bot_follower_percent is not None
+                and p.bot_follower_percent < self._t.bot_follower_warn_percent):
+            pass
+        elif s.observe("bot_follower_percent", p.bot_follower_percent):
             if p.bot_follower_percent >= self._t.bot_follower_artificial_percent:
                 s.flag_destructive(
                     f"{p.bot_follower_percent:.0f}% bot followers: fake community"
@@ -240,10 +256,17 @@ class CommunityAnalyzer:
             s.signal(scale(p.dev_updates_per_week, 0.0, self._t.target_dev_updates_per_week))
         if s.observe("dev_responds_to_community", p.dev_responds_to_community):
             s.signal(100.0 if p.dev_responds_to_community else 20.0)
-        if s.observe("dev_appears_only_on_pumps", p.dev_appears_only_on_pumps):
-            if p.dev_appears_only_on_pumps:
-                s.deduct(30, RiskTier.SERIOUS_WARNING,
-                         "developers only appear during price pumps")
+        # dev_appears_only_on_pumps is a risk gate: a False value is the absence
+        # of a red flag, not positive evidence of a healthy dev relationship, so
+        # on its own it must not invent a perfect score. A clean (False) value
+        # scores nothing and does not make the category known; only a True value
+        # is observed (-> known) and penalized, and a missing value still records
+        # as unknown.
+        if p.dev_appears_only_on_pumps is False:
+            pass
+        elif s.observe("dev_appears_only_on_pumps", p.dev_appears_only_on_pumps):
+            s.deduct(30, RiskTier.SERIOUS_WARNING,
+                     "developers only appear during price pumps")
         return s
 
     @staticmethod

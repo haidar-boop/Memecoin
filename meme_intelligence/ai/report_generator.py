@@ -77,7 +77,7 @@ def build_report(
     add(f"Pair created: {launched}")
     add(f"Market cap: {money(pair.market_cap)}    FDV: {money(pair.fdv)}    "
         f"Liquidity: {money(pair.liquidity_usd)}    24h volume: {money(pair.volume_24h)}")
-    add(f"Overall score: {master.final_score:.0f}/100    "
+    add(f"Overall score: {int(master.final_score)}/100    "
         f"Classification: {master.classification.value.upper()}    "
         f"Confidence: {master.confidence.value}    "
         f"Evidence coverage: {master.coverage:.0%}")

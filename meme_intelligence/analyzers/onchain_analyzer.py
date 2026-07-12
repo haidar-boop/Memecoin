@@ -193,7 +193,13 @@ class OnChainAnalyzer:
                     s.deduct(15, RiskTier.ACCEPTABLE_UNCERTAINTY,
                              f"holder count shrank {abs(growth):.1f}% in 24h")
                 else:
-                    s.signal(scale(growth, 0.0, self._t.holder_growth_target_percent_24h))
+                    # Flat growth is neutral, not a demerit; only growth ABOVE
+                    # flat earns a reward. Anchoring the scale symmetrically at
+                    # +/- the target maps 0% growth to a neutral 50, so a token
+                    # that merely held its holder base cannot score below one
+                    # that actually LOST holders (penalized in the branch above).
+                    s.signal(scale(growth, -self._t.holder_growth_target_percent_24h,
+                                   self._t.holder_growth_target_percent_24h))
 
         if s.observe("top_holder_percent", p.top_holder_percent):
             s.signal(scale_inverted(p.top_holder_percent, _TOP_HOLDER_BEST, _TOP_HOLDER_WORST))
@@ -249,7 +255,11 @@ class OnChainAnalyzer:
 
         traders = None
         if p.unique_buyers_24h is not None or p.unique_sellers_24h is not None:
-            traders = (p.unique_buyers_24h or 0) + (p.unique_sellers_24h or 0)
+            # Buyers and sellers overlap (one wallet can do both), so their sum
+            # over-counts unique traders and deflates trades-per-trader, hiding
+            # wash trading. The true union is unknown; max() is a conservative
+            # lower bound on unique traders that never under-detects churn.
+            traders = max(p.unique_buyers_24h or 0, p.unique_sellers_24h or 0)
 
         # Wash-trading signature: many trades from few wallets (Section 12).
         if s.observe("trades_per_trader", None if txns is None or not traders else txns / traders):

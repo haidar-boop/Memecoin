@@ -75,6 +75,12 @@ _REGIME_SCORES = {
     MarketRegime.UNKNOWN: None,
 }
 
+# Only genuine per-token evidence lifts the SPECULATIVE cap. The global
+# market-regime signal is not about THIS token, and the risk/reward heuristic
+# is always derivable (never absent), so neither counts as confirmation that
+# the token itself has been vetted (Part 31, Section 6).
+_PER_TOKEN_EVIDENCE = ("setup_quality", "security", "community", "onchain")
+
 # Human-readable confirmation tasks for the most decision-relevant unknowns.
 _CONFIRMATION_TASKS = {
     "is_honeypot": "Confirm the token is actually sellable (honeypot simulation)",
@@ -210,8 +216,9 @@ class TradePlanner:
         components = self._score_components(pair, security, discovery, onchain,
                                             community, token, regime)
         trade_score, coverage = self._combine(components)
+        confirmation_coverage = self._confirmation_coverage(components)
         setup = self._setup_type(pair, security, onchain)
-        conviction = self._conviction(trade_score, coverage, security, regime)
+        conviction = self._conviction(trade_score, confirmation_coverage, security, regime)
         checklist = self._checklist(security, onchain, community)
         confirmations = self._confirmations(security, onchain, community)
         invalidations = self._invalidations(security, onchain)
@@ -272,6 +279,17 @@ class TradePlanner:
             return 0.0, 0.0
         return weighted_sum / available, available
 
+    def _confirmation_coverage(self, components: dict[str, float | None]) -> float:
+        """Weight of genuine per-token evidence backing the score. Excludes the
+        global regime signal and the always-present risk/reward heuristic, so
+        discovery/security alone cannot lift the SPECULATIVE cap."""
+        weight_map = dataclasses.asdict(self._w)
+        return sum(
+            weight_map[name]
+            for name in _PER_TOKEN_EVIDENCE
+            if components.get(name) is not None
+        )
+
     def _risk_reward(self, security, onchain, token) -> float:
         """Heuristic risk/reward grade (Part 8 Section 13, Part 25 doctrine):
         upside room and healthy behavior add; serious warnings subtract;
@@ -310,7 +328,7 @@ class TradePlanner:
 
     # ---- Conviction & sizing guidance (Part 8, Sections 5-6; Part 9) ----
 
-    def _conviction(self, trade_score, coverage, security, regime) -> ConvictionLevel:
+    def _conviction(self, trade_score, confirmation_coverage, security, regime) -> ConvictionLevel:
         if security.is_destructive:
             return ConvictionLevel.NO_TRADE
 
@@ -324,8 +342,8 @@ class TradePlanner:
         else:
             conviction = ConvictionLevel.SPECULATIVE
 
-        # Discovery is not confirmation: thin evidence caps conviction.
-        if coverage < self._s.min_confirmation_coverage:
+        # Discovery is not confirmation: thin per-token evidence caps conviction.
+        if confirmation_coverage < self._s.min_confirmation_coverage:
             conviction = ConvictionLevel.SPECULATIVE if conviction is not ConvictionLevel.NO_TRADE \
                 else conviction
 

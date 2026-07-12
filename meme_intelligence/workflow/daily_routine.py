@@ -41,7 +41,7 @@ from meme_intelligence.config.settings import Settings
 from meme_intelligence.core.enums import Classification, MarketRegime, RiskTier, WatchlistTier
 from meme_intelligence.core.errors import CollectorError
 from meme_intelligence.core.logging_setup import get_logger
-from meme_intelligence.core.models import DexPair
+from meme_intelligence.core.models import DexPair, SecurityProfile, TokenIdentity
 from meme_intelligence.database.storage import Storage, WatchlistChange
 from meme_intelligence.scanners.discovery import DiscoveryEngine, scan_new_pools
 from meme_intelligence.workflow.pipeline import PipelineResult, ResearchPipeline
@@ -257,21 +257,33 @@ class DailyRoutine:
         token = pair.base_token
         symbol = token.symbol or token.address[:8]
         self._storage.record_snapshot(result.master, source="daily_routine")
-
-        # Contract-change monitoring (Part 18 Section 10): worsened facts are
-        # front-page risks in the daily report and journaled for the record.
-        previous_facts = self._storage.latest_security_facts(token)
-        changes = detect_security_changes(previous_facts, result.security_profile)
-        self._storage.record_security_facts(
-            token, merge_facts(previous_facts, extract_facts(result.security_profile)))
-        for change in changes:
-            report.biggest_risks.insert(0, f"{symbol}: SECURITY CHANGE — {change.message}")
-            self._storage.add_journal(token, "security_change", change.message)
+        self._monitor_security_changes(token, result.security_profile, symbol, report)
 
         for finding in result.security.findings:
             if finding.severity in (RiskTier.DESTRUCTIVE, RiskTier.SERIOUS_WARNING):
                 report.biggest_risks.append(f"{symbol}: {finding.message}")
         return result.master
+
+    def _monitor_security_changes(
+        self, token: TokenIdentity, security_profile: SecurityProfile,
+        symbol: str, report: DailyReport,
+    ) -> None:
+        """Contract-change monitoring (Part 18 Section 10): diff a token's
+        security facts against its last-known baseline, refresh the baseline,
+        and surface any deterioration. detect_security_changes returns changes
+        worst-first; block-inserting them at the front of the risks list keeps
+        that order — inserting each at index 0 individually would reverse it,
+        letting a MEDIUM change bury a CRITICAL one out of the rendered top-5.
+        """
+        previous_facts = self._storage.latest_security_facts(token)
+        changes = detect_security_changes(previous_facts, security_profile)
+        self._storage.record_security_facts(
+            token, merge_facts(previous_facts, extract_facts(security_profile)))
+        report.biggest_risks[0:0] = [
+            f"{symbol}: SECURITY CHANGE — {change.message}" for change in changes
+        ]
+        for change in changes:
+            self._storage.add_journal(token, "security_change", change.message)
 
     def _intake(self, pair: DexPair, master: MasterAssessment,
                 discovery_score: float | None, report: DailyReport) -> None:
@@ -308,9 +320,14 @@ class DailyRoutine:
         skip = {c.token.address.lower() for c in report.watchlist_changes}
 
         async def collect_risks(result: PipelineResult) -> None:
+            token = result.pair.base_token
+            symbol = token.symbol or token.address[:8]
+            # Same contract-change monitoring as the discovery path: a tracked
+            # token turning malicious between daily runs must produce a
+            # security-change entry and refresh its facts baseline.
+            self._monitor_security_changes(token, result.security_profile, symbol, report)
             for finding in result.security.findings:
                 if finding.severity in (RiskTier.DESTRUCTIVE, RiskTier.SERIOUS_WARNING):
-                    symbol = result.pair.base_token.symbol or result.pair.base_token.address[:8]
                     report.biggest_risks.append(f"{symbol}: {finding.message}")
 
         changes = await review_entries(

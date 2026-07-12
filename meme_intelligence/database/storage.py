@@ -27,6 +27,26 @@ from meme_intelligence.core.enums import Classification, WatchlistTier
 from meme_intelligence.core.logging_setup import get_logger
 from meme_intelligence.core.models import TokenIdentity
 
+# EVM hex addresses are case-insensitive: the same token written checksummed
+# and lowercased is ONE identity, and must not fragment snapshot history, the
+# watchlist entry, or the security-facts baseline across two rows. Solana
+# base58 is case-SENSITIVE and must be preserved verbatim. The base58 alphabet
+# has no "0", so a Solana address can never begin with "0x"; this prefix test
+# therefore selects EVM addresses only and can never corrupt a Solana one.
+_EVM_ADDRESS_PREFIX = "0x"
+
+
+def _identity_address(address: str) -> str:
+    """Canonicalize a token address for identity/lookup keys (finding #43).
+
+    Lowercases EVM hex addresses (case-insensitive) so both casings map to one
+    row; returns Solana base58 (and anything non-hex) unchanged.
+    """
+    if address[:2].lower() == _EVM_ADDRESS_PREFIX:
+        return address.lower()
+    return address
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS tokens (
     id INTEGER PRIMARY KEY,
@@ -149,18 +169,19 @@ class Storage:
     def upsert_token(self, token: TokenIdentity) -> int:
         """Insert or refresh a token's identity; returns its row id."""
         now = self._now().isoformat()
+        address = _identity_address(token.address)
         self._conn.execute(
             """INSERT INTO tokens (chain, address, symbol, name, first_seen)
                VALUES (?, ?, ?, ?, ?)
                ON CONFLICT (chain, address) DO UPDATE SET
                    symbol = COALESCE(excluded.symbol, tokens.symbol),
                    name = COALESCE(excluded.name, tokens.name)""",
-            (token.chain, token.address, token.symbol, token.name, now),
+            (token.chain, address, token.symbol, token.name, now),
         )
         self._conn.commit()
         row = self._conn.execute(
             "SELECT id FROM tokens WHERE chain = ? AND address = ?",
-            (token.chain, token.address),
+            (token.chain, address),
         ).fetchone()
         return int(row["id"])
 
@@ -195,7 +216,7 @@ class Storage:
                FROM snapshots s JOIN tokens t ON t.id = s.token_id
                WHERE t.chain = ? AND t.address = ?
                ORDER BY s.created_at DESC LIMIT ?""",
-            (token.chain, token.address, limit),
+            (token.chain, _identity_address(token.address), limit),
         ).fetchall()
         return [dict(row) for row in rows]
 
@@ -285,7 +306,7 @@ class Storage:
         row = self._conn.execute(
             """SELECT f.facts FROM security_facts f JOIN tokens t ON t.id = f.token_id
                WHERE t.chain = ? AND t.address = ?""",
-            (token.chain, token.address),
+            (token.chain, _identity_address(token.address)),
         ).fetchone()
         return json.loads(row["facts"]) if row else None
 
@@ -338,7 +359,7 @@ class Storage:
             """SELECT DISTINCT s.wallet
                FROM wallet_sightings s JOIN tokens t ON t.id = s.token_id
                WHERE t.chain = ? AND t.address = ?""",
-            (token.chain, token.address),
+            (token.chain, _identity_address(token.address)),
         ).fetchall()
         return [row["wallet"] for row in rows]
 
@@ -365,6 +386,6 @@ class Storage:
                    FROM journal j JOIN tokens t ON t.id = j.token_id
                    WHERE t.chain = ? AND t.address = ?
                    ORDER BY j.id DESC LIMIT ?""",
-                (token.chain, token.address, limit),
+                (token.chain, _identity_address(token.address), limit),
             ).fetchall()
         return [dict(row) for row in rows]

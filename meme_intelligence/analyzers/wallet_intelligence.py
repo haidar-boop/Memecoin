@@ -70,6 +70,14 @@ _TIMING_FLAT_RANGE_FRACTION = 0.02  # <2% price spread = consolidation
 _PUMP_EXIT_PRICE_CHANGE_PERCENT = 50.0
 _PUMP_EXIT_MIN_WHALE_OUTFLOW_USD = 500.0
 
+# Manipulation-pattern population guards (Sections 5/8). Both risk tests are
+# fraction-based and become meaningless on a handful of trades, where a single
+# unrepeated size or a lone early buyer mechanically clears the threshold. A new
+# coin is never punished just for being new (Part 17 doctrine), so require a real
+# population before either pattern can fire.
+_MIN_TRADES_FOR_SAME_SIZE = 5   # below this, one unrepeated size can exceed the fraction
+_MIN_BUYERS_FOR_DOMINANCE = 2   # a lone buyer is always 100% of buy volume
+
 
 @dataclass(frozen=True)
 class WhaleInfo:
@@ -356,10 +364,13 @@ class WalletIntelligenceAnalyzer:
             return s
         s.observe("trade_patterns", True)
 
-        # Same-size repeated trades = scripted activity (Section 5).
+        # Same-size repeated trades = scripted activity (Section 5). The fraction
+        # test only means something once enough trades exist that a single
+        # unrepeated size cannot clear it; on a few trades it false-positives.
         sizes = Counter(round(t.volume_usd, 2) for t in trades)
         most_common_count = sizes.most_common(1)[0][1]
-        if most_common_count / len(trades) >= self._s.artificial_same_size_fraction:
+        if (len(trades) >= _MIN_TRADES_FOR_SAME_SIZE
+                and most_common_count / len(trades) >= self._s.artificial_same_size_fraction):
             s.deduct(30, RiskTier.SERIOUS_WARNING,
                      f"{most_common_count}/{len(trades)} recent trades are identical size: "
                      "scripted trading pattern")
@@ -370,9 +381,12 @@ class WalletIntelligenceAnalyzer:
             if t.side == "buy":
                 buy_by_wallet[t.owner] += t.volume_usd
         total_buys = sum(buy_by_wallet.values())
-        # Dominance over dust volume proves nothing; only flag when the
-        # window carries enough real money for the share to mean something.
-        if total_buys >= self._s.min_buy_volume_for_dominance_usd:
+        # Dominance over dust volume proves nothing, and a lone buyer mechanically
+        # owns 100% of buy volume — a fresh launch with one legitimate large buyer
+        # is normal, not manipulation. Only flag when several buyers compete and
+        # the window carries enough real money for the share to mean something.
+        if (len(buy_by_wallet) >= _MIN_BUYERS_FOR_DOMINANCE
+                and total_buys >= self._s.min_buy_volume_for_dominance_usd):
             top_share = max(buy_by_wallet.values()) / total_buys
             if top_share >= self._s.dominant_buyer_volume_fraction:
                 s.deduct(30, RiskTier.SERIOUS_WARNING,

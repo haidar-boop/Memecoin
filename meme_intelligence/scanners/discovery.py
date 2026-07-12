@@ -71,21 +71,30 @@ class DiscoveryEngine:
         the caller can log them and the future learning system can measure
         false negatives (Part 24, Section 4).
         """
-        deduped = self._dedupe(pools)
+        pools = list(pools)
         candidates: list[TokenCandidate] = []
         rejected: list[RejectedPool] = []
 
-        for pair in deduped:
+        # Filter first, then dedupe survivors (matches this method's docstring
+        # order). Deduping before filtering let a deeper-but-stale/invalid pool
+        # win dedupe and then get rejected, dropping the base token entirely
+        # even when a fresher valid pool for it existed (false negative). Every
+        # filtered-out pool is still recorded in `rejected` for logging/learning.
+        survivors: list[DexPair] = []
+        for pair in pools:
             reason = self._initial_filter(pair)
             if reason is not None:
                 rejected.append(RejectedPool(pair, reason))
                 continue
+            survivors.append(pair)
+
+        for pair in self._dedupe(survivors):
             candidates.append(self._score(pair))
 
         candidates.sort(key=lambda c: c.discovery_score, reverse=True)
         self._logger.info(
             "discovery batch: %d pools in, %d candidates, %d rejected",
-            len(deduped), len(candidates), len(rejected),
+            len(pools), len(candidates), len(rejected),
         )
         return candidates, rejected
 

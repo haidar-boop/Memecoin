@@ -53,6 +53,30 @@ def _from_unix(value: Any) -> datetime | None:
     return datetime.fromtimestamp(ts, tz=timezone.utc)
 
 
+# SPL Token stores ``decimals`` as a u8; bound the fallback exponent so a
+# corrupt payload cannot trigger a runaway ``10 ** decimals``.
+_MAX_TOKEN_DECIMALS = 255
+
+
+def _ui_amount(amount_obj: Any) -> float | None:
+    """Human-scale amount for a Solana token-amount object.
+
+    The RPC ``uiAmount`` field is deprecated and nullable; fall back to the
+    non-nullable raw ``amount`` scaled by ``decimals`` so token supply and
+    holder balances survive when the chain returns ``uiAmount: null``.
+    """
+    if not isinstance(amount_obj, dict):
+        return None
+    ui = _to_float(amount_obj.get("uiAmount"))
+    if ui is not None:
+        return ui
+    raw = _to_float(amount_obj.get("amount"))
+    decimals = amount_obj.get("decimals")
+    if raw is not None and isinstance(decimals, int) and 0 <= decimals <= _MAX_TOKEN_DECIMALS:
+        return raw / (10 ** decimals)
+    return None
+
+
 class HeliusClient(BaseCollector):
     """Client for Helius Solana RPC + Enhanced Transactions API."""
 
@@ -92,7 +116,7 @@ class HeliusClient(BaseCollector):
             "getTokenSupply", [mint],
             cache_key=f"helius:supply:{mint}", cache_ttl=300.0,
         )
-        supply = _to_float(((supply_result or {}).get("value") or {}).get("uiAmount"))
+        supply = _ui_amount((supply_result or {}).get("value"))
 
         largest = await self._rpc(
             "getTokenLargestAccounts", [mint],
@@ -111,7 +135,7 @@ class HeliusClient(BaseCollector):
 
         holdings: list[WalletHolding] = []
         for account, info in zip(accounts, owner_infos):
-            ui_amount = _to_float(account.get("uiAmount"))
+            ui_amount = _ui_amount(account)
             owner = None
             if isinstance(info, dict):
                 owner = (((info.get("data") or {}).get("parsed") or {})
@@ -274,19 +298,19 @@ class WalletDataService:
             try:
                 holders = tuple(await self._helius.get_top_holders(
                     token.address, limit=self._holders_limit))
+                sources.append("helius")
                 transfers = tuple(await self._helius.get_recent_transfers(
                     token.address, limit=self._trades_limit))
-                sources.append("helius")
             except CollectorError:
                 pass
         if self._birdeye is not None:
             try:
                 overview = await self._birdeye.get_token_overview(token.address)
-                trades = tuple(await self._birdeye.get_recent_trades(
-                    token.address, limit=self._trades_limit))
                 holder_count = overview.get("holder_count")
                 unique_wallets = overview.get("unique_wallets_24h")
                 sources.append("birdeye")
+                trades = tuple(await self._birdeye.get_recent_trades(
+                    token.address, limit=self._trades_limit))
             except CollectorError:
                 pass
 

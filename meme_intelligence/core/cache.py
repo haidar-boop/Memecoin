@@ -39,6 +39,12 @@ class TTLCache:
         self._time = time_func
         self._entries: OrderedDict[str, tuple[float, Any]] = OrderedDict()
         self._lock = asyncio.Lock()
+        # Single-flight guard: concurrent misses on the same key share one
+        # per-key lock so ``factory`` runs once (Rules 10/11 — never request
+        # identical information twice within its TTL). Each entry is removed by
+        # the call that installed it once the value is stored, so this dict
+        # stays bounded rather than accumulating a lock per key ever seen.
+        self._inflight_locks: dict[str, asyncio.Lock] = {}
 
     async def get(self, key: str, default: Any = None) -> Any:
         """Return the cached value, or ``default`` if absent or expired."""
@@ -70,13 +76,35 @@ class TTLCache:
         factory: Callable[[], Awaitable[Any]],
         ttl: float | None = None,
     ) -> Any:
-        """Return the cached value, computing and storing it via ``factory`` on a miss."""
+        """Return the cached value, computing and storing it via ``factory`` on a miss.
+
+        Concurrent callers that miss on the same key are collapsed onto a single
+        ``factory`` invocation via a per-key in-flight lock; callers that arrive
+        while the value is being computed re-check the cache after acquiring the
+        lock and reuse the freshly stored value instead of calling ``factory``.
+        """
         cached = await self.get(key, _MISSING)
         if cached is not _MISSING:
             return cached
-        value = await factory()
-        await self.set(key, value, ttl)
-        return value
+        lock = self._inflight_locks.get(key)
+        if lock is None:
+            lock = self._inflight_locks[key] = asyncio.Lock()
+        try:
+            async with lock:
+                # Re-check under the per-key lock: an earlier caller may have
+                # populated the cache while we waited to acquire it.
+                cached = await self.get(key, _MISSING)
+                if cached is not _MISSING:
+                    return cached
+                value = await factory()
+                await self.set(key, value, ttl)
+                return value
+        finally:
+            # The caller that installed this lock removes it once done; followers
+            # that reused it find the key already gone (or remapped to a newer
+            # lock) and skip, so the guard dict never accumulates stale keys.
+            if self._inflight_locks.get(key) is lock:
+                del self._inflight_locks[key]
 
     async def clear(self) -> None:
         async with self._lock:
