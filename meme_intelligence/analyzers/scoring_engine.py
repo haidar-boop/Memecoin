@@ -359,4 +359,6 @@ class ScoringEngine:
                 available += weight_map[name]
         if available == 0.0:
             raise InsufficientDataError("no category scores available for master assessment")
-        return weighted_sum / available, available
+        # Clamp: a weighted average of 0-100 scores stays in 0-100, but float
+        # division can overshoot by an ULP and classify() would reject it.
+        return min(100.0, max(0.0, weighted_sum / available)), available

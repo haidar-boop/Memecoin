@@ -21,6 +21,7 @@ See ``.env.example`` at the repository root for the full list of variables.
 from __future__ import annotations
 
 import dataclasses
+import math
 import os
 from dataclasses import dataclass, field
 from typing import Any, Mapping
@@ -37,6 +38,11 @@ def _check_range(name: str, value: float, low: float, high: float) -> None:
 
 
 def _check_weight_sum(group: str, values: Mapping[str, float]) -> None:
+    # Each weight must itself be a sane fraction: without this a negative (or
+    # >1) weight compensated by another still sums to 1.0 and would silently
+    # invert a component's contribution. This also rejects NaN (0<=nan is False).
+    for name, value in values.items():
+        _check_range(f"{group} weight '{name}'", value, 0.0, 1.0)
     total = sum(values.values())
     if abs(total - 1.0) > _WEIGHT_SUM_TOLERANCE:
         detail = ", ".join(f"{k}={v}" for k, v in values.items())
@@ -672,7 +678,12 @@ def _convert(raw: str, default: Any, key: str) -> Any:
         if isinstance(default, int):
             return int(raw)
         if isinstance(default, float):
-            return float(raw)
+            result = float(raw)
+            if not math.isfinite(result):
+                raise ConfigurationError(
+                    f"invalid value for {key}: {raw!r} (must be a finite number)"
+                )
+            return result
         return raw
     except ValueError as exc:
         raise ConfigurationError(f"invalid value for {key}: {raw!r} ({exc})") from exc

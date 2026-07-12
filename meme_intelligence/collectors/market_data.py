@@ -15,6 +15,7 @@ normalized). Default request budgets stay safely below documented limits
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -25,13 +26,18 @@ from meme_intelligence.core.models import DexPair, TokenIdentity
 
 
 def _to_float(value: Any) -> float | None:
-    """Parse a numeric field that providers send as float, int, or string."""
+    """Parse a numeric field that providers send as float, int, or string.
+
+    Non-finite values (NaN/Inf) are rejected as unknown: they are never a
+    valid price/liquidity/volume and would poison comparisons and scoring.
+    """
     if value is None:
         return None
     try:
-        return float(value)
+        result = float(value)
     except (TypeError, ValueError):
         return None
+    return result if math.isfinite(result) else None
 
 
 def _to_int(value: Any) -> int | None:
@@ -44,10 +50,15 @@ def _to_int(value: Any) -> int | None:
 
 
 def _from_ms_timestamp(value: Any) -> datetime | None:
-    ms = _to_float(value)
+    ms = _to_float(value)  # already rejects NaN/Inf
     if ms is None or ms <= 0:
         return None
-    return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc)
+    try:
+        return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc)
+    except (ValueError, OverflowError, OSError):
+        # Out-of-range epoch (e.g. a corrupt far-future value) must not abort
+        # the whole batch — one bad record never blinds the scanner (Rule 6).
+        return None
 
 
 def _from_iso_timestamp(value: Any) -> datetime | None:
@@ -242,10 +253,11 @@ class GeckoTerminalClient(BaseCollector):
         attrs = item["attributes"]
         relationships = item.get("relationships") or {}
 
-        # Base token id has the form "<network>_<address>"; the pool id shares
-        # the same prefix, so split on the first underscore.
+        # Base token id has the form "<network>_<address>". Some network ids
+        # themselves contain underscores (e.g. "polygon_pos", "arbitrum_nova"),
+        # while token addresses never do — so split on the LAST underscore.
         base_id = ((relationships.get("base_token") or {}).get("data") or {}).get("id", "")
-        network, _, base_address = base_id.partition("_")
+        network, _, base_address = base_id.rpartition("_")
         if not network or not base_address:
             raise KeyError(f"unparseable base token id: {base_id!r}")
 

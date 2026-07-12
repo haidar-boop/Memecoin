@@ -30,6 +30,10 @@ from meme_intelligence.core.logging_setup import get_logger
 from meme_intelligence.core.models import TokenIdentity
 from meme_intelligence.workflow.pipeline import PipelineResult
 
+# Only sweep expired cooldown entries once the map is large enough to matter,
+# so the common small-batch dispatch pays no pruning cost.
+_COOLDOWN_PRUNE_THRESHOLD = 1024
+
 
 @dataclass(frozen=True)
 class AlertEvent:
@@ -333,9 +337,16 @@ class NotificationEngine:
         self._logger = get_logger("alerts.engine")
 
     async def dispatch(self, events: list[AlertEvent]) -> list[AlertEvent]:
-        """Send events not in cooldown; returns those actually delivered."""
+        """Send events not in cooldown; returns those actually delivered.
+
+        Each sink is isolated, and the cooldown timestamp is recorded only
+        after the event reaches at least one sink — so a failing sink neither
+        aborts the rest of the batch nor mutes a (possibly critical) alert for
+        the whole cooldown window on a transient send failure.
+        """
         delivered: list[AlertEvent] = []
         now = self._time()
+        self._prune_cooldowns(now)
         for event in events:
             key = (event.token.chain, event.token.address.lower(), event.alert_type)
             last = self._last_sent.get(key)
@@ -343,8 +354,28 @@ class NotificationEngine:
                 self._logger.debug("alert suppressed by cooldown: %s %s",
                                    event.alert_type, event.token.address)
                 continue
-            self._last_sent[key] = now
+            sent_to_any = False
             for sink in self._sinks:
-                await sink.send(event)
-            delivered.append(event)
+                try:
+                    await sink.send(event)
+                    sent_to_any = True
+                except Exception as exc:  # noqa: BLE001 — one sink must not sink the batch
+                    self._logger.error("sink %s failed to deliver %s for %s: %s",
+                                       type(sink).__name__, event.alert_type,
+                                       event.token.address, exc)
+            if sent_to_any:
+                self._last_sent[key] = now
+                delivered.append(event)
         return delivered
+
+    def _prune_cooldowns(self, now: float) -> None:
+        """Forget cooldown entries that have already expired.
+
+        An entry older than the cooldown window suppresses nothing, so
+        dropping it is behavior-neutral and keeps ``_last_sent`` bounded over
+        a long-running 24/7 process instead of leaking one entry per token.
+        """
+        if len(self._last_sent) < _COOLDOWN_PRUNE_THRESHOLD:
+            return
+        cutoff = now - self._cooldown
+        self._last_sent = {k: ts for k, ts in self._last_sent.items() if ts > cutoff}

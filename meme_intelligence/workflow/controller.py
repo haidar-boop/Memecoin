@@ -39,7 +39,7 @@ from meme_intelligence.analyzers.security_monitor import (
 )
 from meme_intelligence.config.settings import Settings
 from meme_intelligence.core.enums import AlertPriority, MarketRegime, WatchlistTier
-from meme_intelligence.core.errors import MemeIntelError
+from meme_intelligence.core.errors import AllProvidersFailedError, CollectorError
 from meme_intelligence.core.logging_setup import get_logger
 from meme_intelligence.database.storage import Storage
 from meme_intelligence.scanners.discovery import DiscoveryEngine, scan_new_pools
@@ -137,8 +137,14 @@ class ContinuousScanner:
                     cycle, stats.pools_seen, stats.candidates, stats.analyzed,
                     len(stats.alerts),
                 )
-            except MemeIntelError as exc:
-                self._logger.error("cycle %d failed: %s (backing off %.0fs)", cycle, exc, backoff)
+            except Exception as exc:  # noqa: BLE001
+                # Contract (module docstring / Rule 7): one failing cycle must
+                # NEVER kill the scanner — not a domain error, not an
+                # unexpected one (sqlite lock, sink failure, a stray
+                # ValueError). BaseException (KeyboardInterrupt/CancelledError)
+                # still propagates so graceful shutdown works.
+                self._logger.error("cycle %d failed: %s (backing off %.0fs)",
+                                   cycle, exc, backoff, exc_info=True)
                 await self._sleep(backoff)
                 backoff = min(_ERROR_BACKOFF_MAX, backoff * 2)
                 continue
@@ -160,16 +166,24 @@ class ContinuousScanner:
         stats.candidates = len(candidates)
 
         processed_this_cycle: set[str] = set()
-        for candidate in candidates[: self._settings.workflow.top_candidates]:
+        # Filter already-seen tokens BEFORE taking the top-N slice, so seen
+        # tokens don't consume analysis slots and starve fresh candidates
+        # ranked just below them.
+        fresh = [
+            c for c in candidates
+            if (c.pair.base_token.chain, c.pair.base_token.address.lower()) not in self._seen
+        ]
+        for candidate in fresh[: self._settings.workflow.top_candidates]:
             token = candidate.pair.base_token
             key = (token.chain, token.address.lower())
-            if key in self._seen:
-                continue
-            self._seen.add(key)
 
             result = await self._pipeline.analyze_pair(candidate.pair, regime=self._regime)
             if result is None:
+                # Transient miss (e.g. security data not indexed yet for a
+                # brand-new token): do NOT mark it seen, so a later cycle gives
+                # it another look instead of blacklisting it for the session.
                 continue
+            self._seen.add(key)
             stats.analyzed += 1
             processed_this_cycle.add(token.address.lower())
             await self._process_result(
@@ -244,10 +258,20 @@ class ContinuousScanner:
                 continue  # analyzed moments ago this cycle; nothing new to learn
             if entry.tier is WatchlistTier.TIER_3_RESEARCH_ONLY:
                 continue  # research-only entries wait for the daily routine
-            pair = await self._market.get_best_pair(entry.token.address, chain=entry.token.chain)
-            if pair is None:
+            try:
+                pairs = await self._market.get_token_pairs(
+                    entry.token.address, chain=entry.token.chain,
+                )
+            except (CollectorError, AllProvidersFailedError) as exc:
+                # A transient provider outage is NOT a dead market: skip and
+                # retry next recheck instead of archiving a healthy token.
+                self._logger.info("recheck skipped for %s: market data unavailable (%s)",
+                                  entry.token.address, exc)
+                continue
+            if not pairs:
                 self._storage.archive(entry.token, "no active trading pairs remain")
                 continue
+            pair = max(pairs, key=lambda p: p.liquidity_usd or 0.0)
             result = await self._pipeline.analyze_pair(pair, regime=self._regime)
             if result is None:
                 continue

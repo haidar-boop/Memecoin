@@ -135,6 +135,43 @@ async def test_failed_cycle_backs_off_and_recovers():
         assert sleeps and sleeps[0] == 5.0  # error backoff, not the normal interval
 
 
+async def test_non_domain_error_in_cycle_does_not_kill_loop():
+    """A non-MemeIntelError (stray RuntimeError) must be caught and backed off,
+    honoring the 'one failing cycle never kills the scanner' contract."""
+    pair = make_pair()
+
+    class BoomThenOkGecko:
+        def __init__(self, pools):
+            self.pools = pools
+            self.calls = 0
+
+        async def get_new_pools(self, network):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("unexpected non-domain failure")
+            return self.pools
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        notifier = NotificationEngine([RecordingSink()], AlertEngineSettings(),
+                                      time_func=lambda: 0.0)
+        scanner = ContinuousScanner(
+            SETTINGS, storage, notifier,
+            gecko_client=BoomThenOkGecko([pair]),
+            goplus_client=FakeGoPlus({pair.base_token.address: clean_profile(pair.base_token)}),
+            now_func=lambda: NOW,
+            sleep_func=fake_sleep,
+        )
+        history = await scanner.run(max_cycles=2)
+        assert len(history) == 1          # cycle 1 crashed, cycle 2 recovered
+        assert history[0].analyzed == 1
+        assert sleeps and sleeps[0] == 5.0  # backed off instead of dying
+
+
 async def test_request_stop_ends_loop():
     pair = make_pair()
     with Storage(":memory:", now_func=lambda: NOW) as storage:
@@ -165,15 +202,24 @@ from meme_intelligence.core.models import TokenIdentity
 class FakeMarketService:
     """Market service double: serves best pairs and a fixed verification verdict."""
 
-    def __init__(self, pairs_by_address=None, verdict=(None, "no second source")):
+    def __init__(self, pairs_by_address=None, verdict=(None, "no second source"),
+                 raise_on_recheck=None):
         self.pairs_by_address = pairs_by_address or {}
         self.verdict = verdict
+        self.raise_on_recheck = raise_on_recheck  # exception to simulate an outage
         self.recheck_calls = 0
         self.verify_calls = 0
 
-    async def get_best_pair(self, address, chain=None):
+    async def get_token_pairs(self, address, chain=None):
         self.recheck_calls += 1
-        return self.pairs_by_address.get(address)
+        if self.raise_on_recheck is not None:
+            raise self.raise_on_recheck
+        pair = self.pairs_by_address.get(address)
+        return [pair] if pair is not None else []
+
+    async def get_best_pair(self, address, chain=None):
+        pair = self.pairs_by_address.get(address)
+        return pair
 
     async def cross_check_liquidity(self, pair):
         self.verify_calls += 1
@@ -227,6 +273,27 @@ async def test_recheck_archives_token_with_no_pairs():
         assert storage.get_watchlist() == []
         archived = storage.get_watchlist(include_archived=True)
         assert archived and archived[0].tier is WatchlistTier.ARCHIVED
+
+
+async def test_recheck_skips_not_archives_on_transient_outage():
+    """A transient provider outage must NOT archive a healthy tracked token."""
+    from meme_intelligence.core.errors import AllProvidersFailedError
+
+    tracked = TokenIdentity(chain="solana", address="TokenBlip", symbol="BLIP")
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        storage.update_watchlist(tracked, WatchlistTier.TIER_1_HIGH_PRIORITY, score=80.0)
+        market = FakeMarketService(
+            raise_on_recheck=AllProvidersFailedError("get_token_pairs", {}),
+        )
+        scanner = make_scanner_with_market(
+            storage, [], {"TokenBlip": clean_profile(tracked)},
+            market, settings=fast_recheck_settings(),
+        )
+        await scanner.run(max_cycles=1)
+        # Still tracked, NOT archived.
+        active = storage.get_watchlist()
+        assert active and active[0].token.address == "TokenBlip"
+        assert storage.get_watchlist(include_archived=True)[0].tier is not WatchlistTier.ARCHIVED
 
 
 async def test_source_disagreement_downgrades_opportunity_alert():

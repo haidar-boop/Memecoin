@@ -42,7 +42,16 @@ _RENOUNCED_OWNERS = {
     "0x000000000000000000000000000000000000dead",
 }
 
-_BURN_ADDRESS_MARKERS = ("0x0000000000000000000000000000000000000000", "dead")
+# Well-known burn / null addresses (EVM + Solana). Matched exactly: a bare
+# "dead" substring test wrongly excludes any real holder whose address merely
+# contains those letters, understating concentration and overstating LP lock.
+_BURN_ADDRESSES = frozenset({
+    "0x0000000000000000000000000000000000000000",
+    "0x000000000000000000000000000000000000dead",
+    "0xdead000000000000000000000000000000000000",
+    "1nc1nerator11111111111111111111111111111111",  # Solana incinerator
+    "11111111111111111111111111111111",              # Solana system / null
+})
 
 
 def _flag(value: Any) -> bool | None:
@@ -74,8 +83,7 @@ def _to_int(value: Any) -> int | None:
 
 
 def _is_burn_address(address: str) -> bool:
-    lowered = address.lower()
-    return any(marker in lowered for marker in _BURN_ADDRESS_MARKERS)
+    return address.lower() in _BURN_ADDRESSES
 
 
 def _holder_percents(holders: Any) -> list[float]:
@@ -252,7 +260,10 @@ class GoPlusClient(BaseCollector):
             is_freezable=authority_status("freezable"),
             selfdestruct=authority_status("closable"),
             balance_mutable=authority_status("balance_mutable_authority"),
-            tax_modifiable=_flag(raw.get("transfer_fee_upgradable")),
+            # GoPlus returns this as a nested {"authority", "status"} object,
+            # like the other Solana authorities — parse it the same way, not
+            # with _flag (which would stringify the dict and always read False).
+            tax_modifiable=authority_status("transfer_fee_upgradable"),
             holder_count=_to_int(raw.get("holder_count")),
             top_holder_percent=holder_percents[0] if holder_percents else None,
             top10_holder_percent=sum(holder_percents[:10]) if holder_percents else None,

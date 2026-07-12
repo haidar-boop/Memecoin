@@ -90,7 +90,10 @@ class MarketDataService:
                 continue
 
             low, high = sorted((pair.liquidity_usd, other.liquidity_usd))
-            if low > 0 and high / low <= _AGREEMENT_FACTOR:
+            # Identical figures agree (including both-zero); the ``low > 0``
+            # guard only exists to avoid dividing by zero when exactly one
+            # source reads zero (a genuine disagreement).
+            if high == low or (low > 0 and high / low <= _AGREEMENT_FACTOR):
                 return True, (f"liquidity confirmed by "
                               f"{getattr(provider, 'name', 'second source')} "
                               f"(${other.liquidity_usd:,.0f} vs ${pair.liquidity_usd:,.0f})")

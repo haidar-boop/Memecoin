@@ -28,6 +28,8 @@ from meme_intelligence.core.models import DexPair
 
 _COMPONENT_MAX = 25.0  # four components x 25 = 100
 
+_logger = get_logger("scanners.discovery")
+
 
 @dataclass(frozen=True)
 class TokenCandidate:
@@ -185,8 +187,23 @@ async def scan_new_pools(
     engine: DiscoveryEngine,
     networks: Sequence[str],
 ) -> tuple[list[TokenCandidate], list[RejectedPool]]:
-    """Convenience wrapper: fetch new pools across networks and evaluate them."""
+    """Convenience wrapper: fetch new pools across networks and evaluate them.
+
+    Networks are isolated: one network's collector failure logs and is skipped
+    so the pools already fetched from the other networks still get evaluated
+    this cycle (Rule 9). Only when *every* network failed and nothing was
+    collected is the failure re-raised, so the controller backs off instead of
+    treating a total outage as an empty-but-healthy cycle.
+    """
     pools: list[DexPair] = []
+    errors: list[Exception] = []
     for network in networks:
-        pools.extend(await client.get_new_pools(network))
+        try:
+            pools.extend(await client.get_new_pools(network))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+            _logger.warning("discovery: network %s failed this cycle, skipping it: %s",
+                            network, exc)
+    if errors and not pools:
+        raise errors[0]
     return engine.evaluate(pools)

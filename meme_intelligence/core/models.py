@@ -15,6 +15,12 @@ from meme_intelligence.config.settings import ClassificationBands, ScoringWeight
 from meme_intelligence.core.enums import Classification
 from meme_intelligence.core.errors import InsufficientDataError
 
+# Weighted averaging of 0-100 category scores is mathematically bounded to
+# 0-100, but float division can overshoot by an ULP (e.g. 100.0*0.15/0.15).
+# Tolerate that epsilon so a rounding artifact never crashes the pipeline;
+# a value meaningfully outside the range is still a real error.
+_SCORE_EPSILON = 1e-6
+
 
 @dataclass(frozen=True)
 class TokenIdentity:
@@ -313,8 +319,10 @@ def compute_weighted_score(scores: CategoryScores, weights: ScoringWeights) -> W
     if available_weight == 0.0:
         raise InsufficientDataError("cannot compute a weighted score: no category has been scored")
 
+    # Clamp to defend the documented 0-100 contract against float overshoot.
+    total = min(100.0, max(0.0, weighted_sum / available_weight))
     return WeightedScoreResult(
-        total=weighted_sum / available_weight,
+        total=total,
         coverage=available_weight,
         missing=tuple(missing),
     )
@@ -327,8 +335,9 @@ def classify(total_score: float, bands: ClassificationBands) -> Classification:
     liquidity, ...) are applied by the scoring engine before this is called
     and force :attr:`Classification.AVOID` regardless of score (Part 10, Section 5).
     """
-    if not (0.0 <= total_score <= 100.0):
+    if total_score < -_SCORE_EPSILON or total_score > 100.0 + _SCORE_EPSILON:
         raise ValueError(f"total score must be within 0-100, got {total_score}")
+    total_score = min(100.0, max(0.0, total_score))
     if total_score >= bands.elite:
         return Classification.ELITE_OPPORTUNITY
     if total_score >= bands.strong_candidate:
