@@ -1054,6 +1054,7 @@ async def _cmd_monitor(args, settings) -> int:
                         check_runner=scanner.check_token,
                         learning_service=learning_service,
                         executor=executor,
+                        boost_lookup=dex.get_token_boost,
                     )
                     listener = TelegramCommandListener(
                         settings.telegram_bot_token, settings.telegram_chat_id,
