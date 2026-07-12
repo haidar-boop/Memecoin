@@ -16,7 +16,7 @@
   Telegram control + copy-address button), **Project 3** (mind-layer P(rug)
   veto — built, veto flag off until authority is earned), and **Project 6**
   (live buy/dump from Telegram — see below).
-- **784 tests passing** (`python -m pytest tests/ -q`).
+- **788 tests passing** (`python -m pytest tests/ -q`).
 - **Live in production**: 24/7 on the operator's $6/mo DigitalOcean droplet
   (systemd service `meme-intelligence`, repo at `~/meme-intelligence`),
   Telegram alerts arriving on his phone.
@@ -154,12 +154,16 @@ sudo systemctl restart meme-intelligence
 ## Update log for this file
 
 - 2026-07-12 — safety checklist on buy-side alerts: only a rug (the rug
-  engine's combined `deterministic_risk_veto`) suppresses; every soft signal
-  (mint/freeze authority, sell tax, deployer history, liquidity/mcap floors)
+  engine's combined `deterministic_risk_veto`) OR an untradeable coin (0/missing
+  liquidity or market cap, `_untradeable`) suppresses; every OTHER soft signal
+  (mint/freeze authority, sell tax, deployer history, thin-but-real liquidity)
   now ANNOTATES via a "passed X/Y" checklist on the alert instead of dropping
   it. Top-wallet concentration is a note framed "normal for a new launch," never
   a fail. Operator rule: "if it's a rug don't send it; if one thing misses,
-  send it and tell me." See DECISIONS_LOG 2026-07-12. 778 → 784 tests.
+  send it and tell me; but never send 0-liquidity/0-mcap junk." Plus operator
+  LOOSENED the alert gates via `.env` (security 55 / overall 62 / momentum 55 /
+  delivery=medium — see DECISIONS_LOG) so coins actually reach the phone; the
+  spec defaults stayed as committed. See DECISIONS_LOG 2026-07-12. 778 → 788 tests.
 - 2026-07-12 — massive adversarial bug hunt: 8 fixes across the money path
   (edited-message re-trade, double-tap double-trade, send-cancel signature
   loss, raw-exception loop kill, synchronous retrain stall, torn-FAISS

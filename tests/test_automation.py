@@ -459,17 +459,16 @@ async def test_market_cap_floor_annotates_but_no_longer_suppresses():
     assert "Market cap" in checklist and "below your" in checklist
 
 
-async def test_unknown_liquidity_with_floor_set_annotates_not_suppresses():
-    """A SET floor with unknown liquidity no longer drops the alert — it sends
-    with a ❔ 'cannot size an entry' line (Rule 8: surfaced, not assumed)."""
+async def test_unknown_liquidity_is_blocked_as_untradeable():
+    """Missing liquidity is now a HARD block, not an annotation — a coin you
+    cannot even size is not a real opportunity (operator rule 2026-07-12,
+    superseding the earlier annotate-thin-pools behavior for the 0/None case)."""
     rules = AutomationRules(
         AlertThresholds(opportunity_min_liquidity_usd=10_000.0),
         AlertEngineSettings())
     result = await pipeline_result(pair=make_pair(liquidity_usd=None))
-    buy_side = [e for e in rules.evaluate(result) if e.alert_type in _BUY_SIDE_ALERT_TYPES]
-    assert buy_side
-    checklist = "\n".join(buy_side[0].checklist)
-    assert "❔" in checklist and "Liquidity: unknown" in checklist
+    types = {e.alert_type for e in rules.evaluate(result)}
+    assert not (types & _BUY_SIDE_ALERT_TYPES)
 
 
 async def test_floor_no_longer_touches_protective_alerts():
@@ -506,6 +505,44 @@ def test_opportunity_floor_validates_and_loads_from_env():
     assert s.alerts.opportunity_min_market_cap_usd == 50000.0
     # default stays off
     assert Settings.from_env(env={}).alerts.opportunity_min_liquidity_usd == 0.0
+
+
+# ---- Hard "must be a real, tradeable coin" floor (operator rule 2026-07-12) --
+
+async def test_zero_liquidity_coin_is_never_sent():
+    """A 0-liquidity coin is not an opportunity you could buy — it is suppressed
+    outright, NOT sent with a checklist note (operator rule 2026-07-12)."""
+    result = await pipeline_result(pair=make_pair(liquidity_usd=0.0))
+    types = {e.alert_type for e in make_rules().evaluate(result)}
+    assert not (types & _BUY_SIDE_ALERT_TYPES)
+
+
+async def test_zero_market_cap_coin_is_never_sent():
+    result = await pipeline_result(pair=make_pair(market_cap=0.0))
+    types = {e.alert_type for e in make_rules().evaluate(result)}
+    assert not (types & _BUY_SIDE_ALERT_TYPES)
+
+
+async def test_missing_liquidity_or_market_cap_is_never_sent():
+    """Missing (None) liquidity or market cap counts as untradeable, never as a
+    green light (Rule 8) — even with the comfort floors off."""
+    no_liq = await pipeline_result(pair=make_pair(liquidity_usd=None))
+    assert not ({e.alert_type for e in make_rules().evaluate(no_liq)} & _BUY_SIDE_ALERT_TYPES)
+    no_mcap = await pipeline_result(pair=make_pair(market_cap=None))
+    assert not ({e.alert_type for e in make_rules().evaluate(no_mcap)} & _BUY_SIDE_ALERT_TYPES)
+
+
+async def test_thin_but_real_coin_still_sends_with_a_note():
+    """The hard floor blocks only 0/missing — a small BUT real pool still sends
+    (with the ⚠ comfort-floor note), preserving the operator's "send it and tell
+    me" rule for thin-but-tradeable coins."""
+    rules = AutomationRules(
+        AlertThresholds(opportunity_min_liquidity_usd=10_000.0),  # comfort floor
+        AlertEngineSettings(), now_func=lambda: NOW)
+    result = await pipeline_result(pair=make_pair(liquidity_usd=4_000.0, market_cap=60_000.0))
+    buy_side = [e for e in rules.evaluate(result) if e.alert_type in _BUY_SIDE_ALERT_TYPES]
+    assert buy_side                                              # real pool -> still sent
+    assert any("comfort floor" in line for line in buy_side[0].checklist)
 
 
 # ---- Safety checklist rides on buy-side alerts (operator rule 2026-07-12) ----

@@ -1316,6 +1316,30 @@ Rug behavior is unchanged: a confirmed honeypot is destructive (no buy-side
 alert, a protective emergency warning instead), and `deterministic_risk_veto`
 still suppresses buy-side entirely. 9 new/updated tests; suite 778 → 784.
 
+**Follow-up same day — hard "must be tradeable" floor (`_untradeable`).** After
+loosening the alert gates via `.env` so coins actually reached the phone, the
+operator got alerts for coins with **0 / missing liquidity or market cap**. Those
+aren't thin-but-real coins the checklist should annotate — they cannot be bought,
+sized, or valued at all, so they are noise. Added `AutomationRules._untradeable`:
+a buy-side alert is suppressed outright when liquidity OR market cap is 0,
+negative, NaN, or None (missing counts as untradeable — Rule 8, absent data is
+not a green light). This is a second hard suppressor alongside the rug veto and
+is distinct from the comfort floor: a $4k pool still sends with a ⚠ note; a $0/None
+pool never sends. 4 new tests; suite 784 → 788. Note: this superseded the earlier
+checklist test that annotated unknown liquidity — 0/None now blocks, thin-but-real
+still annotates.
+
+**Operator gate tuning (`.env`, not code).** The spec's human-review gates
+(security 80 / overall 85 / onchain 75 / momentum 70) are tuned for rare elite
+picks and produced ~zero alerts on meme coins. Loosened on the droplet via
+`MEMEINTEL_ALERTS_*` (security 55, overall 62, onchain 50, liquidity 55,
+community 55, momentum 55, strong_candidate_overall 68, strong_candidate depth
+6000) plus `MEMEINTEL_ALERT_DELIVERY_EXTERNAL_MIN_PRIORITY=medium`. Kept as
+operator `.env` config, NOT committed defaults — the spec defaults stay the
+source of truth (Rule 1/18); this is operator tuning for the live-trading feed
+use case and is trivially reversible. Safe to loosen because the rug veto, the
+new untradeable floor, and the safety checklist all still apply.
+
 ## Notable implementation choices (Rule 19)
 
 - **Python 3.11 + asyncio** over Node.js (both allowed by spec): the

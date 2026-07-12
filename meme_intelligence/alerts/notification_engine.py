@@ -254,17 +254,25 @@ class AutomationRules:
         drop = self._score_drop_rule(result, previous_score)
         if drop is not None:
             events.append(drop)
-        # RUG VETO — the ONE thing that suppresses a buy-side alert entirely
-        # (operator rule 2026-07-12: "if it's a rug pull don't send it at all").
-        # ``deterministic_risk_veto`` IS the rug signal: the rug engine's
-        # COMBINED score (many contract facts weighed together), an already-firing
-        # risk alert, honeypot/unsellable, or the earned mind-layer p(rug) vote —
-        # so a single soft flag never trips it; only a real rug does. A flagged
-        # coin is not a real entry at ANY priority, and once the phone threshold
-        # drops to MEDIUM a merely-downgraded rug would land on it, so it is
-        # dropped outright. Protective alerts always pass (a flagged coin's
-        # holder still needs the warning).
-        if deterministic_risk_veto is not None:
+        # Two things — and only two — suppress a buy-side alert entirely:
+        #
+        # 1) RUG VETO ("if it's a rug pull don't send it at all"). The
+        #    ``deterministic_risk_veto`` IS the rug signal: the rug engine's
+        #    COMBINED score, an already-firing risk alert, honeypot/unsellable,
+        #    or the earned mind-layer p(rug) vote — so a single soft flag never
+        #    trips it; only a real rug does.
+        # 2) NOT A REAL, TRADEABLE COIN — a 0 / missing liquidity or market cap
+        #    (operator rule 2026-07-12: "it's still giving me coins with 0
+        #    liquidity or 0 market cap"). This is NOT a thin coin the operator
+        #    might still want (that sends with a ⚠ checklist note); it is a
+        #    non-opportunity you could not buy, size, or value at all — noise,
+        #    not a lead. See ``_untradeable``.
+        #
+        # Everything else soft (thin-but-real liquidity, mint/freeze authority,
+        # sell tax, deployer history) only ANNOTATES via the checklist. Protective
+        # alerts always pass — a flagged/dying coin's holder still needs the
+        # warning.
+        if deterministic_risk_veto is not None or self._untradeable(result):
             events = [e for e in events if e.alert_type not in _BUY_SIDE_ALERT_TYPES]
         else:
             # NOT a rug: individual soft checks (liquidity/market-cap floor,
@@ -282,6 +290,22 @@ class AutomationRules:
         return gate_events_by_interest(
             events, operator_interest=operator_interest,
             enabled=self._s.risk_alerts_require_interest)
+
+    def _untradeable(self, result: PipelineResult) -> bool:
+        """True when the coin is not a REAL, tradeable opportunity — a 0, negative,
+        NaN, or missing liquidity OR market cap (operator rule 2026-07-12). Such a
+        "coin" cannot be bought, sized, or valued, so a buy-side alert on it is
+        noise and is suppressed outright — distinct from the comfort floor, which
+        only annotates a thin-but-real coin (a $4k pool still sends with a ⚠ note;
+        a $0/None pool never sends). A missing value counts as untradeable, never
+        as tradeable (Rule 8: absent data is not a green light)."""
+        liq = result.pair.liquidity_usd
+        if liq is None or not math.isfinite(liq) or liq <= 0.0:
+            return True
+        mcap = result.pair.market_cap
+        if mcap is None or not math.isfinite(mcap) or mcap <= 0.0:
+            return True
+        return False
 
     def _safety_checklist(self, result: PipelineResult) -> list[_SafetyCheck]:
         """Build the per-alert safety checklist (operator rule 2026-07-12).
