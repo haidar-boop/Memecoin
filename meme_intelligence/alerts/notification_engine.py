@@ -254,7 +254,7 @@ class AutomationRules:
         drop = self._score_drop_rule(result, previous_score)
         if drop is not None:
             events.append(drop)
-        # Two things — and only two — suppress a buy-side alert entirely:
+        # Three things — and only three — suppress a buy-side alert entirely:
         #
         # 1) RUG VETO ("if it's a rug pull don't send it at all"). The
         #    ``deterministic_risk_veto`` IS the rug signal: the rug engine's
@@ -267,12 +267,17 @@ class AutomationRules:
         #    might still want (that sends with a ⚠ checklist note); it is a
         #    non-opportunity you could not buy, size, or value at all — noise,
         #    not a lead. See ``_untradeable``.
+        # 3) ALREADY TOO BIG — an operator-set liquidity/market-cap CEILING. A
+        #    coin whose pool or market cap has grown past the ceiling is no
+        #    longer an early opportunity (the move already happened), so its
+        #    buy-side alert is suppressed. OFF by default. See ``_oversized``.
         #
         # Everything else soft (thin-but-real liquidity, mint/freeze authority,
         # sell tax, deployer history) only ANNOTATES via the checklist. Protective
         # alerts always pass — a flagged/dying coin's holder still needs the
         # warning.
-        if deterministic_risk_veto is not None or self._untradeable(result):
+        if (deterministic_risk_veto is not None
+                or self._untradeable(result) or self._oversized(result)):
             events = [e for e in events if e.alert_type not in _BUY_SIDE_ALERT_TYPES]
         else:
             # NOT a rug: individual soft checks (liquidity/market-cap floor,
@@ -304,6 +309,26 @@ class AutomationRules:
             return True
         mcap = result.pair.market_cap
         if mcap is None or not math.isfinite(mcap) or mcap <= 0.0:
+            return True
+        return False
+
+    def _oversized(self, result: PipelineResult) -> bool:
+        """True when the coin has already grown past the operator's buy-side
+        ceiling — liquidity or market cap above a SET maximum. A coin this large
+        is no longer an early opportunity (the move the operator wants to catch
+        already happened — e.g. a multi-million-dollar pool firing an "early
+        opportunity"), so its opportunity/momentum/smart-money alerts are
+        suppressed. Distinct from ``_untradeable``: here unknown liquidity/mcap
+        NEVER trips the ceiling (Rule 8 — absent data is not evidence a coin is
+        too big), and protective alerts still fire (a large coin can still rug).
+        Both ceilings default 0.0 = OFF, so behavior is unchanged until set."""
+        max_liq = self._t.opportunity_max_liquidity_usd
+        liq = result.pair.liquidity_usd
+        if max_liq > 0.0 and liq is not None and math.isfinite(liq) and liq > max_liq:
+            return True
+        max_mcap = self._t.opportunity_max_market_cap_usd
+        mcap = result.pair.market_cap
+        if max_mcap > 0.0 and mcap is not None and math.isfinite(mcap) and mcap > max_mcap:
             return True
         return False
 
