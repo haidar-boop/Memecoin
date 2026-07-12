@@ -80,6 +80,43 @@ _NO_INTEREST_NOTE = ("informational only: this token never earned an "
                      "opportunity alert, so no operator decision is exposed "
                      "to it (interest gate)")
 
+# ---- Safety checklist (operator rule 2026-07-12) ---------------------------
+# Each buy-side alert that SURVIVES the rug veto carries a small checklist so
+# the operator sees what passed and what fell short. The design principle: gate
+# (suppress) only on a rug — the rug engine's COMBINED verdict, handled upstream
+# via ``deterministic_risk_veto`` — and let every individual soft signal merely
+# ANNOTATE. A single missed line never drops the alert ("if just one thing
+# misses the checklist, send it through and let me know"). Notes framed
+# "normal for a new launch" keep a fresh, naturally-concentrated coin from
+# looking like a scam purely for being young (Rule 8).
+_CHECK_ICON = {"pass": "✅", "warn": "⚠️", "note": "ℹ️", "unknown": "❔"}
+
+
+@dataclass(frozen=True)
+class _SafetyCheck:
+    """One checklist line. ``status`` is pass/warn/note/unknown; ``detail`` is
+    the human-readable text (rendered with the matching icon). A ``warn`` is a
+    soft miss that annotates but NEVER suppresses; ``note`` is informational
+    (no pass/fail); ``unknown`` is missing data surfaced honestly (Rule 8)."""
+
+    status: str
+    detail: str
+
+
+def _render_checklist(checks: list[_SafetyCheck]) -> tuple[str, ...]:
+    """Render checks into display lines led by a "passed X/Y" header. Only
+    definitively-evaluated lines (pass/warn) count toward the denominator;
+    notes and unknowns are shown but not scored."""
+    if not checks:
+        return ()
+    scored = [c for c in checks if c.status in ("pass", "warn")]
+    passed = sum(1 for c in scored if c.status == "pass")
+    header = (f"Safety checklist — passed {passed}/{len(scored)}"
+              if scored else "Safety checklist")
+    lines = [header]
+    lines += [f"{_CHECK_ICON.get(c.status, '•')} {c.detail}" for c in checks]
+    return tuple(lines)
+
 
 def gate_events_by_interest(
     events: list["AlertEvent"], *, operator_interest: bool, enabled: bool = True,
@@ -123,6 +160,11 @@ class AlertEvent:
     monitoring: tuple[str, ...] = ()  # recommended next checks
     why_it_matters: str = ""          # potential impact (Part 29, Section 7)
     detected_at: datetime | None = None  # stamped at dispatch when unset
+    # Safety checklist lines (already rendered with ✅/⚠/ℹ/❔ icons) attached to
+    # buy-side alerts so the operator sees what passed and what fell short — a
+    # missed soft check annotates rather than suppresses (operator rule
+    # 2026-07-12). Empty for protective/informational alerts.
+    checklist: tuple[str, ...] = ()
 
     def render(self) -> str:
         symbol = self.token.symbol or self.token.address[:8]
@@ -132,6 +174,8 @@ class AlertEvent:
             lines.append(f"  why it matters: {self.why_it_matters}")
         for reason in self.reasons:
             lines.append(f"  - {reason}")
+        for line in self.checklist:
+            lines.append(f"  {line}")
         if self.scores:
             rendered = ", ".join(
                 f"{k}={v:.0f}" if v is not None else f"{k}=?" for k, v in self.scores.items()
@@ -145,9 +189,11 @@ class AlertEvent:
 class AutomationRules:
     """Turns pipeline results into alert decisions (Part 13, Section 7)."""
 
-    def __init__(self, thresholds: AlertThresholds, settings: AlertEngineSettings):
+    def __init__(self, thresholds: AlertThresholds, settings: AlertEngineSettings,
+                 *, now_func: Callable[[], datetime] = lambda: datetime.now(timezone.utc)):
         self._t = thresholds
         self._s = settings
+        self._now = now_func
 
     def evaluate(
         self,
@@ -208,40 +254,165 @@ class AutomationRules:
         drop = self._score_drop_rule(result, previous_score)
         if drop is not None:
             events.append(drop)
-        # SUPPRESS buy-side alerts (not merely downgrade to MEDIUM) when a free
-        # risk/rug/copycat screen vetoed the token, or the pool is too thin to
-        # trade. A flagged coin is not a real entry at ANY priority. The old
-        # design only DOWNGRADED a vetoed HIGH candidate to a MEDIUM
-        # "provisional" alert, which hid it from a HIGH-only phone — but once
-        # the operator lowers the phone threshold to MEDIUM, that demoted rug
-        # lands right on the phone. Dropping it fixes that (protective alerts
-        # always pass through — a flagged coin's holder still needs the warning;
-        # and the mind-layer p(rug) veto flows through the same path once
-        # MEMEINTEL_LEARNING_VETO_ENABLED is on, adding the learned detector).
-        if deterministic_risk_veto is not None or self._below_opportunity_floor(result):
+        # RUG VETO — the ONE thing that suppresses a buy-side alert entirely
+        # (operator rule 2026-07-12: "if it's a rug pull don't send it at all").
+        # ``deterministic_risk_veto`` IS the rug signal: the rug engine's
+        # COMBINED score (many contract facts weighed together), an already-firing
+        # risk alert, honeypot/unsellable, or the earned mind-layer p(rug) vote —
+        # so a single soft flag never trips it; only a real rug does. A flagged
+        # coin is not a real entry at ANY priority, and once the phone threshold
+        # drops to MEDIUM a merely-downgraded rug would land on it, so it is
+        # dropped outright. Protective alerts always pass (a flagged coin's
+        # holder still needs the warning).
+        if deterministic_risk_veto is not None:
             events = [e for e in events if e.alert_type not in _BUY_SIDE_ALERT_TYPES]
+        else:
+            # NOT a rug: individual soft checks (liquidity/market-cap floor,
+            # mint/freeze authority, sell tax, deployer history) no longer
+            # SUPPRESS — that used to drop the whole alert on a single thin-pool
+            # miss. Instead the safety checklist rides ON each surviving buy-side
+            # alert so the operator sees what passed and what fell short and
+            # decides ("if just one thing misses the checklist, send it through
+            # and let me know").
+            checklist = _render_checklist(self._safety_checklist(result))
+            if checklist:
+                events = [dataclasses.replace(e, checklist=checklist)
+                          if e.alert_type in _BUY_SIDE_ALERT_TYPES else e
+                          for e in events]
         return gate_events_by_interest(
             events, operator_interest=operator_interest,
             enabled=self._s.risk_alerts_require_interest)
 
-    def _below_opportunity_floor(self, result: PipelineResult) -> bool:
-        """True when the pool is too thin/small for a real, tradeable entry, so
-        buy-side alerts are suppressed regardless of score. Both floors default
-        to 0.0 (off) — existing behavior is unchanged until the operator sets
-        one (Rule 18). A SET floor treats unknown/NaN liquidity or market cap as
-        below it: a buy signal you cannot even size is not phone-worthy
-        (Rule 8), matching the strong-candidate depth veto's own convention."""
-        min_liq = self._t.opportunity_min_liquidity_usd
-        if min_liq > 0.0:
-            liq = result.pair.liquidity_usd
-            if liq is None or not math.isfinite(liq) or liq < min_liq:
-                return True
-        min_mcap = self._t.opportunity_min_market_cap_usd
-        if min_mcap > 0.0:
-            mcap = result.pair.market_cap
-            if mcap is None or not math.isfinite(mcap) or mcap < min_mcap:
-                return True
-        return False
+    def _safety_checklist(self, result: PipelineResult) -> list[_SafetyCheck]:
+        """Build the per-alert safety checklist (operator rule 2026-07-12).
+
+        Reads contract facts already collected (``SecurityProfile``) plus pool
+        depth — zero extra API calls. Every line ANNOTATES; none suppresses (the
+        rug veto upstream is the only gate). Unknown data is surfaced honestly as
+        ``❔`` rather than assumed safe (Rule 8), and top-wallet concentration is
+        an informational note — never a fail — framed "normal for a new launch"
+        on a young pool, because a fresh coin is naturally concentrated and must
+        not look like a scam purely for being young."""
+        p = result.security_profile
+        checks: list[_SafetyCheck] = []
+
+        # 1) Sellable — a confirmed honeypot is handled upstream (destructive ->
+        # no opportunity + emergency warning); this line reassures on the survivors.
+        if p is None or (p.is_honeypot is None and p.cannot_sell_all is None):
+            checks.append(_SafetyCheck("unknown", "Sellable: not verified"))
+        elif p.is_honeypot or p.cannot_sell_all:
+            checks.append(_SafetyCheck("warn", "Cannot sell — honeypot indicators present"))
+        else:
+            checks.append(_SafetyCheck("pass", "Sellable"))
+
+        # 2) Mint authority renounced — if live, the dev can mint more and dilute.
+        checks.append(self._authority_check(
+            p.is_mintable if p else None,
+            pass_text="Mint authority renounced",
+            warn_text="Mint authority still active — dev can mint more supply",
+            unknown_text="Mint authority: not verified"))
+
+        # 3) Freeze authority renounced — if live, the dev could freeze transfers.
+        checks.append(self._authority_check(
+            p.is_freezable if p else None,
+            pass_text="Freeze authority renounced",
+            warn_text="Freeze authority still active — dev could freeze transfers",
+            unknown_text="Freeze authority: not verified"))
+
+        # 4) Sell tax under the comfort ceiling.
+        tax = p.sell_tax_percent if p else None
+        ceiling = self._t.checklist_sell_tax_max_percent
+        if tax is None or not math.isfinite(tax):
+            checks.append(_SafetyCheck("unknown", "Sell tax: not verified"))
+        elif tax > ceiling:
+            checks.append(_SafetyCheck(
+                "warn", f"Sell tax {tax:.0f}% — above the {ceiling:.0f}% comfort line"))
+        else:
+            checks.append(_SafetyCheck("pass", f"Sell tax {tax:.0f}%"))
+
+        # 5) Deployer history — a creator tied to past honeypots is a real flag
+        # (a serial scammer's fresh coin is still dangerous); clean or unknown
+        # otherwise (Rule 8).
+        same_creator = p.honeypot_same_creator_count if p else None
+        if same_creator is None:
+            checks.append(_SafetyCheck("unknown", "Deployer history: not verified"))
+        elif same_creator > 0:
+            checks.append(_SafetyCheck(
+                "warn", f"Deployer linked to {same_creator} past honeypot(s)"))
+        else:
+            checks.append(_SafetyCheck("pass", "Deployer clean (no known honeypots)"))
+
+        # 6) Tradeable liquidity — the old suppressing floor, now a comfort line.
+        checks.append(self._liquidity_check(result))
+
+        # 7) Market cap — only shown when the operator set a comfort floor.
+        mcap_check = self._market_cap_check(result)
+        if mcap_check is not None:
+            checks.append(mcap_check)
+
+        # Informational: top-wallet concentration — NEVER a fail (a new launch is
+        # naturally concentrated). Shown with youth context when the pool is young.
+        top = p.top_holder_percent if p else None
+        if top is not None and math.isfinite(top):
+            detail = f"{top:.0f}% held by the top wallet"
+            if self._is_new_launch(result):
+                detail += " — normal for a new launch"
+            checks.append(_SafetyCheck("note", detail))
+
+        return checks
+
+    def _authority_check(self, live: bool | None, *, pass_text: str,
+                         warn_text: str, unknown_text: str) -> _SafetyCheck:
+        """A renounced-authority line: ``live`` True means the authority is still
+        active (a soft ⚠ flag), False means renounced (✅), None unknown (❔)."""
+        if live is None:
+            return _SafetyCheck("unknown", unknown_text)
+        return _SafetyCheck("warn", warn_text) if live else _SafetyCheck("pass", pass_text)
+
+    def _liquidity_check(self, result: PipelineResult) -> _SafetyCheck:
+        """Pool-depth line against the operator's comfort floor. With no floor
+        set (0.0) it is an informational note; with a floor set it passes/⚠ and
+        an unknown depth surfaces as ❔ (a buy you cannot size — Rule 8)."""
+        liq = result.pair.liquidity_usd
+        floor = self._t.opportunity_min_liquidity_usd
+        if liq is None or not math.isfinite(liq):
+            if floor > 0.0:
+                return _SafetyCheck("unknown", "Liquidity: unknown (cannot size an entry)")
+            return _SafetyCheck("note", "Liquidity: unknown")
+        if floor <= 0.0:
+            return _SafetyCheck("note", f"Liquidity ${liq:,.0f}")
+        if liq < floor:
+            return _SafetyCheck(
+                "warn", f"Liquidity ${liq:,.0f} — below your ${floor:,.0f} comfort floor")
+        return _SafetyCheck("pass", f"Liquidity ${liq:,.0f}")
+
+    def _market_cap_check(self, result: PipelineResult) -> _SafetyCheck | None:
+        """Market-cap comfort line — only produced when a floor is set (0.0 =
+        off), so it adds no noise for operators who only care about liquidity.
+        Unknown cap surfaces as ❔ against a set floor (Rule 8)."""
+        floor = self._t.opportunity_min_market_cap_usd
+        if floor <= 0.0:
+            return None
+        mcap = result.pair.market_cap
+        if mcap is None or not math.isfinite(mcap):
+            return _SafetyCheck("unknown", "Market cap: unknown")
+        if mcap < floor:
+            return _SafetyCheck(
+                "warn", f"Market cap ${mcap:,.0f} — below your ${floor:,.0f} floor")
+        return _SafetyCheck("pass", f"Market cap ${mcap:,.0f}")
+
+    def _is_new_launch(self, result: PipelineResult) -> bool:
+        """True when the pool is younger than the checklist's new-launch window —
+        used only to phrase the concentration note, never to gate anything."""
+        created = result.pair.pair_created_at
+        if created is None:
+            return False
+        window = self._t.checklist_new_launch_minutes
+        try:
+            age_minutes = (self._now() - created).total_seconds() / 60.0
+        except Exception:  # noqa: BLE001 — a bad timestamp must never break alerting
+            return False
+        return 0.0 <= age_minutes <= window
 
     # IF liquidity has collapsed below the dead floor THEN the failure is a
     # completed event, not a warning — emit one post-mortem (Part 29 S1).

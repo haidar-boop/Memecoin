@@ -201,6 +201,19 @@ class AlertThresholds:
     # 0.0 = OFF, so existing behavior is unchanged until set (Rule 18).
     opportunity_min_liquidity_usd: float = 0.0
     opportunity_min_market_cap_usd: float = 0.0
+    # Safety checklist (operator rule 2026-07-12): a buy-side alert now SENDS
+    # even when a soft check falls short — the checklist rides ON the alert so
+    # the operator sees what missed and decides. Only the rug engine's COMBINED
+    # veto suppresses ("if it's a rug pull don't send it at all"); a single soft
+    # flag never does. The liquidity/market-cap floors above became checklist
+    # comfort lines (annotate), not gates. ``checklist_sell_tax_max_percent`` is
+    # the sell-tax ceiling a coin passes under; above it the line reads ⚠ but
+    # the alert still sends. ``checklist_new_launch_minutes`` is how young a pool
+    # can be for the top-wallet-concentration line to read "normal for a new
+    # launch" rather than a standalone concern (a fresh launch is naturally
+    # concentrated — Rule 8, never punish a coin merely for being new).
+    checklist_sell_tax_max_percent: float = 15.0
+    checklist_new_launch_minutes: float = 60.0
 
     def __post_init__(self) -> None:
         for name in ("security", "community", "liquidity", "onchain", "overall",
@@ -217,11 +230,14 @@ class AlertThresholds:
             if not math.isfinite(value) or value <= 0:
                 raise ConfigurationError(
                     f"alert threshold '{name}' must be positive, got {value}")
-        for name in ("opportunity_min_liquidity_usd", "opportunity_min_market_cap_usd"):
+        for name in ("opportunity_min_liquidity_usd", "opportunity_min_market_cap_usd",
+                     "checklist_new_launch_minutes"):
             value = getattr(self, name)
             if not math.isfinite(value) or value < 0:
                 raise ConfigurationError(
                     f"alert threshold '{name}' must be >= 0, got {value}")
+        _check_range("alert threshold 'checklist_sell_tax_max_percent'",
+                     self.checklist_sell_tax_max_percent, 0.0, 100.0)
 
 
 @dataclass(frozen=True)

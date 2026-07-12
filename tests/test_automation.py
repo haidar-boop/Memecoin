@@ -36,8 +36,9 @@ def make_pair(**overrides) -> DexPair:
     return DexPair(**defaults)
 
 
-def make_profile(honeypot=False) -> SecurityProfile:
-    return SecurityProfile(
+def make_profile(honeypot=False, **overrides) -> SecurityProfile:
+    import dataclasses as _dc
+    base = SecurityProfile(
         token=TOKEN, source="goplus",
         is_honeypot=honeypot, cannot_buy=False, cannot_sell_all=False,
         is_open_source=True, is_proxy=False, is_mintable=False,
@@ -51,6 +52,7 @@ def make_profile(honeypot=False) -> SecurityProfile:
         holder_count=2500, top_holder_percent=3.0, top10_holder_percent=22.0,
         creator_percent=1.5, owner_percent=0.0, lp_locked_percent=95.0,
     )
+    return _dc.replace(base, **overrides) if overrides else base
 
 
 class OneShotGoPlus:
@@ -61,14 +63,14 @@ class OneShotGoPlus:
         return self.profile
 
 
-async def pipeline_result(honeypot=False, pair=None):
-    pipeline = ResearchPipeline(SETTINGS, OneShotGoPlus(make_profile(honeypot)),
-                                now_func=lambda: NOW)
+async def pipeline_result(honeypot=False, pair=None, profile=None):
+    prof = profile if profile is not None else make_profile(honeypot)
+    pipeline = ResearchPipeline(SETTINGS, OneShotGoPlus(prof), now_func=lambda: NOW)
     return await pipeline.analyze_pair(pair or make_pair(), regime=MarketRegime.NEUTRAL)
 
 
-def make_rules() -> AutomationRules:
-    return AutomationRules(AlertThresholds(), AlertEngineSettings())
+def make_rules(now=lambda: NOW) -> AutomationRules:
+    return AutomationRules(AlertThresholds(), AlertEngineSettings(), now_func=now)
 
 
 async def test_strong_fresh_token_gets_high_strong_candidate_alert():
@@ -428,51 +430,60 @@ def test_event_renders():
 
 # ---- Operator liquidity / market-cap floor for buy-side alerts (2026-07-11) ----
 
-async def test_liquidity_floor_suppresses_buy_side_alerts():
-    """Below a tradeable pool depth, buy-side signals are suppressed entirely
-    (not just downgraded) — the fix for 0-liquidity 'opportunities' reaching
-    the phone."""
+async def test_liquidity_floor_annotates_but_no_longer_suppresses():
+    """Operator rule 2026-07-12: a thin pool no longer DROPS the buy-side alert.
+    The alert still sends and the safety checklist carries a ⚠ liquidity line so
+    the operator sees the shortfall and decides ("if just one thing misses the
+    checklist, send it through and let me know")."""
     rules = AutomationRules(
         AlertThresholds(opportunity_min_liquidity_usd=200_000.0),  # fixture has 90k
         AlertEngineSettings())
     result = await pipeline_result()
-    assert result.master.final_score >= 88.0   # would otherwise be a strong candidate
-    types = {e.alert_type for e in rules.evaluate(result)}
-    assert not (types & _BUY_SIDE_ALERT_TYPES)  # no strong_candidate/early_opp/momentum
+    assert result.master.final_score >= 88.0   # a strong candidate
+    events = rules.evaluate(result)
+    buy_side = [e for e in events if e.alert_type in _BUY_SIDE_ALERT_TYPES]
+    assert buy_side                                      # NOT suppressed anymore
+    checklist = "\n".join(buy_side[0].checklist)
+    assert "⚠️" in checklist and "comfort floor" in checklist  # the miss is shown
+    assert "Liquidity $90,000" in checklist
 
 
-async def test_market_cap_floor_suppresses_buy_side_alerts():
+async def test_market_cap_floor_annotates_but_no_longer_suppresses():
     rules = AutomationRules(
         AlertThresholds(opportunity_min_market_cap_usd=5_000_000.0),  # fixture has 400k
         AlertEngineSettings())
     result = await pipeline_result()
-    types = {e.alert_type for e in rules.evaluate(result)}
-    assert not (types & _BUY_SIDE_ALERT_TYPES)
+    buy_side = [e for e in rules.evaluate(result) if e.alert_type in _BUY_SIDE_ALERT_TYPES]
+    assert buy_side
+    checklist = "\n".join(buy_side[0].checklist)
+    assert "Market cap" in checklist and "below your" in checklist
 
 
-async def test_unknown_liquidity_with_floor_set_suppresses_buy_side():
-    """A SET floor treats unknown liquidity as below it — a buy you cannot
-    even size is not phone-worthy (Rule 8)."""
+async def test_unknown_liquidity_with_floor_set_annotates_not_suppresses():
+    """A SET floor with unknown liquidity no longer drops the alert — it sends
+    with a ❔ 'cannot size an entry' line (Rule 8: surfaced, not assumed)."""
     rules = AutomationRules(
         AlertThresholds(opportunity_min_liquidity_usd=10_000.0),
         AlertEngineSettings())
     result = await pipeline_result(pair=make_pair(liquidity_usd=None))
-    types = {e.alert_type for e in rules.evaluate(result)}
-    assert not (types & _BUY_SIDE_ALERT_TYPES)
+    buy_side = [e for e in rules.evaluate(result) if e.alert_type in _BUY_SIDE_ALERT_TYPES]
+    assert buy_side
+    checklist = "\n".join(buy_side[0].checklist)
+    assert "❔" in checklist and "Liquidity: unknown" in checklist
 
 
-async def test_floor_does_not_suppress_protective_alerts():
-    """The floor silences buy-side signals only — a holder's warning on a thin
-    or dangerous coin still fires."""
+async def test_floor_no_longer_touches_protective_alerts():
+    """A destructive coin still produces its protective warning and never a
+    buy-side alert — that path is governed by the destructive/rug logic, not
+    the (now advisory) liquidity floor."""
     rules = AutomationRules(
         AlertThresholds(opportunity_min_liquidity_usd=1_000_000.0),
         AlertEngineSettings())
-    # honeypot at $800 liquidity: above the dead floor (not a death post-mortem)
-    # but destructive -> a protective emergency alert on the normal path.
+    # honeypot at $800 liquidity: destructive -> protective emergency, no buy-side.
     result = await pipeline_result(honeypot=True, pair=make_pair(liquidity_usd=800.0))
     types = {e.alert_type for e in rules.evaluate(result)}
-    assert types & _PROTECTIVE_ALERT_TYPES     # the warning survives the floor
-    assert not (types & _BUY_SIDE_ALERT_TYPES)
+    assert types & _PROTECTIVE_ALERT_TYPES     # the warning still fires
+    assert not (types & _BUY_SIDE_ALERT_TYPES)  # destructive -> never a buy pitch
 
 
 async def test_floor_off_by_default_leaves_alerts_unchanged():
@@ -495,6 +506,100 @@ def test_opportunity_floor_validates_and_loads_from_env():
     assert s.alerts.opportunity_min_market_cap_usd == 50000.0
     # default stays off
     assert Settings.from_env(env={}).alerts.opportunity_min_liquidity_usd == 0.0
+
+
+# ---- Safety checklist rides on buy-side alerts (operator rule 2026-07-12) ----
+
+async def test_clean_buy_side_alert_carries_a_passing_checklist():
+    """A healthy fixture's buy-side alert carries a checklist with a "passed
+    X/Y" header, all-clear lines, and the concentration note. The checklist is
+    also visible in the rendered message the operator sees."""
+    from meme_intelligence.alerts.sinks import format_alert
+    result = await pipeline_result()
+    buy_side = [e for e in make_rules().evaluate(result)
+                if e.alert_type in _BUY_SIDE_ALERT_TYPES]
+    assert buy_side
+    event = buy_side[0]
+    assert event.checklist                                   # attached
+    assert event.checklist[0].startswith("Safety checklist — passed ")
+    body = "\n".join(event.checklist)
+    assert "✅ Sellable" in body
+    assert "✅ Mint authority renounced" in body
+    assert "✅ Freeze authority renounced" in body
+    # visible to the operator in BOTH renderers
+    assert "Safety checklist" in event.render()
+    assert "Safety checklist" in format_alert(event)
+
+
+async def test_checklist_flags_soft_risks_without_suppressing():
+    """Mint/freeze authority still live, a high sell tax, and a deployer tied to
+    past honeypots each produce a ⚠ line — but the alert is NOT suppressed
+    (only a rug veto does that). Verified on the checklist directly."""
+    dirty = make_profile(is_mintable=True, is_freezable=True,
+                         sell_tax_percent=30.0, honeypot_same_creator_count=2)
+    result = await pipeline_result(profile=dirty)
+    checks = make_rules()._safety_checklist(result)
+    by_status = {c.detail: c.status for c in checks}
+    warns = "\n".join(c.detail for c in checks if c.status == "warn")
+    assert "Mint authority still active" in warns
+    assert "Freeze authority still active" in warns
+    assert "Sell tax 30%" in warns
+    assert "past honeypot" in warns
+    # every one of those is a soft ⚠ (annotate), none is a hard stop
+    assert all(s in ("pass", "warn", "note", "unknown") for s in by_status.values())
+
+
+async def test_checklist_concentration_note_is_never_a_fail():
+    """A brand-new coin with 85% in the top wallet: shown as an informational
+    note framed 'normal for a new launch', NEVER a warn — a fresh coin must not
+    look like a scam purely for being young (the operator's exact concern)."""
+    young = make_pair(pair_created_at=NOW - timedelta(minutes=3))
+    concentrated = make_profile(top_holder_percent=85.0)
+    result = await pipeline_result(pair=young, profile=concentrated)
+    checks = make_rules(now=lambda: NOW)._safety_checklist(result)
+    conc = [c for c in checks if "top wallet" in c.detail]
+    assert conc and conc[0].status == "note"                 # note, not warn
+    assert "normal for a new launch" in conc[0].detail
+
+
+async def test_checklist_surfaces_unknown_data_not_assumed_safe():
+    """Missing contract facts are shown as ❔ (Rule 8), never silently passed."""
+    blank = make_profile(is_mintable=None, is_freezable=None,
+                         sell_tax_percent=None, honeypot_same_creator_count=None)
+    result = await pipeline_result(profile=blank)
+    statuses = {c.detail: c.status for c in make_rules()._safety_checklist(result)}
+    assert statuses["Mint authority: not verified"] == "unknown"
+    assert statuses["Freeze authority: not verified"] == "unknown"
+    assert statuses["Sell tax: not verified"] == "unknown"
+
+
+def test_render_checklist_counts_only_scored_lines():
+    """The "passed X/Y" header counts pass/warn only — notes and unknowns are
+    shown but not scored."""
+    from meme_intelligence.alerts.notification_engine import (
+        _SafetyCheck,
+        _render_checklist,
+    )
+    lines = _render_checklist([
+        _SafetyCheck("pass", "A"), _SafetyCheck("pass", "B"),
+        _SafetyCheck("warn", "C"), _SafetyCheck("note", "D"),
+        _SafetyCheck("unknown", "E"),
+    ])
+    assert lines[0] == "Safety checklist — passed 2/3"       # 2 pass of 3 scored
+    assert lines[1] == "✅ A" and "⚠️ C" in lines and "ℹ️ D" in lines and "❔ E" in lines
+
+
+def test_checklist_config_validates_and_loads_from_env():
+    with pytest.raises(ConfigurationError, match="checklist_sell_tax_max_percent"):
+        AlertThresholds(checklist_sell_tax_max_percent=150.0)
+    with pytest.raises(ConfigurationError, match="checklist_new_launch_minutes"):
+        AlertThresholds(checklist_new_launch_minutes=-1.0)
+    s = Settings.from_env(env={
+        "MEMEINTEL_ALERTS_CHECKLIST_SELL_TAX_MAX_PERCENT": "10",
+        "MEMEINTEL_ALERTS_CHECKLIST_NEW_LAUNCH_MINUTES": "30",
+    })
+    assert s.alerts.checklist_sell_tax_max_percent == 10.0
+    assert s.alerts.checklist_new_launch_minutes == 30.0
 
 
 async def test_deterministic_veto_keeps_protective_alerts():

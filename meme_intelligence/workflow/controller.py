@@ -339,7 +339,8 @@ class ContinuousScanner:
                                           ai_service=ai_service,
                                           jupiter_client=jupiter_client,
                                           now_func=now_func)
-        self._rules = AutomationRules(settings.alerts, settings.alert_engine)
+        self._rules = AutomationRules(settings.alerts, settings.alert_engine,
+                                      now_func=self._now)
         self._seen = _BoundedKeySet(settings.workflow.max_tracked_keys)
         # key -> next-eligible-retry datetime, for tokens whose first look was
         # inconclusive purely from missing data on a young pool (not a real

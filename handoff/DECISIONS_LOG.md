@@ -1267,6 +1267,55 @@ tests. Every fix follows Rule 3 (never break working code) and Rule 7
    env could size a probe trade with a non-finite amount. Guarded with
    `math.isfinite`. (`config/settings.py`)
 
+## 2026-07-12 — Safety checklist: annotate soft misses, block only rugs
+
+**Operator request:** "I don't want only one thing to stop it from sending it
+to me. If it's a rug pull don't send it to me at all, but if just one thing
+misses the checklist send it through and just let me know if anything didn't
+make the checklist." Plus the standing concern that a brand-new coin (naturally
+concentrated in one wallet, thin history) must not be rejected merely for being
+young.
+
+**Design principle:** *gate on a rug, annotate everything else.* A rug is a
+COMBINED verdict (many contract facts weighed together) — exactly what the rug
+engine already produces and what flows through `deterministic_risk_veto`. A
+single soft signal never crosses that combined threshold, so keeping the rug
+veto as the only suppressor directly satisfies "one thing shouldn't block it,
+but a rug should."
+
+**What changed (`alerts/notification_engine.py`):**
+- The buy-side suppression condition was `deterministic_risk_veto is not None OR
+  below the liquidity/market-cap floor`. The floor half was REMOVED from
+  suppression. Now only the rug veto drops a buy-side alert.
+- Every surviving buy-side alert carries a `_SafetyCheck` list rendered onto the
+  alert (`AlertEvent.checklist`, shown in both `AlertEvent.render()` and
+  `sinks.format_alert`): a "passed X/Y" header plus per-signal lines —
+  ✅ pass, ⚠ soft miss (annotate, never suppress), ℹ note, ❔ unknown.
+- Checklist lines: Sellable (honeypot/unsellable), Mint authority renounced,
+  Freeze authority renounced, Sell tax under a comfort ceiling, Deployer clean
+  (no same-creator honeypots), Liquidity vs the operator's comfort floor, and
+  Market cap vs its floor (only when set). Top-wallet concentration is an
+  informational NOTE — never a fail — framed "normal for a new launch" on a
+  young pool. Missing data is ❔, never assumed safe (Rule 8).
+
+**Why the liquidity floor moved from gate to note:** it was the ONE standalone
+(non-rug) suppressor. The operator explicitly accepted more alerts in exchange
+for seeing *why* each one is imperfect; a thin pool now sends with
+"⚠ Liquidity $6,200 — below your $10,000 comfort floor" rather than vanishing.
+Any advisory line can be promoted back to a hard block later if the noise
+returns — the split is intentional and reversible.
+
+**Config (`AlertThresholds`, env `MEMEINTEL_ALERTS_*`):**
+`checklist_sell_tax_max_percent` (default 15.0) and
+`checklist_new_launch_minutes` (default 60.0). The liquidity/market-cap floors
+keep their env vars but are now comfort lines, not gates.
+`AutomationRules` gained an optional `now_func` (the controller passes its
+clock) to age the pool for the concentration note.
+
+Rug behavior is unchanged: a confirmed honeypot is destructive (no buy-side
+alert, a protective emergency warning instead), and `deterministic_risk_veto`
+still suppresses buy-side entirely. 9 new/updated tests; suite 778 → 784.
+
 ## Notable implementation choices (Rule 19)
 
 - **Python 3.11 + asyncio** over Node.js (both allowed by spec): the

@@ -165,6 +165,10 @@ def format_alert(event: AlertEvent) -> str:
     if event.reasons:
         lines += ["", "Evidence"]
         lines += [f"  - {reason}" for reason in event.reasons]
+    if event.checklist:
+        # Pre-rendered with ✅/⚠/ℹ/❔ icons and a "passed X/Y" header line.
+        lines += [""]
+        lines += [f"  {line}" for line in event.checklist]
     if event.scores:
         lines += ["", "Current scores"]
         lines += [f"  {name}: " + (f"{value:.0f}/100" if value is not None else "no data")
