@@ -48,6 +48,7 @@ ALERT_CHANNELS = {
     "community_fake": "security",
     "momentum": "momentum",
     "score_drop_review": "reports",
+    "boost": "discoveries",
 }
 
 # Section 7 "Risk Assessment: Low / Medium / High", derived from priority —

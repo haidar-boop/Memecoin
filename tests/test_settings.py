@@ -350,3 +350,28 @@ def test_insufficient_data_retry_settings_load_and_validate():
     assert settings.workflow.insufficient_data_min_coverage == 0.4
     assert settings.workflow.insufficient_data_retry_minutes == 10.0
     assert settings.workflow.insufficient_data_max_age_minutes == 60.0
+
+
+def test_boost_watcher_defaults():
+    bw = Settings.from_env(env={}).boost_watcher
+    assert bw.enabled is False
+    assert bw.threshold == 100.0
+    assert bw.poll_interval_seconds == 30.0
+    assert bw.chain_filter == "solana"
+    assert bw.max_seen_keys == 5000
+
+
+def test_boost_watcher_env_override():
+    bw = Settings.from_env(env={
+        "MEMEINTEL_BOOST_WATCHER_ENABLED": "true",
+        "MEMEINTEL_BOOST_WATCHER_THRESHOLD": "250",
+        "MEMEINTEL_BOOST_WATCHER_CHAIN_FILTER": "",
+    }).boost_watcher
+    assert bw.enabled is True
+    assert bw.threshold == 250.0
+    assert bw.chain_filter == ""     # empty = all chains
+
+
+def test_boost_watcher_rejects_nonpositive_threshold():
+    with pytest.raises(ConfigurationError, match="threshold"):
+        Settings.from_env(env={"MEMEINTEL_BOOST_WATCHER_THRESHOLD": "0"})

@@ -172,30 +172,63 @@ class DexScreenerClient(BaseCollector):
                 return boost
         return None
 
+    async def get_boosts(self) -> "list[TokenBoost]":
+        """Every currently-boosted token across the top- and latest-boosted
+        lists, unioned and deduped by address (top wins on collision — it
+        carries the authoritative cumulative total). Free/keyless, cached 60s
+        per list. Feeds the boost watcher (Project 5). A boost is PAID
+        promotion, not organic traction."""
+        seen: set[tuple[str, str]] = set()
+        out: list[TokenBoost] = []
+        for path in ("token-boosts/top/v1", "token-boosts/latest/v1"):
+            payload = await self._get_json(
+                path, cache_key=f"dexscreener:{path}", cache_ttl=60.0)
+            if not isinstance(payload, list):
+                continue
+            for raw in payload:
+                boost = self._parse_boost(raw)
+                if boost is None:
+                    continue
+                key = (boost.chain, boost.token_address.lower())
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(boost)
+        return out
+
     @staticmethod
-    def _find_boost(payload: Any, wanted: str, chain: str | None) -> "TokenBoost | None":
+    def _parse_boost(raw: Any) -> "TokenBoost | None":
+        """One raw DexScreener boost entry -> ``TokenBoost`` (``None`` if malformed)."""
+        if not isinstance(raw, dict):
+            return None
+        address = raw.get("tokenAddress")
+        if not address:
+            return None
+        links = tuple(
+            link["url"] for link in (raw.get("links") or [])
+            if isinstance(link, dict) and link.get("url")
+        )
+        return TokenBoost(
+            chain=raw.get("chainId") or "",
+            token_address=address,
+            total_amount=_to_float(raw.get("totalAmount")) or 0.0,
+            amount=_to_float(raw.get("amount")),
+            url=raw.get("url"),
+            links=links,
+        )
+
+    @classmethod
+    def _find_boost(cls, payload: Any, wanted: str, chain: str | None) -> "TokenBoost | None":
         """Locate ``wanted`` (lowercased address) in a boosts list payload."""
         if not isinstance(payload, list):
             return None
         for raw in payload:
-            if not isinstance(raw, dict):
+            boost = cls._parse_boost(raw)
+            if boost is None or boost.token_address.lower() != wanted:
                 continue
-            if (raw.get("tokenAddress") or "").lower() != wanted:
+            if chain is not None and boost.chain != chain:
                 continue
-            if chain is not None and raw.get("chainId") != chain:
-                continue
-            links = tuple(
-                link["url"] for link in (raw.get("links") or [])
-                if isinstance(link, dict) and link.get("url")
-            )
-            return TokenBoost(
-                chain=raw.get("chainId") or "",
-                token_address=raw.get("tokenAddress") or "",
-                total_amount=_to_float(raw.get("totalAmount")) or 0.0,
-                amount=_to_float(raw.get("amount")),
-                url=raw.get("url"),
-                links=links,
-            )
+            return boost
         return None
 
     def _parse_pairs(self, payload: Any) -> list[DexPair]:
