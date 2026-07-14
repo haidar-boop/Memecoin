@@ -21,6 +21,7 @@ See ``.env.example`` at the repository root for the full list of variables.
 from __future__ import annotations
 
 import dataclasses
+import logging
 import math
 import os
 from dataclasses import dataclass, field
@@ -208,9 +209,24 @@ class AlertThresholds:
     # buy-side alert is SUPPRESSED. Protective warnings still fire (a large coin
     # can still rug). Unknown liquidity/mcap NEVER trips the ceiling (Rule 8 —
     # absent data is not evidence a coin is too big; that is the floor's job).
-    # Both default 0.0 = OFF, so existing behavior is unchanged until set (Rule 18).
-    opportunity_max_liquidity_usd: float = 0.0
-    opportunity_max_market_cap_usd: float = 0.0
+    # ON by default since 2026-07-14 (operator: "it sends me coins with around
+    # 100 million to 1 billion market cap... make the market cap below 100k"):
+    # market cap capped at $100k (his number), liquidity at $50k (a sub-$100k-
+    # mcap coin with a deeper pool than that has already had its move; $50k is
+    # also SecurityThresholds.healthy_liquidity_usd — past "healthy" is past
+    # "early"). Set either to 0.0 to turn that ceiling OFF.
+    opportunity_max_liquidity_usd: float = 50_000.0
+    opportunity_max_market_cap_usd: float = 100_000.0
+    # Operator freshness gate (2026-07-14: "before it sends me anything on the
+    # telegram I want it to make sure it's not older than 1 day"): a BUY-SIDE
+    # alert on a pool older than this many hours is SUPPRESSED — a day-old coin
+    # is never a fresh find, whatever its numbers do (the discovery scan already
+    # rejects old pools; this closes the watchlist-recheck path that re-pitched
+    # them). Protective warnings still fire regardless of age. Unknown creation
+    # time NEVER trips the gate (Rule 8 — absent data is not evidence of age;
+    # the checklist shows "Pool age: not verified" so the gap stays visible).
+    # 0.0 = OFF.
+    opportunity_max_age_hours: float = 24.0
     # Safety checklist (operator rule 2026-07-12): a buy-side alert now SENDS
     # even when a soft check falls short — the checklist rides ON the alert so
     # the operator sees what missed and decides. Only the rug engine's COMBINED
@@ -242,19 +258,45 @@ class AlertThresholds:
                     f"alert threshold '{name}' must be positive, got {value}")
         for name in ("opportunity_min_liquidity_usd", "opportunity_min_market_cap_usd",
                      "opportunity_max_liquidity_usd", "opportunity_max_market_cap_usd",
-                     "checklist_new_launch_minutes"):
+                     "opportunity_max_age_hours", "checklist_new_launch_minutes"):
             value = getattr(self, name)
             if not math.isfinite(value) or value < 0:
                 raise ConfigurationError(
                     f"alert threshold '{name}' must be >= 0, got {value}")
         # A ceiling must sit above the comfort floor when both are set (>0),
-        # else the "too big" cut would swallow the "too thin" note.
+        # else the "too big" cut would swallow the "too thin" note. This used
+        # to raise, but flipping the ceiling defaults ON (2026-07-14) meant a
+        # pre-existing floor line in the droplet .env above $50k/$100k would
+        # have crash-looped the 24/7 service on a plain `git pull` deploy —
+        # killing the protective rug alerts too (Rule 3/7: a config conflict
+        # must never take down the seatbelt). The operator's ceiling directive
+        # is the newer instruction, and the floor's original job (0-liquidity
+        # junk) is already covered by the untradeable hard block — so the
+        # conflicting FLOOR yields (disabled, 0.0) with a loud warning.
         for floor, cap in (("opportunity_min_liquidity_usd", "opportunity_max_liquidity_usd"),
                            ("opportunity_min_market_cap_usd", "opportunity_max_market_cap_usd")):
             lo, hi = getattr(self, floor), getattr(self, cap)
             if hi > 0.0 and lo > 0.0 and hi < lo:
-                raise ConfigurationError(
-                    f"alert threshold '{cap}' ({hi}) must be >= '{floor}' ({lo})")
+                logging.getLogger("meme_intelligence.config.settings").warning(
+                    "alert threshold '%s' (%s) is above the '%s' ceiling (%s): "
+                    "the floor is DISABLED so buy-side alerts keep flowing under "
+                    "the ceiling — remove the stale floor from .env to silence "
+                    "this warning", floor, lo, cap, hi)
+                object.__setattr__(self, floor, 0.0)
+        # A liquidity ceiling below the strong-candidate depth floor would make
+        # the HIGH alert tiers structurally unreachable (everything deep enough
+        # for HIGH is over the ceiling; everything under the ceiling demotes to
+        # MEDIUM) — on a HIGH-filtered phone that is permanent silence. Warn
+        # loudly rather than raise, for the same never-crash-the-seatbelt
+        # reason as above.
+        if 0.0 < self.opportunity_max_liquidity_usd < self.strong_candidate_min_liquidity_usd:
+            logging.getLogger("meme_intelligence.config.settings").warning(
+                "opportunity_max_liquidity_usd (%s) is below "
+                "strong_candidate_min_liquidity_usd (%s): no coin can ever earn "
+                "a HIGH buy-side alert with this combination — raise the ceiling "
+                "or lower the strong-candidate depth floor",
+                self.opportunity_max_liquidity_usd,
+                self.strong_candidate_min_liquidity_usd)
         _check_range("alert threshold 'checklist_sell_tax_max_percent'",
                      self.checklist_sell_tax_max_percent, 0.0, 100.0)
 

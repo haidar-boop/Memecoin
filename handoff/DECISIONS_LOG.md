@@ -1507,6 +1507,91 @@ agents):** 17 findings raised, 6 verified-confirmed, all fixed:
    `goplus_holders` now has one canonical definition
    (`DEFAULT_SIGHTING_SOURCE`) imported by writer and readers.
 
+## 2026-07-14 — Buy-side ceilings ON by default ($100k mcap / $50k liquidity) + 24h freshness gate
+
+Operator complaint (verbatim intent): "it sends me coins with around 100
+million to 1 billion market cap for some reason. Make the market cap below
+100k and liquidity of your choice. Also before it sends me anything on the
+telegram I want it to make sure it's not older than 1 day."
+
+Three changes, all in the existing suppression chain (Rule 18 — extend,
+never rewrite):
+
+1. **Ceiling defaults flipped ON.** `opportunity_max_market_cap_usd` now
+   defaults to **100,000** (his number) and `opportunity_max_liquidity_usd`
+   to **50,000** (our choice: a sub-$100k-mcap coin with a pool deeper than
+   $50k has already had its move, and $50k is the existing
+   `SecurityThresholds.healthy_liquidity_usd` anchor — past "healthy depth"
+   is past "early"). The mechanism itself already existed (built 2026-07-12,
+   `d8fffe9`) but shipped 0 = OFF per Rule 18; the operator has now
+   explicitly asked for it to be on, so a plain `git pull` + restart is
+   enough — no `.env` edit on the droplet. Setting either to 0 still turns
+   that ceiling off (the escape hatch is tested). NOTE for droplet ops: an
+   explicit `MEMEINTEL_ALERTS_OPPORTUNITY_MAX_*=0` line in `.env` would
+   override the new defaults back OFF — none is known to exist, but check
+   if the operator still reports oversized coins after deploying.
+2. **New freshness gate** `opportunity_max_age_hours` (default **24**,
+   `MEMEINTEL_ALERTS_OPPORTUNITY_MAX_AGE_HOURS`, 0 = OFF): a buy-side alert
+   (both HIGH tiers + early_opportunity, momentum, smart_money_accumulation)
+   on a pool older than the window is suppressed entirely — a day-old coin
+   is never a fresh find, whatever its numbers do. Discovery already
+   rejected old pools at intake; this closes the WATCHLIST-RECHECK path
+   that kept re-pitching day-old coins (the same hole the peak-decline
+   suppression narrowed — this closes it by age, unconditionally).
+   Protective alerts (emergency/risk/death/whale-exit/etc.) are never
+   age-gated — an old coin the operator holds still gets its warnings.
+3. **"Pool age" safety-checklist line** on every surviving buy-side alert:
+   ✅ with the age when verified ("Pool age 3h"), ❔ "Pool age: not
+   verified" when the source never reported a creation time. Rule 8
+   decision: an UNKNOWN creation time does NOT trip the gate (absent data
+   is not evidence of age, matching the ceiling's unknown-never-trips
+   contract) — but the gap is surfaced on the alert instead of hidden.
+   A future/invalid timestamp counts as unverified, never as age.
+
+Test fixtures updated to match the new reality: the canonical strong-coin
+fixture in `test_automation.py`/`test_controller.py` is now $80k mcap /
+$45k liquidity (under both ceilings — the exact profile the operator wants
+pitched); direct `AutomationRules(...)` constructions in tests now inject
+the frozen test clock (the age gate is the first alert rule that reads
+wall-time). Suite: **877 passing** with all optional deps installed
+(8 new age-gate tests).
+
+Adversarial verification: a 3-agent review fleet (correctness /
+operator-intent / edge-cases lenses, capped per the operator's standing
+3–5 agent limit) ran over the diff before commit. Confirmed findings, all
+fixed in the same session:
+
+1. **Deploy-safety (the big one):** flipping the ceiling defaults ON meant
+   a pre-existing `.env` floor line above $50k/$100k would have tripped the
+   floor<=ceiling startup check and CRASH-LOOPED the droplet on a plain
+   `git pull` deploy — killing the protective rug alerts too. The check no
+   longer raises: a conflicting FLOOR is disabled with a loud logged
+   warning (the ceiling is the operator's newer directive, and the floor's
+   original 0-liquidity job is covered by the untradeable hard block).
+   Related: a liquidity ceiling set below `strong_candidate_min_liquidity_
+   usd` (25k) makes HIGH tiers structurally unreachable — now a loud
+   startup warning (never a crash).
+2. **Checklist honesty:** the "Pool age" line's warn branch was unreachable
+   (the gate suppresses over-age alerts before any checklist renders), so
+   with the gate turned OFF a 30h-old pool rendered a green "✅ Pool age
+   30h". Gate-off now renders an ℹ️ note ("Pool age 30h — freshness gate
+   off"), never a pass — a ✅ must not endorse staleness.
+3. **Rule 13:** buy-side suppression (veto/untradeable/oversized/too-old)
+   was silent; `AutomationRules.evaluate` now logs each drop with the
+   token, the dropped alert types, and the specific gate + values — so a
+   stray `.env` override or mis-set ceiling is diagnosable from logs.
+4. **Test integrity:** `test_no_momentum_alert_in_late_zone` had become
+   vacuous (its 3-day-old fixture was age-suppressed before the LATE-zone
+   logic ran) — fixture moved inside the window; the 24h age default is
+   now asserted explicitly alongside the ceiling defaults.
+5. Stale `_oversized` docstring ("default 0.0 = OFF") corrected.
+
+**Deploy note:** `load_dotenv` gives the FIRST occurrence of a key in
+`.env` precedence, so stale `MEMEINTEL_ALERTS_OPPORTUNITY_MAX_*` lines
+would silently override the new defaults — the deploy block therefore
+deletes any such lines before restarting. Suite after fixes: **878
+passing**.
+
 ## Notable implementation choices (Rule 19)
 
 - **Python 3.11 + asyncio** over Node.js (both allowed by spec): the

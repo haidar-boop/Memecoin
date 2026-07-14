@@ -116,6 +116,17 @@ class _SafetyCheck:
     detail: str
 
 
+def _format_age(hours: float) -> str:
+    """Render an age in hours the way the operator reads it on a phone:
+    minutes under an hour ("45m"), hours under two days ("3.5h", "24h"),
+    days beyond ("2.5d")."""
+    if hours < 1.0:
+        return f"{hours * 60:.0f}m"
+    if hours < 48.0:
+        return f"{round(hours, 1):g}h"
+    return f"{round(hours / 24.0, 1):g}d"
+
+
 def _render_checklist(checks: list[_SafetyCheck]) -> tuple[str, ...]:
     """Render checks into display lines led by a "passed X/Y" header. Only
     definitively-evaluated lines (pass/warn) count toward the denominator;
@@ -214,6 +225,7 @@ class AutomationRules:
         self._t = thresholds
         self._s = settings
         self._now = now_func
+        self._logger = get_logger("alerts.rules")
 
     def evaluate(
         self,
@@ -295,15 +307,23 @@ class AutomationRules:
         #    might still want (that sends with a ⚠ checklist note); it is a
         #    non-opportunity you could not buy, size, or value at all — noise,
         #    not a lead. See ``_untradeable``.
-        # 3) ALREADY TOO BIG — an operator-set liquidity/market-cap CEILING. A
-        #    coin whose pool or market cap has grown past the ceiling is no
-        #    longer an early opportunity (the move already happened), so its
-        #    buy-side alert is suppressed. OFF by default. See ``_oversized``.
+        # 3) ALREADY TOO BIG — a liquidity/market-cap CEILING. A coin whose
+        #    pool or market cap has grown past the ceiling is no longer an
+        #    early opportunity (the move already happened), so its buy-side
+        #    alert is suppressed. ON by default since 2026-07-14 (operator:
+        #    "it sends me coins with around 100 million to 1 billion market
+        #    cap"): market cap $100k, liquidity $50k. See ``_oversized``.
+        # 4) ALREADY TOO OLD — a pool older than ``opportunity_max_age_hours``
+        #    (default 24h) is never a fresh find, whatever its numbers do
+        #    (operator 2026-07-14: "make sure it's not older than 1 day").
+        #    Discovery already rejects old pools; this closes the
+        #    watchlist-recheck path that re-pitched day-old coins. See
+        #    ``_too_old``.
         #
-        # A fourth condition suppresses only the WEAK/provisional tiers
+        # A fifth condition suppresses only the WEAK/provisional tiers
         # (``_DECLINE_SUPPRESSED_TYPES``):
         #
-        # 4) ACTIVELY DECLINING — the score fell at least ``score_drop_review_
+        # 5) ACTIVELY DECLINING — the score fell at least ``score_drop_review_
         #    points`` since the last look, the same signal ``score_drop_rule``
         #    already reports. Bug found in the field: a previously-alerted,
         #    now-thinning coin (liquidity cut roughly in half, score 90 -> 65
@@ -334,9 +354,31 @@ class AutomationRules:
         # sell tax, deployer history) only ANNOTATES via the checklist. Protective
         # alerts always pass — a flagged/dying coin's holder still needs the
         # warning.
-        if (deterministic_risk_veto is not None
-                or self._untradeable(result) or self._oversized(result)):
+        suppress_reason: str | None = None
+        if deterministic_risk_veto is not None:
+            suppress_reason = f"risk veto ({deterministic_risk_veto})"
+        elif self._untradeable(result):
+            suppress_reason = "untradeable: missing/zero liquidity or market cap"
+        elif self._oversized(result):
+            suppress_reason = ("over the size ceiling (liquidity "
+                               f"{result.pair.liquidity_usd!r} vs max "
+                               f"{self._t.opportunity_max_liquidity_usd:,.0f} / mcap "
+                               f"{result.pair.market_cap!r} vs max "
+                               f"{self._t.opportunity_max_market_cap_usd:,.0f})")
+        elif self._too_old(result):
+            age = self._pool_age_hours(result)
+            suppress_reason = (f"pool age {age:.1f}h exceeds the "
+                               f"{self._t.opportunity_max_age_hours:g}h freshness window")
+        if suppress_reason is not None:
+            dropped = sorted(e.alert_type for e in events
+                             if e.alert_type in _BUY_SIDE_ALERT_TYPES)
             events = [e for e in events if e.alert_type not in _BUY_SIDE_ALERT_TYPES]
+            if dropped:
+                # Rule 13: a suppressed pitch must leave a trace, or a stray
+                # .env override / mis-set ceiling is undiagnosable later.
+                self._logger.info("buy-side alert(s) %s suppressed for %s: %s",
+                                  ", ".join(dropped),
+                                  result.pair.base_token.address, suppress_reason)
         else:
             if (self._score_declining(result, previous_score)
                     or self._below_peak(result, peak_score)):
@@ -382,7 +424,9 @@ class AutomationRules:
         suppressed. Distinct from ``_untradeable``: here unknown liquidity/mcap
         NEVER trips the ceiling (Rule 8 — absent data is not evidence a coin is
         too big), and protective alerts still fire (a large coin can still rug).
-        Both ceilings default 0.0 = OFF, so behavior is unchanged until set."""
+        ON by default since 2026-07-14 ($50k liquidity / $100k market cap —
+        operator: "make the market cap below 100k"); setting a ceiling to
+        0.0 turns it OFF."""
         max_liq = self._t.opportunity_max_liquidity_usd
         liq = result.pair.liquidity_usd
         if max_liq > 0.0 and liq is not None and math.isfinite(liq) and liq > max_liq:
@@ -392,6 +436,35 @@ class AutomationRules:
         if max_mcap > 0.0 and mcap is not None and math.isfinite(mcap) and mcap > max_mcap:
             return True
         return False
+
+    def _too_old(self, result: PipelineResult) -> bool:
+        """True when the pool is older than the operator's freshness window
+        (``opportunity_max_age_hours``, default 24h) — a day-old coin is never
+        a fresh find, whatever its numbers do, so its buy-side alert is
+        suppressed (operator 2026-07-14: "before it sends me anything on the
+        telegram I want it to make sure it's not older than 1 day"). Discovery
+        already rejects old pools; this closes the watchlist-recheck path that
+        re-pitched them. Protective alerts still fire (age never hides a
+        warning). An UNKNOWN creation time never trips the gate (Rule 8 —
+        absent data is not evidence of age; the safety checklist surfaces
+        "Pool age: not verified" so the gap stays visible). 0.0 = OFF."""
+        max_age_hours = self._t.opportunity_max_age_hours
+        if max_age_hours <= 0.0:
+            return False
+        age_hours = self._pool_age_hours(result)
+        return age_hours is not None and age_hours > max_age_hours
+
+    def _pool_age_hours(self, result: PipelineResult) -> float | None:
+        """Pool age in hours, or ``None`` when the creation time is missing,
+        malformed, or in the future (clock skew must never count as age)."""
+        created = result.pair.pair_created_at
+        if created is None:
+            return None
+        try:
+            age_hours = (self._now() - created).total_seconds() / 3600.0
+        except Exception:  # noqa: BLE001 — a bad timestamp must never break alerting
+            return None
+        return age_hours if age_hours >= 0.0 else None
 
     def _safety_checklist(self, result: PipelineResult) -> list[_SafetyCheck]:
         """Build the per-alert safety checklist (operator rule 2026-07-12).
@@ -460,6 +533,12 @@ class AutomationRules:
         if mcap_check is not None:
             checks.append(mcap_check)
 
+        # 8) Pool age — the freshness gate upstream (``_too_old``) already
+        # suppressed anything past the window, so on a surviving alert this
+        # line either confirms the age or surfaces that it could NOT be
+        # verified (Rule 8 — the one case the gate lets through unverified).
+        checks.append(self._age_check(result))
+
         # Informational: top-wallet concentration — NEVER a fail (a new launch is
         # naturally concentrated). Shown with youth context when the pool is young.
         top = p.top_holder_percent if p else None
@@ -510,6 +589,23 @@ class AutomationRules:
             return _SafetyCheck(
                 "warn", f"Market cap ${mcap:,.0f} — below your ${floor:,.0f} floor")
         return _SafetyCheck("pass", f"Market cap ${mcap:,.0f}")
+
+    def _age_check(self, result: PipelineResult) -> _SafetyCheck:
+        """Pool-age line. With the freshness gate ON, any alert that reaches
+        the checklist already passed it (``_too_old`` suppressed the rest), so
+        a known age renders ✅ with the verified age. With the gate OFF (0.0)
+        the age is shown as an ℹ️ note, never a green pass — the operator
+        disabled the window, so there is no freshness bar to "pass"; a ✅ on a
+        30h-old pool would falsely endorse exactly the staleness he cares
+        about. Unknown age is surfaced as ❔ (the gate cannot verify what the
+        source never reported — Rule 8)."""
+        age_hours = self._pool_age_hours(result)
+        if age_hours is None:
+            return _SafetyCheck("unknown", "Pool age: not verified")
+        if self._t.opportunity_max_age_hours <= 0.0:
+            return _SafetyCheck(
+                "note", f"Pool age {_format_age(age_hours)} — freshness gate off")
+        return _SafetyCheck("pass", f"Pool age {_format_age(age_hours)}")
 
     def _is_new_launch(self, result: PipelineResult) -> bool:
         """True when the pool is younger than the checklist's new-launch window —

@@ -1,4 +1,4 @@
-# Session Handoff — Current State as of 2026-07-14
+# Session Handoff — Current State as of 2026-07-14 (evening refresh)
 
 > **What this is:** the "you just woke up in this project — here's where
 > things stand" briefing. The durable knowledge lives in the sibling docs
@@ -16,13 +16,18 @@
   Telegram control + copy-address button), **Project 3** (mind-layer P(rug)
   veto — built, veto flag off until authority is earned), and **Project 6**
   (live buy/dump from Telegram — see below).
-- **788 tests passing** (`python -m pytest tests/ -q`).
+- **878 tests passing** (`python -m pytest tests/ -q`, all optional deps installed).
 - **Live in production**: 24/7 on the operator's $6/mo DigitalOcean droplet
   (systemd service `meme-intelligence`, repo at `~/meme-intelligence`),
   Telegram alerts arriving on his phone.
-- **Branch that matters**: `claude/ceiling-and-boost` — the authoritative
-  tip; the operator switched the droplet to it on 2026-07-12/13 and pulls
-  it to deploy. (Supersedes `claude/memecoin-onboarding-yrvjbg`, which
+- **Branch that matters**: `claude/bot-owners-manual-0a16e5` — the newest
+  tip (based on `claude/ceiling-and-boost`, which the droplet pulled until
+  2026-07-14). It adds the 2026-07-14 evening change: buy-side ceilings ON
+  by default ($100k mcap / $50k liquidity) + the 24h freshness gate + the
+  "Pool age" checklist line (operator: "make the market cap below 100k...
+  make sure it's not older than 1 day"). `claude/ceiling-and-boost` was
+  the authoritative tip before this; the operator switched the droplet to
+  it on 2026-07-12/13 and pulls to deploy. (Supersedes `claude/memecoin-onboarding-yrvjbg`, which
   supersedes `claude/session-rules-preferences-kc71bf`.) It adds, on top
   of yrvjbg: the buy-side size ceiling, `/boost` command, decline
   re-pitch suppression, the DexScreener boost radar (own `boosts` alert

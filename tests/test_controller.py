@@ -21,7 +21,9 @@ def make_pair(address="TokenA", symbol="MEMA") -> DexPair:
     token = TokenIdentity(chain="solana", address=address, symbol=symbol)
     return DexPair(
         chain="solana", pair_address=f"Pool{address}", base_token=token,
-        market_cap=400_000.0, fdv=420_000.0, liquidity_usd=90_000.0,
+        # Under the (now default-ON) buy-side ceilings: mcap <= $100k,
+        # liquidity <= $50k — the profile the operator wants pitched.
+        market_cap=80_000.0, fdv=84_000.0, liquidity_usd=45_000.0,
         volume_24h=120_000.0, volume_1h=8_000.0,
         buys_24h=400, sells_24h=250, buys_1h=40, sells_1h=15,
         buyers_24h=300, sellers_24h=180,
@@ -631,7 +633,7 @@ def test_copycat_rule_requires_a_real_size_gap():
     much larger) pool wearing the same symbol/name is evidence."""
     from meme_intelligence.workflow.controller import _find_established_duplicate
 
-    candidate = make_pair()  # MEMA, 90k liquidity
+    candidate = make_pair()  # MEMA, 45k liquidity
     kwargs = dict(liquidity_ratio=10.0, min_liquidity_usd=100_000.0)
 
     def rival(address="OtherAddr", symbol="MEMA", name=None, liquidity=2_000_000.0):
@@ -643,10 +645,10 @@ def test_copycat_rule_requires_a_real_size_gap():
     veto = _find_established_duplicate(candidate, [rival()], **kwargs)
     assert veto is not None and "MEMA" in veto
 
-    # A small same-symbol coin is a coincidence, not an original (900k floor
-    # here = 10x the candidate's 90k) — and same symbol below the absolute
+    # A small same-symbol coin is a coincidence, not an original (450k floor
+    # here = 10x the candidate's 45k) — and same symbol below the absolute
     # floor never fires either.
-    assert _find_established_duplicate(candidate, [rival(liquidity=500_000.0)],
+    assert _find_established_duplicate(candidate, [rival(liquidity=300_000.0)],
                                        **kwargs) is None
 
     # The candidate token itself listed on another venue is not a duplicate.
