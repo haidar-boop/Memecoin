@@ -839,14 +839,48 @@ class TelegramCommandListener(BaseCollector):
                 lines.append(f"running for: {_fmt_duration((self._now() - running_for).total_seconds())}")
             if latest is not None:
                 lines.append(f"last recorded: {_fmt_duration((self._now() - latest).total_seconds())} ago")
-            lines.append("reputation scoring needs several weeks of this plus resolved "
-                         "outcomes before it means anything — not built yet.")
+            lines.extend(self._reputation_lines())
         others = [s for s in stats if s["source"] != "goplus_holders"]
         if others:
             other_total = sum(s["sightings"] for s in others)
             lines.append(f"({other_total} additional sighting(s) from manual /check or "
                          "`wallets` CLI lookups, other sources)")
         return "\n".join(lines)
+
+    def _reputation_lines(self) -> list[str]:
+        """Reputation section for /wallets: the data-clock join against
+        measured outcomes (Part 17 × Part 24). Honest denominators always;
+        top wallets only once any wallet clears the resolved-token minimum."""
+        from meme_intelligence.analytics.wallet_reputation import (
+            compute_wallet_reputations,
+        )
+        try:
+            report = compute_wallet_reputations(
+                self._ctx.storage, self._ctx.settings.backtest,
+                min_resolved=self._ctx.settings.smart_wallet.min_resolved_for_reputation)
+        except Exception as exc:  # noqa: BLE001 — advisory section, never crash the poll loop
+            self._logger.warning("wallet reputation computation failed: %s", exc)
+            return ["reputation: unavailable right now — try again shortly"]
+        if not report.entries:
+            return [
+                f"reputation: no wallet has ≥{report.min_resolved} resolved tokens yet "
+                f"({report.tokens_resolved} of {report.tokens_sighted} sighted tokens "
+                "resolved so far) — keep the clock running",
+            ]
+        lines = [f"reputation: {report.wallets_scored} of {report.wallets_seen} "
+                 f"sighted wallet(s) scored (≥{report.min_resolved} resolved each):"]
+        for entry in report.entries[:3]:
+            # Wallet strings originate in GoPlus API responses (untrusted);
+            # sanitize like every other externally-sourced identity here —
+            # truncation alone lets a short malicious string through verbatim.
+            short = _sanitize_identity(
+                entry.wallet[:4] + "…" + entry.wallet[-4:]
+                if len(entry.wallet) > 12 else entry.wallet)
+            lines.append(f"  {short}  {entry.score:.0f}/100 — "
+                         f"{entry.resolved_tokens} resolved: {entry.wins} win(s), "
+                         f"{entry.deaths} death(s)")
+        lines.append("a track record, not a guarantee — verify before acting.")
+        return lines
 
     def _parse_seen_at(self, value: str | None) -> datetime | None:
         if not value:

@@ -219,10 +219,16 @@ The classification/scoring framework, config system, and logging.
   off by default)**: records each analyzed token's earliest top-holder
   wallets (from the GoPlus response the scan already fetches — free,
   zero new API calls) into `wallet_sightings` tagged
-  `goplus_holders`/`hold_top10`. Groundwork only: reputation scoring and
-  the live smart-money alert are deliberately unbuilt until outcomes
-  accumulate — see DECISIONS_LOG 2026-07-14 (PumpPortal trade streams
-  turned out to be metered, operator chose the free pivot).
+  `goplus_holders`/`hold_top10`. See DECISIONS_LOG 2026-07-14
+  (PumpPortal trade streams turned out to be metered, operator chose
+  the free pivot).
+- `analytics/wallet_reputation.py` — **reputation connector (2026-07-14,
+  same day, operator-requested)**: joins the clock's sightings against
+  Part 24's measured outcomes and scores wallets with the Part 17
+  formula (`reputation` CLI, `/wallets` Telegram section; min 3 resolved
+  tokens per wallet, unmeasured dimensions honestly None). Scores stay
+  empty until clock + outcome data overlap. Still unbuilt: score
+  persistence, live-scan wiring, the smart-money alert.
 - `analyzers/wallet_intelligence.py` — `WalletIntelligenceAnalyzer`:
   Smart Money Confidence Score (5 lenses × 20%; `historical_success`
   honestly reports "no data" until Part 24 builds real track records —

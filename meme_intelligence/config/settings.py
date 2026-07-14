@@ -468,9 +468,14 @@ class SmartWalletSettings:
     enabled: bool = False            # opt-in; off = no behavior change
     max_holders_per_token: int = 10  # record at most the top N circulating holders
     max_seen_keys: int = 5000        # bounded already-recorded dedup memory
+    # A wallet needs at least this many RESOLVED tokens (measured win or
+    # loss) before it gets a reputation score — one lucky pick is not a
+    # track record (Part 17 Section 2; Rule 8).
+    min_resolved_for_reputation: int = 3
 
     def __post_init__(self) -> None:
-        for name in ("max_holders_per_token", "max_seen_keys"):
+        for name in ("max_holders_per_token", "max_seen_keys",
+                     "min_resolved_for_reputation"):
             value = getattr(self, name)
             if not isinstance(value, int) or value <= 0:
                 raise ConfigurationError(

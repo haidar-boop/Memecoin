@@ -310,7 +310,9 @@ async def test_wallets_renders_progress_from_recorded_sightings():
     assert "2 sightings | 2 distinct wallets | 1 tokens covered" in text
     assert "running for: 9d" in text          # 2026-07-01 -> 2026-07-10
     assert "last recorded: 0m ago" in text    # latest sighting IS "now"
-    assert "reputation scoring needs several weeks" in text
+    # The connector exists but no sighted token has resolved outcomes yet —
+    # the reputation section reports that honestly instead of a fake score.
+    assert "no wallet has ≥3 resolved tokens yet" in text
 
 
 async def test_wallets_notes_other_sources_separately():
@@ -322,6 +324,25 @@ async def test_wallets_notes_other_sources_separately():
     text = sent_messages(calls)[0]["text"]
     assert "no sightings recorded yet" in text        # clock itself has nothing
     assert "1 additional sighting(s) from manual" in text
+
+
+async def test_wallets_shows_reputation_once_wallets_qualify():
+    """The full loop on the phone: sightings + resolved outcomes -> the
+    /wallets reply carries scored wallets with honest counts."""
+    from tests.test_wallet_reputation import outcome, seed, token as rep_token
+
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        tokens = [rep_token(1), rep_token(2), rep_token(3)]
+        seed(storage, wallet="EliteWallet99", tokens=tokens)
+        for t in tokens:
+            outcome(storage, t, change=120.0)
+        settings = make_settings(MEMEINTEL_SMART_WALLET_ENABLED="true")
+        listener, calls = make_listener(storage, settings=settings)
+        await listener._handle_update(message_update("/wallets"))
+    text = sent_messages(calls)[0]["text"]
+    assert "reputation: 1 of 1 sighted wallet(s) scored" in text
+    assert "3 resolved: 3 win(s), 0 death(s)" in text
+    assert "not a guarantee" in text
 
 
 async def test_wallets_storage_failure_degrades_gracefully(monkeypatch):
@@ -838,3 +859,43 @@ async def test_boost_command_survives_lookup_error():
         listener._ctx.boost_lookup = boom
         reply = await listener._cmd_boost([SOL_ADDR])
         assert "try again" in reply.lower()   # never raises into the poll loop
+
+
+async def test_wallets_reputation_failure_degrades_gracefully(monkeypatch):
+    """The reputation join is an advisory bonus section — a computation
+    failure must degrade to one honest line, never crash /wallets."""
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        storage.record_wallet_sightings(
+            TOKEN, [("W1", "hold_top10", None, 5.0)], source="goplus_holders")
+
+        def boom(*a, **k):
+            raise RuntimeError("database is locked")
+        monkeypatch.setattr(storage, "token_outcome_aggregates", boom)
+        settings = make_settings(MEMEINTEL_SMART_WALLET_ENABLED="true")
+        listener, calls = make_listener(storage, settings=settings)
+        await listener._handle_update(message_update("/wallets"))
+    text = sent_messages(calls)[0]["text"]
+    assert "reputation: unavailable right now" in text
+    assert "1 sightings" in text            # the clock section still rendered
+
+
+async def test_wallets_sanitizes_malicious_wallet_strings():
+    """Wallet 'addresses' arrive from GoPlus API responses (untrusted). A
+    short one bypasses truncation, so it must be sanitized before it is
+    echoed into Telegram — same contract as token names/symbols."""
+    from tests.test_wallet_reputation import outcome, token as rep_token
+
+    evil = "aa\n`@here`"   # newline + backticks, <=12 chars -> no truncation
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        tokens = [rep_token(1), rep_token(2), rep_token(3)]
+        for t in tokens:
+            storage.record_wallet_sightings(
+                t, [(evil, "hold_top10", None, 5.0)], source="goplus_holders")
+            outcome(storage, t, change=120.0)
+        settings = make_settings(MEMEINTEL_SMART_WALLET_ENABLED="true")
+        listener, calls = make_listener(storage, settings=settings)
+        await listener._handle_update(message_update("/wallets"))
+    text = sent_messages(calls)[0]["text"]
+    assert "`" not in text                  # backticks neutralized
+    assert "aa\n" not in text               # newline dropped from the wallet echo
+    assert "aa'@here'" in text              # sanitized form is what renders

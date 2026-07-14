@@ -807,6 +807,25 @@ async def _cmd_watchlist(args, settings) -> int:
     return 0
 
 
+async def _cmd_reputation(args, settings) -> int:
+    """Wallet reputation from the data clock × measured outcomes (Part 17 S2).
+
+    Pure local read over the SQLite database — no API keys, no network.
+    """
+    from meme_intelligence.analytics.wallet_reputation import (
+        compute_wallet_reputations,
+        render_reputation_report,
+    )
+    with Storage(settings.database.path) as storage:
+        report = compute_wallet_reputations(
+            storage, settings.backtest,
+            min_resolved=(args.min_resolved
+                          if args.min_resolved is not None
+                          else settings.smart_wallet.min_resolved_for_reputation))
+    print(render_reputation_report(report, top=args.top))
+    return 0
+
+
 async def _cmd_wallets(args, settings) -> int:
     """Smart money & whale intelligence for one token (Part 17)."""
     wallet_service = build_wallet_service(settings)
@@ -1127,6 +1146,7 @@ async def _run(args: argparse.Namespace) -> int:
         "alerts": _cmd_alerts,
         "backtest": _cmd_backtest,
         "wallets": _cmd_wallets,
+        "reputation": _cmd_reputation,
         "daily": _cmd_daily,
         "monitor": _cmd_monitor,
         "mind": _cmd_mind,
@@ -1220,6 +1240,15 @@ def main(argv: list[str] | None = None) -> int:
     wallets.add_argument("address")
     wallets.add_argument("--chain", default="solana",
                          help="chain id (wallet intelligence is Solana-first)")
+
+    reputation = sub.add_parser(
+        "reputation",
+        help="wallet reputation: data-clock sightings × measured outcomes (Part 17)")
+    reputation.add_argument("--min-resolved", type=int, default=None, dest="min_resolved",
+                            help="resolved-token minimum before a wallet is scored "
+                                 "(default from MEMEINTEL_SMART_WALLET_MIN_RESOLVED_FOR_REPUTATION)")
+    reputation.add_argument("--top", type=int, default=20,
+                            help="how many scored wallets to list")
 
     daily = sub.add_parser("daily", help="run the full daily research routine (Part 11)")
     daily.add_argument("--network", action="append", default=None,

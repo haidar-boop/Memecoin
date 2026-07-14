@@ -51,10 +51,15 @@
 - **Smart-wallet data clock added 2026-07-14 (OFF by default)** — enable
   with `MEMEINTEL_SMART_WALLET_ENABLED=true` to start recording each
   analyzed token's earliest top-holder wallets ($0, reuses GoPlus data).
-  The clock must run for weeks before reputation scoring is worth
-  building; do NOT build scoring/alerts on top until the operator asks
-  (DECISIONS_LOG 2026-07-14 has the full plan and the PumpPortal cost
-  discovery that shaped it).
+  DECISIONS_LOG 2026-07-14 has the full plan and the PumpPortal cost
+  discovery that shaped it. **The reputation CONNECTOR is now built too**
+  (operator asked same day): `reputation` CLI + a section on `/wallets`
+  join sightings against measured outcomes and score wallets with the
+  Part 17 formula (min 3 resolved tokens each). Scores stay empty until
+  the clock + the 6-hourly `backtest --refresh` cron have overlapping
+  data — expect weeks, not hours. STILL not built (needs operator
+  go-ahead + accumulated data): persisting scores, wiring reputations
+  into the live scan, the smart-money alert.
 - **DexScreener boost radar (Project 5) live 2026-07-13** — opt-in
   (`MEMEINTEL_BOOST_WATCHER_ENABLED`), Solana-only, alerts once per token
   crossing 100 paid boosts, in its own `boosts` alert channel so it can

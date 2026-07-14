@@ -600,6 +600,33 @@ class Storage:
         ).fetchall()
         return [row["wallet"] for row in rows]
 
+    def wallet_sightings_for_reputation(self, *, source: str) -> list[dict]:
+        """One row per (wallet, token) pair from one sighting source: the
+        join key for wallet reputation (Part 17 × Part 24). Duplicate rows
+        (restart re-records — the documented append-only contract) collapse
+        here, keeping the earliest ``seen_at``."""
+        rows = self._conn.execute(
+            """SELECT wallet, token_id, MIN(seen_at) AS first_seen_at
+               FROM wallet_sightings WHERE source = ?
+               GROUP BY wallet, token_id""",
+            (source,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def token_outcome_aggregates(self) -> list[dict]:
+        """Per-token best/worst measured price change and whether liquidity
+        ever died, over ALL measured outcome windows (Part 24). SQL MAX/MIN
+        ignore NULL price changes; a token with only-NULL changes still
+        reports its survival verdict."""
+        rows = self._conn.execute(
+            """SELECT token_id,
+                      MAX(price_change_percent) AS best_change,
+                      MIN(price_change_percent) AS worst_change,
+                      MAX(CASE WHEN survived = 0 THEN 1 ELSE 0 END) AS died
+               FROM outcomes GROUP BY token_id""",
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def wallet_sighting_stats(self) -> list[dict]:
         """Per-source progress summary over ``wallet_sightings`` (Part 17):
         how many sightings/wallets/tokens each source has contributed and

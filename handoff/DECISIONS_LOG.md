@@ -1425,6 +1425,38 @@ additively:
    first alerted 2d 4h ago" line (Telegram/Discord and console renderers);
    annotation is best-effort and never blocks delivery (Rule 7).
 
+## 2026-07-14 — Wallet reputation connector: data clock × measured outcomes
+
+Operator-requested follow-on to the morning's data clock: the join that
+turns recorded holder sightings into wallet reputation scores. Built as
+`analytics/wallet_reputation.py` — read-and-compute only, no new tables.
+
+- **Reuses, never redefines (Rule 17/18):** token win/loss labels use the
+  EXACT `BacktestSettings` thresholds `evaluate_predictions` already
+  grades with (+50% best window = win; liquidity death or -50% worst
+  window = loss; neither = undetermined, counted toward nothing). Scores
+  come from the pre-existing Part 17 `wallet_reputation()` formula that
+  had been waiting for data since it was written.
+- **Honest gaps (Rule 8):** holder snapshots carry no entry timing and no
+  USD sizes, so `early_entry_rate`/`median_position_usd` stay None and a
+  scored wallet's coverage tops out at 0.60 (win rate + rug avoidance +
+  consistency). A wallet below `MEMEINTEL_SMART_WALLET_MIN_RESOLVED_FOR_
+  REPUTATION` (default 3) resolved tokens gets NO score — one lucky pick
+  is not a track record. Reputation is computed per sighting source
+  (Rule 9); manual CLI sightings never blend into the clock's join.
+- **Surfaces:** `python -m meme_intelligence reputation` (local-only
+  read) and a reputation section on the `/wallets` Telegram command (top
+  3, honest denominators, degrades to one line on failure). Wallet
+  strings from GoPlus are sanitized before echoing into Telegram — the
+  same injection lesson as token names (short strings bypass truncation).
+- **Deliberately still NOT built:** persisting scores, feeding
+  `reputations` into the live scan, and the smart-money alert — those
+  wait until real data has been watched for a few weeks. The multi-agent
+  review fleet couldn't run (account spend limit); an inline adversarial
+  review covered the same lenses and produced the sanitization fix plus
+  three regression tests (NULL-price deaths, /wallets failure path,
+  injection guard).
+
 ## Notable implementation choices (Rule 19)
 
 - **Python 3.11 + asyncio** over Node.js (both allowed by spec): the
