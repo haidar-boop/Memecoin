@@ -115,6 +115,22 @@ class PumpFunCoinState:
 
 
 @dataclass(frozen=True)
+class TopHolder:
+    """One circulating top-holder entry from a security provider (Part 17).
+
+    The raw material for wallet reputation: which wallets held a large
+    share of a token early in its life. Burn addresses and locked
+    holdings are excluded at parse time; program/infrastructure accounts
+    (bonding curves, pools) are NOT — identifying them needs cross-token
+    context the collector doesn't have, so filtering belongs to the
+    later reputation-scoring step, not the raw record (Rule 8).
+    """
+
+    address: str
+    percent: float | None = None  # share of supply held, 0-100
+
+
+@dataclass(frozen=True)
 class SecurityProfile:
     """Normalized contract-security facts about one token (Spec Parts 4/18/33).
 
@@ -167,6 +183,10 @@ class SecurityProfile:
     holder_count: int | None = None
     top_holder_percent: float | None = None
     top10_holder_percent: float | None = None
+    # Circulating top-holder wallets (Part 17): same exclusion rules as the
+    # percentages above, but keeping the addresses so wallet reputation can
+    # accumulate (empty when the source reported no holder list).
+    top_holders: tuple[TopHolder, ...] = ()
 
     # Developer (Part 4 Section 8)
     creator_percent: float | None = None

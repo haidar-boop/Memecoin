@@ -1557,3 +1557,56 @@ async def test_rug_screen_now_covers_momentum_and_medium_alerts_too():
     # With the blacklisted deployer, the SAME fixture must now be fully
     # suppressed -- proof the free screen ran even though no HIGH tier fired.
     assert not any(e.alert_type in _BUY_SIDE_ALERT_TYPES for e in sink.sent)
+
+
+# ---- Smart-wallet data clock wiring (Part 17 groundwork) --------------------
+# The recorder is None-gated and never raises, so a broken wire is a SILENT
+# no-op — only an end-to-end cycle against real Storage proves the clock runs.
+
+from meme_intelligence.config.settings import SmartWalletSettings  # noqa: E402
+from meme_intelligence.core.models import TopHolder  # noqa: E402
+from meme_intelligence.workflow.smart_wallets import SmartWalletRecorder  # noqa: E402
+
+
+async def test_scan_cycle_records_top_holder_sightings():
+    """One real cycle: GoPlus profile -> pipeline -> controller -> recorder ->
+    Storage. Guards the feature's only production call site (a refactor that
+    drops the kwarg or the record() call must fail THIS test, not ship a
+    silent no-op that loses weeks of unrecoverable earliest-holder data)."""
+    pair = make_pair()
+    profile = _dc.replace(
+        clean_profile(pair.base_token),
+        top_holders=(TopHolder(address="EarlyWhale1", percent=8.0),
+                     TopHolder(address="EarlyWhale2", percent=3.5)),
+    )
+    async def fake_sleep(seconds):
+        pass
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        notifier = NotificationEngine([RecordingSink()], AlertEngineSettings(),
+                                      time_func=lambda: 0.0)
+        scanner = ContinuousScanner(
+            SETTINGS, storage, notifier,
+            gecko_client=FakeGecko([pair]),
+            goplus_client=FakeGoPlus({pair.base_token.address: profile}),
+            smart_wallet_recorder=SmartWalletRecorder(
+                storage, SmartWalletSettings(enabled=True)),
+            now_func=lambda: NOW, sleep_func=fake_sleep,
+        )
+        await scanner.run(max_cycles=1)
+
+        assert set(storage.wallets_seen_on(pair.base_token)) == {"EarlyWhale1", "EarlyWhale2"}
+        history = storage.wallet_history("EarlyWhale1")
+        assert history[0]["source"] == "goplus_holders"
+        assert history[0]["side"] == "hold_top10"
+        assert history[0]["percent"] == 8.0
+
+
+async def test_scan_cycle_without_recorder_records_nothing():
+    """Default wiring (recorder None) must leave the sightings table empty —
+    the data clock is strictly opt-in (Rule 18)."""
+    pair = make_pair()
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner, _ = make_scanner(storage, [pair],
+                                  {pair.base_token.address: clean_profile(pair.base_token)})
+        await scanner.run(max_cycles=1)
+        assert storage.wallets_seen_on(pair.base_token) == []

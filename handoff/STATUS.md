@@ -215,6 +215,14 @@ The classification/scoring framework, config system, and logging.
   addresses excluded — + parsed token transfers), `BirdeyeClient` (token
   overview + recent trades, USD computed from trade legs),
   `WalletDataService` (combines both, degrades per-source on failure)
+- `workflow/smart_wallets.py` — **smart-wallet data clock (2026-07-14,
+  off by default)**: records each analyzed token's earliest top-holder
+  wallets (from the GoPlus response the scan already fetches — free,
+  zero new API calls) into `wallet_sightings` tagged
+  `goplus_holders`/`hold_top10`. Groundwork only: reputation scoring and
+  the live smart-money alert are deliberately unbuilt until outcomes
+  accumulate — see DECISIONS_LOG 2026-07-14 (PumpPortal trade streams
+  turned out to be metered, operator chose the free pivot).
 - `analyzers/wallet_intelligence.py` — `WalletIntelligenceAnalyzer`:
   Smart Money Confidence Score (5 lenses × 20%; `historical_success`
   honestly reports "no data" until Part 24 builds real track records —

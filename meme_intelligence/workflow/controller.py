@@ -224,6 +224,7 @@ class ContinuousScanner:
         wallet_service=None,     # WalletDataService (Part 17); metered credits
         ai_service=None,         # AIJudgmentService (Part 23); costs API tokens
         learning_service=None,   # LearningService (mind layer, Section 10); off by default
+        smart_wallet_recorder=None,  # SmartWalletRecorder (Part 17 data clock); free, off by default
         regime: MarketRegime = MarketRegime.UNKNOWN,
         now_func: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         sleep_func: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -233,6 +234,10 @@ class ContinuousScanner:
         self._notifier = notifier
         self._gecko = gecko_client
         self._market = market_service
+        # Passive top-holder recorder (Part 17 data clock): wired from
+        # __main__ like the other optional services; its own enabled flag
+        # is authoritative, and record() never raises into the scan.
+        self._smart_wallets = smart_wallet_recorder
         self._regime = regime
         self._now = now_func
         self._sleep = sleep_func
@@ -704,6 +709,11 @@ class ContinuousScanner:
         changes = detect_security_changes(previous_facts, result.security_profile)
         current_facts = extract_facts(result.security_profile)
         self._storage.record_security_facts(token, merge_facts(previous_facts, current_facts))
+
+        # Smart-wallet data clock (Part 17): keep the top-holder wallets this
+        # analysis already fetched. Passive, deduped per token, never raises.
+        if self._smart_wallets is not None:
+            self._smart_wallets.record(result.security_profile)
 
         # A dead token never (re-)enters the watchlist regardless of its
         # score — the master number still reflects pump-window data, but a

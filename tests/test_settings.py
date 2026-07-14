@@ -375,3 +375,24 @@ def test_boost_watcher_env_override():
 def test_boost_watcher_rejects_nonpositive_threshold():
     with pytest.raises(ConfigurationError, match="threshold"):
         Settings.from_env(env={"MEMEINTEL_BOOST_WATCHER_THRESHOLD": "0"})
+
+
+def test_smart_wallet_defaults():
+    sw = Settings.from_env(env={}).smart_wallet
+    assert sw.enabled is False
+    assert sw.max_holders_per_token == 10
+    assert sw.max_seen_keys == 5000
+
+
+def test_smart_wallet_env_override():
+    sw = Settings.from_env(env={
+        "MEMEINTEL_SMART_WALLET_ENABLED": "true",
+        "MEMEINTEL_SMART_WALLET_MAX_HOLDERS_PER_TOKEN": "5",
+    }).smart_wallet
+    assert sw.enabled is True
+    assert sw.max_holders_per_token == 5
+
+
+def test_smart_wallet_rejects_nonpositive_holder_cap():
+    with pytest.raises(ConfigurationError, match="max_holders_per_token"):
+        Settings.from_env(env={"MEMEINTEL_SMART_WALLET_MAX_HOLDERS_PER_TOKEN": "0"})

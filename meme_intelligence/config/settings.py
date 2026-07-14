@@ -451,6 +451,33 @@ class BoostWatcherSettings:
 
 
 @dataclass(frozen=True)
+class SmartWalletSettings:
+    """Smart-wallet data collection (Part 17 groundwork): record which
+    wallets hold each analyzed token early in its life.
+
+    Step 1 of the smart-wallet roadmap — the DATA CLOCK only. Top-holder
+    wallets already present in every GoPlus security response (previously
+    discarded at parse time) are recorded into ``wallet_sightings``; once
+    outcome tracking has labeled enough of those tokens as winners or
+    losers, a later step turns the accumulated co-occurrence into wallet
+    reputation scores. Free by construction: zero new API calls — this
+    only keeps data the bot already fetches. Off by default (Rule 18);
+    recording is one INSERT batch per token per process lifetime.
+    """
+
+    enabled: bool = False            # opt-in; off = no behavior change
+    max_holders_per_token: int = 10  # record at most the top N circulating holders
+    max_seen_keys: int = 5000        # bounded already-recorded dedup memory
+
+    def __post_init__(self) -> None:
+        for name in ("max_holders_per_token", "max_seen_keys"):
+            value = getattr(self, name)
+            if not isinstance(value, int) or value <= 0:
+                raise ConfigurationError(
+                    f"smart wallet setting '{name}' must be a positive integer, got {value!r}")
+
+
+@dataclass(frozen=True)
 class SecurityThresholds:
     """Security-analysis limits (Part 4, Part 18, Part 33).
 
@@ -1412,6 +1439,7 @@ class Settings:
     discovery: DiscoverySettings = field(default_factory=DiscoverySettings)
     pumpfun: PumpFunSettings = field(default_factory=PumpFunSettings)
     boost_watcher: BoostWatcherSettings = field(default_factory=BoostWatcherSettings)
+    smart_wallet: SmartWalletSettings = field(default_factory=SmartWalletSettings)
     security: SecurityThresholds = field(default_factory=SecurityThresholds)
     community: CommunityThresholds = field(default_factory=CommunityThresholds)
     onchain: OnChainThresholds = field(default_factory=OnChainThresholds)
@@ -1487,6 +1515,7 @@ class Settings:
             discovery=_load_group(DiscoverySettings, "DISCOVERY", env),
             pumpfun=_load_group(PumpFunSettings, "PUMPFUN", env),
             boost_watcher=_load_group(BoostWatcherSettings, "BOOST_WATCHER", env),
+            smart_wallet=_load_group(SmartWalletSettings, "SMART_WALLET", env),
             security=_load_group(SecurityThresholds, "SECURITY", env),
             community=_load_group(CommunityThresholds, "COMMUNITY", env),
             onchain=_load_group(OnChainThresholds, "ONCHAIN", env),

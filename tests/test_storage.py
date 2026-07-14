@@ -299,3 +299,91 @@ def test_mute_and_hold_match_by_address_across_chains(storage):
     # A different address is unaffected.
     other = TokenIdentity(chain="base", address="0x" + "ef" * 20, symbol="Y")
     assert storage.is_muted(other) is False and storage.is_holding(other) is False
+
+
+# ---- Wallet sightings (Part 17: the smart-wallet data clock) ----
+
+def test_wallet_sightings_roundtrip_with_source_and_percent(storage):
+    written = storage.record_wallet_sightings(
+        TOKEN,
+        [("WalletA", "hold_top10", None, 12.5), ("WalletB", "hold_top10", None, 3.0)],
+        source="goplus_holders",
+    )
+    assert written == 2
+    history = storage.wallet_history("WalletA")
+    assert len(history) == 1
+    assert history[0]["address"] == TOKEN.address
+    assert history[0]["side"] == "hold_top10"
+    assert history[0]["source"] == "goplus_holders"
+    assert history[0]["percent"] == 12.5
+    assert history[0]["usd_value"] is None
+    assert set(storage.wallets_seen_on(TOKEN)) == {"WalletA", "WalletB"}
+
+
+def test_wallet_sightings_legacy_three_tuples_still_accepted(storage):
+    """Rule 18: the pre-existing (wallet, side, usd_value) shape keeps working."""
+    written = storage.record_wallet_sightings(TOKEN, [("WalletC", "buy", 150.0)])
+    assert written == 1
+    history = storage.wallet_history("WalletC")
+    assert history[0]["usd_value"] == 150.0
+    assert history[0]["source"] is None
+    assert history[0]["percent"] is None
+
+
+def test_wallet_sightings_append_only_no_dedup(storage):
+    """Documented contract: this table never dedups — callers dedup upstream
+    and reputation queries aggregate with DISTINCT."""
+    storage.record_wallet_sightings(TOKEN, [("WalletD", "hold_top10", None, 9.0)],
+                                    source="goplus_holders")
+    storage.record_wallet_sightings(TOKEN, [("WalletD", "hold_top10", None, 9.0)],
+                                    source="goplus_holders")
+    assert len(storage.wallet_history("WalletD")) == 2
+    assert storage.wallets_seen_on(TOKEN) == ["WalletD"]  # DISTINCT collapses
+
+
+def test_wallet_sightings_columns_exist_on_fresh_database(storage):
+    """Fresh schema carries the new columns directly."""
+    columns = {row["name"] for row in
+               storage._conn.execute("PRAGMA table_info(wallet_sightings)")}
+    assert {"source", "percent"} <= columns
+
+
+def test_old_database_migrates_wallet_sighting_columns(tmp_path):
+    """The droplet's EXISTING database must gain source/percent via
+    _MIGRATIONS: CREATE TABLE IF NOT EXISTS is a no-op there, and the
+    rewritten INSERT names the new columns unconditionally — without the
+    migration every sighting write (including the pre-existing report CLI
+    caller) dies with 'no column named source' (Rule 3/18). Mirrors
+    test_backtesting.test_old_database_migrates_new_columns."""
+    import sqlite3
+
+    path = tmp_path / "old.db"
+    conn = sqlite3.connect(path)
+    conn.executescript("""
+        CREATE TABLE tokens (
+            id INTEGER PRIMARY KEY, chain TEXT NOT NULL, address TEXT NOT NULL,
+            symbol TEXT, name TEXT, first_seen TEXT NOT NULL, UNIQUE(chain, address));
+        CREATE TABLE wallet_sightings (
+            id INTEGER PRIMARY KEY, wallet TEXT NOT NULL, chain TEXT NOT NULL,
+            token_id INTEGER NOT NULL REFERENCES tokens(id),
+            side TEXT NOT NULL, usd_value REAL, seen_at TEXT NOT NULL);
+    """)
+    conn.execute("INSERT INTO tokens (chain, address, first_seen) "
+                 "VALUES ('solana', 'TokenAddr1', '2026-01-01')")
+    conn.execute("INSERT INTO wallet_sightings "
+                 "(wallet, chain, token_id, side, usd_value, seen_at) "
+                 "VALUES ('LegacyWallet', 'solana', 1, 'buy', 10.0, '2026-01-01')")
+    conn.commit()
+    conn.close()
+
+    with Storage(str(path), now_func=lambda: NOW) as migrated:
+        # New-style write works on the migrated table...
+        migrated.record_wallet_sightings(
+            TOKEN, [("NewWallet", "hold_top10", None, 7.5)], source="goplus_holders")
+        fresh = migrated.wallet_history("NewWallet")
+        assert fresh[0]["source"] == "goplus_holders"
+        assert fresh[0]["percent"] == 7.5
+        # ...and pre-migration rows survive with honest NULLs.
+        legacy = migrated.wallet_history("LegacyWallet")
+        assert legacy[0]["usd_value"] == 10.0
+        assert legacy[0]["source"] is None and legacy[0]["percent"] is None

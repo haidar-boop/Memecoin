@@ -104,9 +104,11 @@ CREATE TABLE IF NOT EXISTS wallet_sightings (
     wallet TEXT NOT NULL,
     chain TEXT NOT NULL,
     token_id INTEGER NOT NULL REFERENCES tokens(id),
-    side TEXT NOT NULL,          -- buy / sell / hold_whale
+    side TEXT NOT NULL,          -- buy / sell / hold_whale / hold_top10
     usd_value REAL,
-    seen_at TEXT NOT NULL
+    seen_at TEXT NOT NULL,
+    source TEXT,                 -- which collector observed it (e.g. goplus_holders)
+    percent REAL                 -- share of supply held at sighting time, 0-100
 );
 CREATE INDEX IF NOT EXISTS idx_sightings_wallet ON wallet_sightings(wallet, seen_at);
 CREATE INDEX IF NOT EXISTS idx_sightings_token ON wallet_sightings(token_id);
@@ -192,6 +194,10 @@ _MIGRATIONS = {
         ("market_cap", "REAL"),
         ("regime", "TEXT"),          # market condition bucketing (Part 24 S9)
         ("opportunity_rank", "REAL"),  # Part 28 S5 watchlist opportunity ranking
+    ),
+    "wallet_sightings": (
+        ("source", "TEXT"),   # which collector observed it (Part 17 provenance)
+        ("percent", "REAL"),  # share of supply held at sighting time, 0-100
     ),
 }
 
@@ -530,21 +536,32 @@ class Storage:
     # ---- Wallet sightings (Part 17, Sections 2-3) ----
 
     def record_wallet_sightings(
-        self, token: TokenIdentity, sightings: list[tuple[str, str, float | None]],
+        self, token: TokenIdentity, sightings: list[tuple],
+        *, source: str | None = None,
     ) -> int:
-        """Record observed wallet actions: (wallet, side, usd_value) tuples.
+        """Record observed wallet actions: (wallet, side, usd_value[, percent]) tuples.
 
         This is the raw feed for wallet reputation: once Part 24's outcome
         tracking labels tokens as winners/losers, each wallet's recorded
         entries become a measurable track record.
+
+        This table is APPEND-ONLY with no dedup — the same wallet sighted
+        twice is two rows (each carries its own ``seen_at``). Callers that
+        observe the same fact repeatedly (e.g. a holder recorded on every
+        recheck) must dedup upstream; reputation queries must aggregate
+        with DISTINCT. ``source`` tags provenance so feeds from different
+        collectors stay distinguishable (Rule 9); the optional 4th tuple
+        element is the held share of supply (0-100) for holder sightings.
         """
         token_id = self.upsert_token(token)
         now = self._now().isoformat()
         self._conn.executemany(
-            """INSERT INTO wallet_sightings (wallet, chain, token_id, side, usd_value, seen_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            [(wallet, token.chain, token_id, side, usd, now)
-             for wallet, side, usd in sightings],
+            """INSERT INTO wallet_sightings
+               (wallet, chain, token_id, side, usd_value, seen_at, source, percent)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            [(entry[0], token.chain, token_id, entry[1], entry[2], now, source,
+              entry[3] if len(entry) > 3 else None)
+             for entry in sightings],
         )
         self._conn.commit()
         return len(sightings)
@@ -552,7 +569,8 @@ class Storage:
     def wallet_history(self, wallet: str, limit: int = 100) -> list[dict]:
         """A wallet's recorded sightings across tokens, newest first."""
         rows = self._conn.execute(
-            """SELECT t.chain, t.address, t.symbol, s.side, s.usd_value, s.seen_at
+            """SELECT t.chain, t.address, t.symbol, s.side, s.usd_value, s.seen_at,
+                      s.source, s.percent
                FROM wallet_sightings s JOIN tokens t ON t.id = s.token_id
                WHERE s.wallet = ? ORDER BY s.seen_at DESC LIMIT ?""",
             (wallet, limit),

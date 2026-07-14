@@ -1340,6 +1340,60 @@ source of truth (Rule 1/18); this is operator tuning for the live-trading feed
 use case and is trivially reversible. Safe to loosen because the rug veto, the
 new untradeable floor, and the safety checklist all still apply.
 
+## 2026-07-13 — DexScreener boost radar (Project 5) + channel isolation
+
+Built at the operator's request ("notify me the second any token gets a boost
+bigger than 100 on DexScreener"): `workflow/boost_watcher.py` polls the free,
+keyless boost feed (~30s edge cache) and alerts ONCE per token per crossing,
+Solana-only by default (`MEMEINTEL_BOOST_WATCHER_*`, off by default, `monitor
+--boosts`). A boost is PAID promotion — the alert text says "attention, not
+endorsement" and it never enters analysis or trading. **Post-ship fix:** the
+`boost` alert type initially rode the `discoveries` Telegram category and its
+unfiltered volume drowned out the (rare, heavily-gated) real opportunity
+alerts — the operator experienced it as "the bot only sends boosted tokens."
+Boosts now have their own `boosts` category, isolated from vetted picks by
+construction, with a regression test pinning the separation.
+
+## 2026-07-14 — Smart-wallet tracking starts as a FREE holder clock, not a paid trade stream
+
+**Decision (operator-approved):** begin the smart-wallet roadmap by recording
+the top-holder wallets of every analyzed token from data the bot already
+fetches, NOT by subscribing to live per-trade streams.
+
+**Why:** the scoped plan was to ride PumpPortal's WebSocket for per-trade
+buyer wallets "for free." Verifying against PumpPortal's docs before building
+(Rule 8) showed that is wrong: `subscribeTokenTrade`/`subscribeAccountTrade`
+are METERED — 0.01 SOL per 10k events against an API key + linked wallet
+funded ≥0.02 SOL; only `subscribeNewToken`/`subscribeMigration` are free.
+Realistic cost for a hot watchlist: tens to hundreds of $/month, violating
+the operator's free-only constraint. Presented the options; the operator
+chose the free pivot.
+
+**What was built (Part 17 groundwork — the data clock only):**
+
+- GoPlus responses always contained the top-holder wallet ADDRESSES; the
+  parser kept only percentages. `_top_holders()` now retains
+  (address, percent) as `SecurityProfile.top_holders` — same burn/locked
+  exclusions as the concentration math, zero new API calls.
+- `wallet_sightings` gained `source`/`percent` columns (fresh schema +
+  `_MIGRATIONS` for the droplet's existing DB — verified against a
+  simulated old database). `record_wallet_sightings()` keeps accepting the
+  legacy 3-tuple shape (Rule 18) and is documented as append-only/no-dedup:
+  callers dedup upstream, reputation queries aggregate with DISTINCT.
+- `workflow/smart_wallets.py` `SmartWalletRecorder`: passive, off by
+  default (`MEMEINTEL_SMART_WALLET_ENABLED` / `monitor --smart-wallets`),
+  records each token's FIRST holder snapshot once (bounded dedup; empty
+  holder lists and failed writes leave the token unmarked so a later
+  recheck retries), never raises into the scan (Rule 7). Wired like the
+  other optional services: constructed in `__main__`, passed into
+  `ContinuousScanner`, called next to `record_security_facts`.
+
+**Deliberately NOT built yet (Rule 2):** reputation scoring over outcomes,
+the live smart-money alert, and any seeding from public smart-wallet lists —
+those come after 2–4 weeks of accumulated sightings + outcome labels. The
+paid PumpPortal `subscribeAccountTrade` stream becomes cheap (~$5/mo for ~50
+wallets) and worth revisiting only AFTER a reputation list exists.
+
 ## Notable implementation choices (Rule 19)
 
 - **Python 3.11 + asyncio** over Node.js (both allowed by spec): the

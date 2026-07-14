@@ -48,6 +48,7 @@ from meme_intelligence.core.enums import AlertPriority, MarketRegime, ResearchMo
 from meme_intelligence.database.storage import Storage
 from meme_intelligence.trading.trade_planner import TradePlanner
 from meme_intelligence.workflow.boost_watcher import BoostWatcher
+from meme_intelligence.workflow.smart_wallets import SmartWalletRecorder
 from meme_intelligence.workflow.controller import ContinuousScanner
 from meme_intelligence.workflow.daily_routine import DailyRoutine
 from meme_intelligence.workflow.pipeline import ResearchPipeline
@@ -951,6 +952,9 @@ async def _cmd_monitor(args, settings) -> int:
     if getattr(args, "boosts", False):
         settings = _dc.replace(
             settings, boost_watcher=_dc.replace(settings.boost_watcher, enabled=True))
+    if getattr(args, "smart_wallets", False):
+        settings = _dc.replace(
+            settings, smart_wallet=_dc.replace(settings.smart_wallet, enabled=True))
     if args.learn:
         settings = _dc.replace(
             settings, learning=_dc.replace(settings.learning, enable_in_monitor=True))
@@ -1027,6 +1031,12 @@ async def _cmd_monitor(args, settings) -> int:
 
         with Storage(settings.database.path) as storage:
             notifier = NotificationEngine(alert_sinks, settings.alert_engine)
+            # Smart-wallet data clock (Part 17): passive top-holder recording
+            # from data the scan already fetches. Free, off by default; the
+            # recorder's enabled flag is authoritative and it never raises.
+            smart_wallet_recorder = (
+                SmartWalletRecorder(storage, settings.smart_wallet)
+                if settings.smart_wallet.enabled else None)
             scanner = ContinuousScanner(
                 settings, storage, notifier,
                 gecko_client=gecko, goplus_client=goplus,
@@ -1038,6 +1048,7 @@ async def _cmd_monitor(args, settings) -> int:
                 wallet_service=wallet_service,
                 ai_service=ai_service,
                 learning_service=learning_service,
+                smart_wallet_recorder=smart_wallet_recorder,
                 regime=MarketRegime(args.regime),
             )
             # Two-way Telegram control (Project 2): opt-in via
@@ -1232,6 +1243,9 @@ def main(argv: list[str] | None = None) -> int:
     monitor.add_argument("--boosts", action="store_true",
                          help="also run the DexScreener boost radar: alert when "
                               "any token crosses the boost threshold (Project 5)")
+    monitor.add_argument("--smart-wallets", action="store_true", dest="smart_wallets",
+                         help="record top-holder wallets of every analyzed token "
+                              "(Part 17 data clock; free, uses already-fetched data)")
 
     # Self-learning mind layer: analog + model + rug reasoning (Section 10).
     mind = sub.add_parser("mind", help="self-learning mind layer (evaluate / metrics)")

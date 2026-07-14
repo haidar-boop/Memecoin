@@ -1,4 +1,4 @@
-# Session Handoff — Current State as of 2026-07-12
+# Session Handoff — Current State as of 2026-07-14
 
 > **What this is:** the "you just woke up in this project — here's where
 > things stand" briefing. The durable knowledge lives in the sibling docs
@@ -20,9 +20,14 @@
 - **Live in production**: 24/7 on the operator's $6/mo DigitalOcean droplet
   (systemd service `meme-intelligence`, repo at `~/meme-intelligence`),
   Telegram alerts arriving on his phone.
-- **Branch that matters**: `claude/memecoin-onboarding-yrvjbg` — the
-  authoritative tip; the droplet pulls it. (Supersedes
-  `claude/session-rules-preferences-kc71bf` from the 2026-07-10 handoff.)
+- **Branch that matters**: `claude/ceiling-and-boost` — the authoritative
+  tip; the operator switched the droplet to it on 2026-07-12/13 and pulls
+  it to deploy. (Supersedes `claude/memecoin-onboarding-yrvjbg`, which
+  supersedes `claude/session-rules-preferences-kc71bf`.) It adds, on top
+  of yrvjbg: the buy-side size ceiling, `/boost` command, decline
+  re-pitch suppression, the DexScreener boost radar (own `boosts` alert
+  channel), and the smart-wallet data clock — see DECISIONS_LOG
+  2026-07-11 → 2026-07-14.
 - **LIVE TRADING IS ARMED AND FULLY VALIDATED.** Project 6 is real money
   now: on 2026-07-11 the operator executed a live `/buy` AND a live
   `/dump` (full round trip — buy and sell both confirmed) from a DEDICATED
@@ -39,7 +44,21 @@
   free deterministic screens still run FIRST (credit gate); watch the spend
   with him for a few days. He may toggle it either way — follow his lead.
 - **Learning layer is live and accumulating**; report card via `/mind` or
-  `mind metrics`.
+  `mind metrics`. As of 2026-07-13 the operator's card shows the rug veto
+  EARNED (precision 0.97 over 11k+ graded calls) and a thin directional
+  edge (hit rate 0.54, n=555) — the honest read is "excellent seatbelt,
+  modest crystal ball."
+- **Smart-wallet data clock added 2026-07-14 (OFF by default)** — enable
+  with `MEMEINTEL_SMART_WALLET_ENABLED=true` to start recording each
+  analyzed token's earliest top-holder wallets ($0, reuses GoPlus data).
+  The clock must run for weeks before reputation scoring is worth
+  building; do NOT build scoring/alerts on top until the operator asks
+  (DECISIONS_LOG 2026-07-14 has the full plan and the PumpPortal cost
+  discovery that shaped it).
+- **DexScreener boost radar (Project 5) live 2026-07-13** — opt-in
+  (`MEMEINTEL_BOOST_WATCHER_ENABLED`), Solana-only, alerts once per token
+  crossing 100 paid boosts, in its own `boosts` alert channel so it can
+  never drown out vetted opportunity alerts.
 - **Alert quality overhaul, 2026-07-11** (operator moved his phone from
   HIGH to MEDIUM to see opportunities again, then back to HIGH once he saw
   the junk it let through — walk through DECISIONS_LOG 2026-07-11 in
