@@ -1,20 +1,23 @@
 # Handoff Folder — Meme Coin Intelligence System
 
-Complete project handoff as of **2026-07-11**, written so a fresh session
+Complete project handoff as of **2026-07-14**, written so a fresh session
 (human or AI, with zero memory of prior conversations) can operate, debug,
 and extend the system without re-learning anything the hard way.
 
 **The system is LIVE**: Parts 1–33 + the Self-Learning Mind Layer +
-Projects 1/2/3/6 are built, **766 tests pass**, and it runs 24/7 on the
-operator's droplet sending Telegram alerts — and, as of 2026-07-11,
-executing operator-tapped buy/dump trades from a dedicated low-balance
-wallet (**never auto-trading**). Branch:
-`claude/memecoin-onboarding-yrvjbg`.
+Projects 1/2/3/6 are built, plus (2026-07-12 → 14) the buy-side size
+ceiling, decline/peak-decline suppression, honest re-alert framing, the
+smart-wallet data clock + reputation connector, and /wallets — and it runs
+24/7 on the operator's droplet sending Telegram alerts and executing
+operator-tapped buy/dump trades from a dedicated low-balance wallet
+(**never auto-trading**). Branch: **`claude/ceiling-and-boost`** (supersedes
+`claude/memecoin-onboarding-yrvjbg`).
 
 ## Read in this order
 
 | # | File | What it gives you | Read when |
 |---|---|---|---|
+| 0 | **[OWNERS_MANUAL_2026-07-14.md](./OWNERS_MANUAL_2026-07-14.md)** | The complete refreshed manual: full 2026-07-12→14 changelog, every package/setting/command/table documented from a same-day deep read of the code, honest caveats, and the agreed next step (watchlist staleness door) | Start here |
 | 1 | **[PROJECT_RULES.md](./PROJECT_RULES.md)** | The 21 engineering rules, verbatim. Mandatory in every session, for every change. | Always, first |
 | 2 | **[OPERATOR.md](./OPERATOR.md)** | Who runs this, his constraints (phone-only, three budgets, agent caps), decisions already made | Always, second |
 | 3 | **[SESSION_HANDOFF.md](./SESSION_HANDOFF.md)** | Current state, recent fixes, open threads, first moves | Always, third |
