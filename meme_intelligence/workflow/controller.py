@@ -192,6 +192,19 @@ class _BoundedKeySet:
         return len(self._data)
 
 
+def _age_text(seconds: float) -> str:
+    """Compact human age ("2d 4h", "6h 12m", "9m") for alert history notes."""
+    seconds = int(max(0, seconds))
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes = rem // 60
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m"
+
+
 @dataclass
 class CycleStats:
     """What one scan cycle did (logged and aggregated)."""
@@ -629,6 +642,12 @@ class ContinuousScanner:
         token = result.pair.base_token
         previous = self._storage.score_history(token, limit=1)
         previous_score = previous[0]["final_score"] if previous else None
+        # All-time-high score, for peak-decline suppression: the one-step
+        # previous_score check misses a collapsed coin creeping back a few
+        # points per recheck (operator complaint 2026-07-14). None on a
+        # token's first-ever look. Read BEFORE this run's snapshot is
+        # recorded below, so a first look can never read as "below peak."
+        peak_score = self._storage.peak_score(token)
 
         # Free deterministic screens + AI verification of gate-passing
         # opportunities (Part 32.5 Section 8: deep analysis only after
@@ -743,6 +762,7 @@ class ContinuousScanner:
 
         interest = self._operator_interest(token)
         events = self._rules.evaluate(result, previous_score=previous_score,
+                                      peak_score=peak_score,
                                       ai_verification_inconclusive=ai_inconclusive,
                                       deterministic_risk_veto=deterministic_veto,
                                       operator_interest=interest)
@@ -777,6 +797,19 @@ class ContinuousScanner:
                 self._logger.info("suppressing %d alert(s) for muted token %s",
                                   len(events), token.address)
                 events = []
+        # "Seen before" framing (operator complaint 2026-07-14): a re-alert
+        # days after the first must never read like a brand-new discovery.
+        # Runs BEFORE this batch is recorded, so only PRIOR alerts count.
+        # Best-effort annotation — a history failure never blocks delivery.
+        if events:
+            try:
+                note = self._history_note(token)
+            except Exception as exc:  # noqa: BLE001
+                self._logger.warning("alert-history note failed for %s: %s",
+                                     token.address, exc)
+                note = ""
+            if note:
+                events = [dataclasses.replace(e, history_note=note) for e in events]
         delivered = await self._notifier.dispatch(events)
         stats.alerts.extend(delivered)
         for event in delivered:
@@ -812,6 +845,29 @@ class ContinuousScanner:
                                  "full priority): %s", token.address, exc)
             return True
         return any(row["alert_type"] in INTEREST_ALERT_TYPES for row in history)
+
+    def _history_note(self, token) -> str:
+        """One honest line of alert history for re-alerts, or "" on a token's
+        first-ever alert (operator complaint 2026-07-14: a recheck alert days
+        after the first read exactly like a brand-new discovery)."""
+        rows = self._storage.alert_history(token, limit=100)
+        if not rows:
+            return ""
+        count = f"{len(rows)}+" if len(rows) >= 100 else str(len(rows))
+        first_seen = self._parse_history_stamp(rows[-1].get("created_at"))
+        if first_seen is None:
+            return f"{count} prior alert(s) for this coin"
+        age = _age_text((self._now() - first_seen).total_seconds())
+        return f"{count} prior alert(s) for this coin — first alerted {age} ago"
+
+    def _parse_history_stamp(self, value) -> datetime | None:
+        if not value:
+            return None
+        try:
+            stamp = datetime.fromisoformat(str(value))
+        except ValueError:
+            return None
+        return stamp if stamp.tzinfo is not None else stamp.replace(tzinfo=timezone.utc)
 
     # Alert types that mean "this token is already flagged risky" — a paid AI
     # opinion on it is wasted money, not information.

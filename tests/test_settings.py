@@ -396,3 +396,17 @@ def test_smart_wallet_env_override():
 def test_smart_wallet_rejects_nonpositive_holder_cap():
     with pytest.raises(ConfigurationError, match="max_holders_per_token"):
         Settings.from_env(env={"MEMEINTEL_SMART_WALLET_MAX_HOLDERS_PER_TOKEN": "0"})
+
+
+def test_peak_decline_and_flat_band_defaults_and_overrides():
+    s = Settings.from_env(env={})
+    assert s.alert_engine.peak_decline_suppression_points == 15.0
+    assert s.momentum.flat_trend_band_percent == 2.0
+    s2 = Settings.from_env(env={
+        "MEMEINTEL_ALERT_ENGINE_PEAK_DECLINE_SUPPRESSION_POINTS": "25",
+        "MEMEINTEL_MOMENTUM_FLAT_TREND_BAND_PERCENT": "1.5",
+    })
+    assert s2.alert_engine.peak_decline_suppression_points == 25.0
+    assert s2.momentum.flat_trend_band_percent == 1.5
+    with pytest.raises(ConfigurationError):
+        Settings.from_env(env={"MEMEINTEL_ALERT_ENGINE_PEAK_DECLINE_SUPPRESSION_POINTS": "0"})

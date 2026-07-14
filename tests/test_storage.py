@@ -404,3 +404,13 @@ def test_wallet_sighting_stats_groups_by_source(storage):
 
 def test_wallet_sighting_stats_empty_table(storage):
     assert storage.wallet_sighting_stats() == []
+
+
+def test_peak_score_is_all_time_high(storage):
+    """Feeds peak-decline suppression: must be the MAX over ALL snapshots,
+    not the most recent one — the whole point is catching a coin far below
+    its former best (operator complaint 2026-07-14)."""
+    assert storage.peak_score(TOKEN) is None          # no history yet
+    for score in (90.0, 60.0, 63.0, 66.0):            # collapse then slow creep
+        storage.record_snapshot(make_master(score=score), source="test")
+    assert storage.peak_score(TOKEN) == 90.0

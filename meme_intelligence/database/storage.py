@@ -383,6 +383,20 @@ class Storage:
         self._conn.commit()
         return int(cursor.lastrowid)
 
+    def peak_score(self, token: TokenIdentity) -> float | None:
+        """Highest final score EVER recorded for a token, or ``None`` before
+        its first snapshot. Feeds decline suppression: comparing only against
+        the immediately-preceding snapshot let a collapsed coin creep back up
+        a few points per recheck for days without ever reading as "declining"
+        (operator complaint 2026-07-14 — old coins re-pitched as fresh)."""
+        row = self._conn.execute(
+            """SELECT MAX(s.final_score) AS peak
+               FROM snapshots s JOIN tokens t ON t.id = s.token_id
+               WHERE t.chain = ? AND t.address = ?""",
+            (token.chain, token.address),
+        ).fetchone()
+        return row["peak"] if row and row["peak"] is not None else None
+
     def score_history(self, token: TokenIdentity, limit: int = 30) -> list[dict]:
         """Recent snapshots for one token, newest first (Part 28 score tracking)."""
         rows = self._conn.execute(

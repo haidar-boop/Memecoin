@@ -53,6 +53,12 @@ _TREND_BASE_SIGNAL = 40.0
 _CONSISTENT_TREND_SIGNAL = 90.0   # 1h, 6h, and 24h all positive
 _FADING_TREND_SIGNAL = 35.0       # 24h up but the last hour is red
 _MIXED_TREND_SIGNAL = 60.0
+# All three windows inside the flat band: a stale coin drifting sideways is
+# NO trend evidence — it used to score the full 90 ("all non-negative") and
+# kept re-alerting old, quiet coins as fresh entries (operator complaint
+# 2026-07-14). Scored LOW, not unknown: flatness is real evidence that
+# momentum is absent, slightly above fading because nothing is actively red.
+_FLAT_TREND_SIGNAL = 40.0
 
 # Buy-pressure shift signals (1h buy ratio vs 24h baseline).
 _BUYERS_INCREASING_SIGNAL = 85.0
@@ -189,12 +195,14 @@ class MomentumAnalyzer:
 
         return s
 
-    @staticmethod
-    def _trend_consistency(pair: DexPair) -> float | None:
+    def _trend_consistency(self, pair: DexPair) -> float | None:
         changes = (pair.price_change_1h, pair.price_change_6h, pair.price_change_24h)
         if any(c is None for c in changes):
             return None
         h1, h6, h24 = changes
+        band = self._t.flat_trend_band_percent
+        if all(abs(c) < band for c in changes):
+            return _FLAT_TREND_SIGNAL  # sideways drift is not a trend
         if h1 >= 0 and h6 >= 0 and h24 >= 0:
             return _CONSISTENT_TREND_SIGNAL
         if h24 > 0 and h1 < 0:

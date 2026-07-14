@@ -894,6 +894,11 @@ class MomentumThresholds:
     target_trend_24h_percent: float = 30.0    # 24h gain earning a strong trend signal
     spike_1h_percent: float = 30.0            # 1h move above this = unsupported-spike risk
     late_extension_24h_percent: float = 100.0  # 24h gain above this = late entry zone
+    # 1h/6h/24h changes ALL inside this band = flat, which is NO trend
+    # evidence, not a "consistent trend": a stale coin drifting sideways for
+    # days scored the same 90 as a genuinely climbing one and kept re-alerting
+    # as a fresh entry (operator complaint 2026-07-14).
+    flat_trend_band_percent: float = 2.0
     volume_acceleration_ratio: float = 1.5    # (1h volume x24) / 24h volume above = accelerating
     volume_fade_ratio: float = 0.5            # below = volume fading
     buy_ratio_shift: float = 0.05             # 1h vs 24h buy-ratio delta that matters
@@ -913,6 +918,14 @@ class AlertEngineSettings:
 
     cooldown_seconds: float = 900.0  # same token+type alert suppressed within this window
     score_drop_review_points: float = 15.0  # score drop vs last snapshot triggering review
+    # Weak-tier buy-side alerts are also suppressed while the score sits this
+    # far below the token's own all-time peak. The one-step decline check
+    # above misses a coin that collapsed and then creeps back +2-3 points per
+    # recheck for days — each step reads as "improving," so it re-pitches as
+    # a fresh opportunity while still far below its best self (operator
+    # complaint 2026-07-14). Strong tiers stay exempt, as with the decline
+    # check.
+    peak_decline_suppression_points: float = 15.0
     # Below this, liquidity has collapsed and the token is treated as dead:
     # one MEDIUM post-mortem replaces the HIGH warning/score-drop pair, and
     # the token is archived instead of re-warned every recheck (Part 29

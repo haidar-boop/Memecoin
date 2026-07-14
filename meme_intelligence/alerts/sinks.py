@@ -164,6 +164,10 @@ def format_alert(event: AlertEvent) -> str:
     ]
     if event.detected_at is not None:
         lines += ["", f"Time detected: {event.detected_at.strftime('%Y-%m-%d %H:%M UTC')}"]
+    if event.history_note:
+        # A re-alert must never read like a brand-new discovery (operator
+        # complaint 2026-07-14) — the history rides right under the header.
+        lines += ["", f"Seen before: {event.history_note}"]
     lines += ["", "Event summary", f"  {event.title}"]
     if event.why_it_matters:
         lines += ["", "Why it matters", f"  {event.why_it_matters}"]

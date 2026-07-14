@@ -1394,6 +1394,37 @@ those come after 2–4 weeks of accumulated sightings + outcome labels. The
 paid PumpPortal `subscribeAccountTrade` stream becomes cheap (~$5/mo for ~50
 wallets) and worth revisiting only AFTER a reputation list exists.
 
+## 2026-07-14 — Stale-coin re-pitch, round two: peak-decline suppression + honest re-alert framing
+
+The operator reported the decline-suppression fix (2026-07-12 era, commit
+d3e88ec) didn't fully stop day-old coins re-arriving as fresh finds. A
+read-only investigation found three cooperating mechanisms, each fixed
+additively:
+
+1. **The one-step decline check had an escape hatch.** `_score_declining`
+   compared only against the immediately-preceding snapshot; a collapsed
+   coin creeping back +2-3 points per recheck read as "improving" on every
+   single look and re-pitched for days while far below its own peak. Fix:
+   `Storage.peak_score()` (all-time-high final score) feeds a new
+   `_below_peak` condition — weak-tier buy-side alerts stay suppressed
+   until the score returns to within
+   `MEMEINTEL_ALERT_ENGINE_PEAK_DECLINE_SUPPRESSION_POINTS` (default 15) of
+   the peak. Strong tiers stay exempt (same contract as the decline check);
+   `_score_drop_rule`'s copy is unaffected (it is genuinely about the last
+   look, so it keeps the one-step comparison).
+2. **Flatness scored as momentum.** `_trend_consistency` gave the full
+   "consistent trend" 90 to any all-non-negative triple — a stale coin
+   drifting sideways scored like a climber. Fix: all three windows inside
+   `MEMEINTEL_MOMENTUM_FLAT_TREND_BAND_PERCENT` (default 2%) now score a
+   low 40 ("no trend evidence"). Same idea in wallet intelligence: a flat
+   price range only reads as "buying during consolidation" with ≥5 priced
+   buys behind it — a dead-quiet coin is flat too (Rule 8).
+3. **Re-alerts read like discoveries.** Nothing in the alert copy revealed
+   that the bot had pitched the same coin before. Every alert on a token
+   with prior alert history now carries a "Seen before: N prior alert(s) —
+   first alerted 2d 4h ago" line (Telegram/Discord and console renderers);
+   annotation is best-effort and never blocks delivery (Rule 7).
+
 ## Notable implementation choices (Rule 19)
 
 - **Python 3.11 + asyncio** over Node.js (both allowed by spec): the

@@ -59,6 +59,13 @@
   (`MEMEINTEL_BOOST_WATCHER_ENABLED`), Solana-only, alerts once per token
   crossing 100 paid boosts, in its own `boosts` alert channel so it can
   never drown out vetted opportunity alerts.
+- **Stale-coin re-pitch, round two (2026-07-14)** — peak-decline
+  suppression (weak-tier buy alerts stay quiet while a coin sits ≥15 pts
+  below its own all-time peak), flat-drift no longer scores as momentum
+  or accumulation, and every re-alert now carries a "Seen before: N prior
+  alert(s) — first alerted Xd ago" line. See DECISIONS_LOG 2026-07-14
+  (second entry). `/wallets` Telegram command shows the smart-wallet data
+  clock's progress.
 - **Alert quality overhaul, 2026-07-11** (operator moved his phone from
   HIGH to MEDIUM to see opportunities again, then back to HIGH once he saw
   the junk it let through — walk through DECISIONS_LOG 2026-07-11 in

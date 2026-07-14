@@ -296,6 +296,54 @@ async def test_score_drop_review_unaffected_by_its_own_suppression():
     assert drop and drop[0].priority is AlertPriority.HIGH
 
 
+# ---- Peak-decline suppression (operator complaint 2026-07-14) ----
+
+async def test_slow_creep_below_peak_suppresses_weak_tier():
+    """The escape the one-step check missed: a collapsed coin creeping back
+    +2-3 points per recheck reads as 'improving' on every single look, yet
+    is still far below its own peak days later — it must not re-pitch as a
+    fresh opportunity. previous_score is BELOW current here (the creep-up
+    step), so only the peak comparison can catch it."""
+    rules = AutomationRules(
+        AlertThresholds(strong_candidate_min_liquidity_usd=100_000.0),  # force weak tier
+        AlertEngineSettings())
+    result = await pipeline_result()
+    events = rules.evaluate(result,
+                            previous_score=result.master.final_score - 3,  # creeping up
+                            peak_score=result.master.final_score + 25)     # far below peak
+    types = {e.alert_type for e in events}
+    assert "early_opportunity" not in types
+    assert "score_drop_review" not in types   # no one-step drop -> no drop alert
+
+
+async def test_below_peak_does_not_hide_a_genuinely_strong_candidate():
+    """Same exemption as the decline check: a coin that STILL clears the
+    strict strong-candidate bar while below its peak reaches the operator."""
+    result = await pipeline_result()
+    events = make_rules().evaluate(result,
+                                   previous_score=result.master.final_score - 3,
+                                   peak_score=result.master.final_score + 25)
+    assert "strong_candidate" in {e.alert_type for e in events}
+
+
+async def test_near_peak_recovery_is_not_suppressed():
+    """A coin back within the threshold of its own best self is a genuinely
+    renewed signal, not a stale re-pitch."""
+    result = await pipeline_result()
+    events = make_rules().evaluate(result,
+                                   previous_score=result.master.final_score - 3,
+                                   peak_score=result.master.final_score + 10)  # within 15
+    assert {e.alert_type for e in events} & _BUY_SIDE_ALERT_TYPES
+
+
+async def test_no_peak_history_keeps_previous_behavior():
+    """peak_score=None (first look, or a caller that doesn't track history)
+    must never suppress — exact pre-fix behavior (Rule 18)."""
+    result = await pipeline_result()
+    events = make_rules().evaluate(result, previous_score=None, peak_score=None)
+    assert {e.alert_type for e in events} & _BUY_SIDE_ALERT_TYPES
+
+
 # ---- Dead-token post-mortem (Part 29 Section 1) ----
 
 async def test_dead_token_gets_single_postmortem_not_warning_spam():

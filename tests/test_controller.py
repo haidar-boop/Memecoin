@@ -1610,3 +1610,30 @@ async def test_scan_cycle_without_recorder_records_nothing():
                                   {pair.base_token.address: clean_profile(pair.base_token)})
         await scanner.run(max_cycles=1)
         assert storage.wallets_seen_on(pair.base_token) == []
+
+
+# ---- "Seen before" framing on re-alerts (operator complaint 2026-07-14) ----
+
+async def test_realert_carries_history_note():
+    """A token with prior alert history must re-alert WITH the 'seen before'
+    line — a recheck alert days later must never read like a brand-new
+    discovery. First-ever alerts stay clean (no note)."""
+    pair = make_pair()
+    profile = clean_profile(pair.base_token)
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        # First ever alert: no note.
+        sink1 = RecordingSink()
+        scanner, _ = make_scanner(storage, [pair],
+                                  {pair.base_token.address: profile}, sink=sink1)
+        await scanner.run(max_cycles=1)
+        assert sink1.sent and all(not e.history_note for e in sink1.sent)
+
+        # A fresh scanner (fresh seen-set + cooldown) re-analyzes the same
+        # token: its alerts must now carry the history of round one.
+        sink2 = RecordingSink()
+        scanner2, _ = make_scanner(storage, [pair],
+                                   {pair.base_token.address: profile}, sink=sink2)
+        await scanner2.run(max_cycles=1)
+        assert sink2.sent
+        assert all("prior alert(s) for this coin" in e.history_note
+                   for e in sink2.sent)

@@ -178,11 +178,18 @@ class AlertEvent:
     # missed soft check annotates rather than suppresses (operator rule
     # 2026-07-12). Empty for protective/informational alerts.
     checklist: tuple[str, ...] = ()
+    # Pre-rendered "seen before" line (e.g. "3 prior alerts — first 2d 4h
+    # ago"), stamped by the scanner when the token has alert history. A
+    # re-alert days after the first must never read like a brand-new
+    # discovery (operator complaint 2026-07-14); empty for first-ever alerts.
+    history_note: str = ""
 
     def render(self) -> str:
         symbol = self.token.symbol or self.token.address[:8]
         lines = [f"[{self.priority.value.upper()}] {self.alert_type}: {symbol} ({self.token.chain})",
                  f"  {self.title}"]
+        if self.history_note:
+            lines.append(f"  seen before: {self.history_note}")
         if self.why_it_matters:
             lines.append(f"  why it matters: {self.why_it_matters}")
         for reason in self.reasons:
@@ -213,6 +220,7 @@ class AutomationRules:
         result: PipelineResult,
         *,
         previous_score: float | None = None,
+        peak_score: float | None = None,
         ai_verification_inconclusive: bool = False,
         deterministic_risk_veto: str | None = None,
         operator_interest: bool = True,
@@ -234,7 +242,13 @@ class AutomationRules:
         token (a HIGH opportunity alert was delivered for it). When False,
         protective alerts demote to LOW via the interest gate (see
         :func:`gate_events_by_interest`); the default True preserves full
-        priority for every caller that does not track alert history."""
+        priority for every caller that does not track alert history.
+
+        ``peak_score`` — the token's all-time-high final score (the scanner
+        reads it from snapshot history). Weak-tier buy-side alerts are
+        suppressed while the current score sits well below it — see
+        ``_below_peak``; ``None`` (no history / caller doesn't track) keeps
+        the previous behavior."""
         # A dead token is a closed case (Part 29 Section 1 — alerts protect
         # decisions, and no entry/exit decision remains once liquidity has
         # collapsed): one MEDIUM post-mortem replaces the warning/drop pair,
@@ -307,6 +321,15 @@ class AutomationRules:
         #    first-ever look has no ``previous_score`` and is never penalized
         #    for being new. See ``_score_declining``.
         #
+        #    Second field bug (2026-07-14): the one-step comparison alone let
+        #    a collapsed coin creep back +2-3 points per recheck for DAYS —
+        #    every step reads as "improving," so day-old coins re-pitched as
+        #    fresh finds while still far below their own peak. ``_below_peak``
+        #    closes that: weak tiers stay suppressed until the score returns
+        #    to within ``peak_decline_suppression_points`` of the token's
+        #    all-time high. Same strong-tier exemption, same first-look
+        #    immunity (a first look IS its own peak).
+        #
         # Everything else soft (thin-but-real liquidity, mint/freeze authority,
         # sell tax, deployer history) only ANNOTATES via the checklist. Protective
         # alerts always pass — a flagged/dying coin's holder still needs the
@@ -315,7 +338,8 @@ class AutomationRules:
                 or self._untradeable(result) or self._oversized(result)):
             events = [e for e in events if e.alert_type not in _BUY_SIDE_ALERT_TYPES]
         else:
-            if self._score_declining(result, previous_score):
+            if (self._score_declining(result, previous_score)
+                    or self._below_peak(result, peak_score)):
                 events = [e for e in events if e.alert_type not in _DECLINE_SUPPRESSED_TYPES]
             # NOT a hard veto: individual soft checks (liquidity/market-cap
             # floor, mint/freeze authority, sell tax, deployer history) no
@@ -840,6 +864,21 @@ class AutomationRules:
         if previous_score is None:
             return False
         return (previous_score - result.master.final_score) >= self._s.score_drop_review_points
+
+    def _below_peak(self, result: PipelineResult, peak_score: float | None) -> bool:
+        """True while the score sits well below the token's own all-time high.
+
+        Complements ``_score_declining``: that one-step check misses a coin
+        that collapsed and then creeps back a few points per recheck — each
+        step reads as improving, so a day-old coin re-pitched as a fresh
+        opportunity for days (operator complaint 2026-07-14). Used ONLY by
+        the weak-tier suppression, never by ``_score_drop_rule`` (whose
+        "dropped X points" copy is about the last look, not the peak).
+        ``None`` = caller has no history — never suppress; a first-ever look
+        is its own peak, so it is never penalized for being new."""
+        if peak_score is None:
+            return False
+        return (peak_score - result.master.final_score) >= self._s.peak_decline_suppression_points
 
 
 def events_from_security_changes(
