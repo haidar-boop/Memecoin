@@ -1354,6 +1354,25 @@ alerts — the operator experienced it as "the bot only sends boosted tokens."
 Boosts now have their own `boosts` category, isolated from vetted picks by
 construction, with a regression test pinning the separation.
 
+## 2026-07-14 — Boost radar removed (operator decision, one day after shipping)
+
+The DexScreener boost radar (built 2026-07-13) flooded the operator's phone
+with alerts on day-old, near-dead coins. Root cause is inherent, not a bug:
+boosts are PAID promotion with zero quality screening, and the most common
+buyer of a boost is a dying coin trying to attract exit liquidity — so a
+radar for boost crossings is structurally a radar for exactly the coins the
+operator never wants to see. The channel-category isolation (2026-07-13 fix)
+didn't help in practice because the operator runs a single default chat (no
+`MEMEINTEL_ALERT_DELIVERY_TELEGRAM_ROUTES`). Operator verdict: "remove it
+completely." Removed: `workflow/boost_watcher.py`, `BoostWatcherSettings`,
+`monitor --boosts`, the `boosts` alert channel, `DexScreenerClient.
+get_boosts()`, and their tests. KEPT: the on-demand `/boost <address>`
+Telegram command (separate earlier request; pull-based, cannot flood) and
+its `get_token_boost()` lookup. Stray `MEMEINTEL_BOOST_WATCHER_*` lines in
+the droplet `.env` are ignored harmlessly (verified). Lesson recorded: an
+unscreened high-frequency signal must not share the operator's single alert
+surface with vetted picks, no matter how it is categorized internally.
+
 ## 2026-07-14 — Smart-wallet tracking starts as a FREE holder clock, not a paid trade stream
 
 **Decision (operator-approved):** begin the smart-wallet roadmap by recording

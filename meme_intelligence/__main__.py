@@ -47,7 +47,6 @@ from meme_intelligence.collectors.wallet_data import (
 from meme_intelligence.core.enums import AlertPriority, MarketRegime, ResearchMode
 from meme_intelligence.database.storage import Storage
 from meme_intelligence.trading.trade_planner import TradePlanner
-from meme_intelligence.workflow.boost_watcher import BoostWatcher
 from meme_intelligence.workflow.smart_wallets import SmartWalletRecorder
 from meme_intelligence.workflow.controller import ContinuousScanner
 from meme_intelligence.workflow.daily_routine import DailyRoutine
@@ -979,9 +978,6 @@ async def _cmd_monitor(args, settings) -> int:
     if args.pumpfun:
         settings = _dc.replace(
             settings, pumpfun=_dc.replace(settings.pumpfun, enable_in_monitor=True))
-    if getattr(args, "boosts", False):
-        settings = _dc.replace(
-            settings, boost_watcher=_dc.replace(settings.boost_watcher, enabled=True))
     if getattr(args, "smart_wallets", False):
         settings = _dc.replace(
             settings, smart_wallet=_dc.replace(settings.smart_wallet, enabled=True))
@@ -1117,15 +1113,6 @@ async def _cmd_monitor(args, settings) -> int:
                     print("Note: MEMEINTEL_TELEGRAM_COMMANDS_ENABLED is on but "
                           "MEMEINTEL_TELEGRAM_BOT_TOKEN / MEMEINTEL_TELEGRAM_CHAT_ID "
                           "is not set — Telegram commands stay off.")
-
-            # Boost radar (Project 5): opt-in standalone watcher that alerts the
-            # operator when any token crosses a DexScreener boost threshold. Off
-            # by default; runs its own poll loop, independent of the scan cycle,
-            # and reuses the shared dex client + notifier (no new HTTP client).
-            if settings.boost_watcher.enabled:
-                boost_watcher = BoostWatcher(dex, notifier, settings.boost_watcher)
-                await boost_watcher.start()
-                stack.push_async_callback(boost_watcher.close)
 
             try:
                 history = await scanner.run(max_cycles=args.cycles)
@@ -1280,9 +1267,6 @@ def main(argv: list[str] | None = None) -> int:
     monitor.add_argument("--learn", action="store_true",
                          help="feed analyzed coins into the self-learning mind "
                               "layer as the scanner runs")
-    monitor.add_argument("--boosts", action="store_true",
-                         help="also run the DexScreener boost radar: alert when "
-                              "any token crosses the boost threshold (Project 5)")
     monitor.add_argument("--smart-wallets", action="store_true", dest="smart_wallets",
                          help="record top-holder wallets of every analyzed token "
                               "(Part 17 data clock; free, uses already-fetched data)")

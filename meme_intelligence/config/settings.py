@@ -424,33 +424,6 @@ class PumpFunSettings:
 
 
 @dataclass(frozen=True)
-class BoostWatcherSettings:
-    """DexScreener boost radar (Project 5): DM the operator the first time any
-    token crosses ``threshold`` boosts on DexScreener.
-
-    A boost is PAID promotion, not organic traction or a safety signal — this
-    is a "what is being pumped for visibility right now" heads-up, never a buy
-    signal (the emitted alert says so). Off by default (Rule 18): enabling it
-    is the only thing that changes behavior. Independent of the scan cycle —
-    its own poll loop and its own alert, so it never touches discovery,
-    analysis, storage, or trading.
-    """
-
-    enabled: bool = False              # opt-in; off = no behavior change
-    threshold: float = 100.0           # alert when totalAmount crosses this
-    poll_interval_seconds: float = 30.0  # matches DexScreener's ~30s edge cache
-    chain_filter: str = "solana"       # "" = every chain; "solana" = Solana-only
-    max_seen_keys: int = 5000          # bounded already-alerted dedup memory
-
-    def __post_init__(self) -> None:
-        for name in ("threshold", "poll_interval_seconds", "max_seen_keys"):
-            value = getattr(self, name)
-            if not math.isfinite(value) or value <= 0:
-                raise ConfigurationError(
-                    f"boost watcher setting '{name}' must be positive, got {value}")
-
-
-@dataclass(frozen=True)
 class SmartWalletSettings:
     """Smart-wallet data collection (Part 17 groundwork): record which
     wallets hold each analyzed token early in its life.
@@ -1456,7 +1429,6 @@ class Settings:
     providers: ProviderSettings = field(default_factory=ProviderSettings)
     discovery: DiscoverySettings = field(default_factory=DiscoverySettings)
     pumpfun: PumpFunSettings = field(default_factory=PumpFunSettings)
-    boost_watcher: BoostWatcherSettings = field(default_factory=BoostWatcherSettings)
     smart_wallet: SmartWalletSettings = field(default_factory=SmartWalletSettings)
     security: SecurityThresholds = field(default_factory=SecurityThresholds)
     community: CommunityThresholds = field(default_factory=CommunityThresholds)
@@ -1532,7 +1504,6 @@ class Settings:
             providers=_load_group(ProviderSettings, "PROVIDERS", env),
             discovery=_load_group(DiscoverySettings, "DISCOVERY", env),
             pumpfun=_load_group(PumpFunSettings, "PUMPFUN", env),
-            boost_watcher=_load_group(BoostWatcherSettings, "BOOST_WATCHER", env),
             smart_wallet=_load_group(SmartWalletSettings, "SMART_WALLET", env),
             security=_load_group(SecurityThresholds, "SECURITY", env),
             community=_load_group(CommunityThresholds, "COMMUNITY", env),

@@ -60,10 +60,15 @@
   data — expect weeks, not hours. STILL not built (needs operator
   go-ahead + accumulated data): persisting scores, wiring reputations
   into the live scan, the smart-money alert.
-- **DexScreener boost radar (Project 5) live 2026-07-13** — opt-in
-  (`MEMEINTEL_BOOST_WATCHER_ENABLED`), Solana-only, alerts once per token
-  crossing 100 paid boosts, in its own `boosts` alert channel so it can
-  never drown out vetted opportunity alerts.
+- **DexScreener boost radar REMOVED 2026-07-14 (operator decision).** It
+  ran for a day and flooded the phone with paid-promo pings on day-old /
+  dying coins (boosts are how dying coins buy exit liquidity — the radar
+  had zero quality screening by design). The operator ordered it removed
+  completely. The on-demand `/boost <address>` Telegram command remains
+  (pull-based, can't flood). A stale
+  `MEMEINTEL_BOOST_WATCHER_ENABLED=true` line may linger in the droplet
+  `.env` — harmless, the code is gone. Do NOT rebuild without an explicit
+  operator request.
 - **Stale-coin re-pitch, round two (2026-07-14)** — peak-decline
   suppression (weak-tier buy alerts stay quiet while a coin sits ≥15 pts
   below its own all-time peak), flat-drift no longer scores as momentum

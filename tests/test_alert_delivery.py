@@ -84,21 +84,6 @@ def test_channel_categories():
     assert channel_for(make_event(alert_type="something_future")) == "reports"
 
 
-def test_boost_channel_is_isolated_from_discoveries():
-    """A boost is unscreened paid promotion; it must never share a channel
-    with vetted opportunity alerts (early_opportunity, strong_candidate,
-    high_priority_opportunity, new_token_discovery) or its higher volume
-    drowns out the alerts that actually matter — regression guard for the
-    bug where boost briefly rode in on "discoveries"."""
-    boost_channel = channel_for(make_event(alert_type="boost"))
-    assert boost_channel != "discoveries"
-    for opportunity_type in (
-        "early_opportunity", "strong_candidate",
-        "high_priority_opportunity", "new_token_discovery",
-    ):
-        assert channel_for(make_event(alert_type=opportunity_type)) == "discoveries"
-
-
 def test_parse_routes_validates_categories():
     routes = parse_routes("security=-100123, momentum=-100456")
     assert routes == {"security": "-100123", "momentum": "-100456"}

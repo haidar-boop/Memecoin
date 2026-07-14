@@ -6,14 +6,10 @@ get rate limiting, retries, and timeouts for free (Rules 6/7/11).
 
 Section 8 channel organization: every alert type belongs to one of the
 spec's five channel categories (discoveries / smart money / security /
-momentum / reports), plus "boosts" for the DexScreener boost radar
-(Project 5, added post-spec) — kept out of "discoveries" on purpose: a
-boost is paid promotion with zero quality screening, so it must never
-share a channel with vetted opportunity alerts, or its higher volume
-drowns out the alerts that actually matter. Each sink takes an optional
-``routes`` mapping of category -> destination (Telegram chat id, Discord
-webhook URL); anything unrouted goes to the sink's default destination,
-so a single-channel setup works with zero extra configuration.
+momentum / reports). Each sink takes an optional ``routes`` mapping of
+category -> destination (Telegram chat id, Discord webhook URL); anything
+unrouted goes to the sink's default destination, so a single-channel
+setup works with zero extra configuration.
 
 External sinks default to MEDIUM-and-above delivery — a phone that buzzes
 for background information stops being read (Part 29 Section 1); the
@@ -52,7 +48,6 @@ ALERT_CHANNELS = {
     "community_fake": "security",
     "momentum": "momentum",
     "score_drop_review": "reports",
-    "boost": "boosts",
 }
 
 # Section 7 "Risk Assessment: Low / Medium / High", derived from priority —

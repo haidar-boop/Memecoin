@@ -216,33 +216,3 @@ async def test_get_token_boost_falls_back_to_latest(monkeypatch):
 async def test_get_token_boost_empty_address_rejected():
     with pytest.raises(ValueError):
         await make_client().get_token_boost("")
-
-
-async def test_get_boosts_unions_top_and_latest_deduped(monkeypatch):
-    client = make_client()
-    top = [{"chainId": "solana", "tokenAddress": "AAA", "totalAmount": 500},
-           {"chainId": "ethereum", "tokenAddress": "BBB", "totalAmount": 100}]
-    latest = [{"chainId": "solana", "tokenAddress": "AAA", "totalAmount": 500},  # dup of top
-              {"chainId": "solana", "tokenAddress": "CCC", "totalAmount": 30}]
-
-    async def fake_get_json(path, params=None, *, cache_key=None, cache_ttl=None):
-        return top if "top" in path else latest
-
-    monkeypatch.setattr(client, "_get_json", fake_get_json)
-    boosts = await client.get_boosts()
-    assert sorted(b.token_address for b in boosts) == ["AAA", "BBB", "CCC"]  # AAA deduped
-    assert len(boosts) == 3
-    aaa = next(b for b in boosts if b.token_address == "AAA")
-    assert aaa.total_amount == 500 and aaa.chain == "solana"
-
-
-async def test_get_boosts_tolerates_malformed_entries(monkeypatch):
-    client = make_client()
-
-    async def fake_get_json(path, params=None, *, cache_key=None, cache_ttl=None):
-        return [{"tokenAddress": "GOOD", "chainId": "solana", "totalAmount": 100},
-                {"no_address": True}, "not a dict", {"tokenAddress": ""}]
-
-    monkeypatch.setattr(client, "_get_json", fake_get_json)
-    boosts = await client.get_boosts()
-    assert [b.token_address for b in boosts] == ["GOOD"]
