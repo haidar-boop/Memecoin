@@ -387,3 +387,20 @@ def test_old_database_migrates_wallet_sighting_columns(tmp_path):
         legacy = migrated.wallet_history("LegacyWallet")
         assert legacy[0]["usd_value"] == 10.0
         assert legacy[0]["source"] is None and legacy[0]["percent"] is None
+
+
+def test_wallet_sighting_stats_groups_by_source(storage):
+    other = TokenIdentity(chain="solana", address="TokenAddr2", symbol="OTH")
+    storage.record_wallet_sightings(
+        TOKEN, [("W1", "hold_top10", None, 10.0), ("W2", "hold_top10", None, 5.0)],
+        source="goplus_holders")
+    storage.record_wallet_sightings(other, [("W1", "buy", 50.0)])  # no source
+    stats = {row["source"]: row for row in storage.wallet_sighting_stats()}
+    assert stats["goplus_holders"]["sightings"] == 2
+    assert stats["goplus_holders"]["wallets"] == 2
+    assert stats["goplus_holders"]["tokens"] == 1
+    assert stats["unlabeled"]["sightings"] == 1
+
+
+def test_wallet_sighting_stats_empty_table(storage):
+    assert storage.wallet_sighting_stats() == []

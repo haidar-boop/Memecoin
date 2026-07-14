@@ -272,6 +272,68 @@ async def test_mind_renders_metrics():
     assert "memory: 12 coins" in text and "hit rate: 0.75" in text
 
 
+async def test_wallets_off_reports_flag():
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage, settings=make_settings())
+        await listener._handle_update(message_update("/wallets"))
+    text = sent_messages(calls)[0]["text"]
+    assert "clock: off" in text
+    assert "enable the clock to start it" in text
+
+
+async def test_wallets_on_but_nothing_recorded_yet():
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        settings = make_settings(MEMEINTEL_SMART_WALLET_ENABLED="true")
+        listener, calls = make_listener(storage, settings=settings)
+        await listener._handle_update(message_update("/wallets"))
+    text = sent_messages(calls)[0]["text"]
+    assert "clock: ON" in text
+    assert "no sightings recorded yet" in text
+
+
+async def test_wallets_renders_progress_from_recorded_sightings():
+    # Two Storage instances over the SAME file, at different simulated times,
+    # so the recorded sightings span a real "running for" window.
+    import tempfile, os
+    path = os.path.join(tempfile.mkdtemp(), "wallets.db")
+    earlier = datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc)
+    with Storage(path, now_func=lambda: earlier) as storage:
+        storage.record_wallet_sightings(
+            TOKEN, [("EarlyWhale", "hold_top10", None, 9.0)], source="goplus_holders")
+    with Storage(path, now_func=lambda: NOW) as storage:
+        storage.record_wallet_sightings(
+            TOKEN, [("LateWhale", "hold_top10", None, 4.0)], source="goplus_holders")
+        settings = make_settings(MEMEINTEL_SMART_WALLET_ENABLED="true")
+        listener, calls = make_listener(storage, settings=settings)
+        await listener._handle_update(message_update("/wallets"))
+    text = sent_messages(calls)[0]["text"]
+    assert "2 sightings | 2 distinct wallets | 1 tokens covered" in text
+    assert "running for: 9d" in text          # 2026-07-01 -> 2026-07-10
+    assert "last recorded: 0m ago" in text    # latest sighting IS "now"
+    assert "reputation scoring needs several weeks" in text
+
+
+async def test_wallets_notes_other_sources_separately():
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        storage.record_wallet_sightings(TOKEN, [("ManualLookup", "buy", 50.0)])  # no source=
+        settings = make_settings(MEMEINTEL_SMART_WALLET_ENABLED="true")
+        listener, calls = make_listener(storage, settings=settings)
+        await listener._handle_update(message_update("/wallets"))
+    text = sent_messages(calls)[0]["text"]
+    assert "no sightings recorded yet" in text        # clock itself has nothing
+    assert "1 additional sighting(s) from manual" in text
+
+
+async def test_wallets_storage_failure_degrades_gracefully(monkeypatch):
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        def boom():
+            raise RuntimeError("database is locked")
+        monkeypatch.setattr(storage, "wallet_sighting_stats", boom)
+        listener, calls = make_listener(storage, settings=make_settings())
+        await listener._handle_update(message_update("/wallets"))
+    assert "try again shortly" in sent_messages(calls)[0]["text"]
+
+
 async def test_unknown_command_returns_help():
     with Storage(":memory:", now_func=lambda: NOW) as storage:
         listener, calls = make_listener(storage)

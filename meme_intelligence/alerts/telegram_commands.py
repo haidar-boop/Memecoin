@@ -96,6 +96,7 @@ _HELP_TEXT = "\n".join([
     "/watchlist - top tracked coins by tier",
     "/boost <address> [chain] - DexScreener paid-boost amount for a coin",
     "/mind - learning-layer report card + feedback tallies",
+    "/wallets - smart-wallet data clock progress (Part 17 groundwork)",
     "/mute <address> - silence ALL alerts for a token",
     "/unmute <address> - restore alerts for a token",
     "/buy <address> <sol> - buy that many SOL of a token (live if enabled)",
@@ -227,6 +228,7 @@ class TelegramCommandListener(BaseCollector):
             "/watchlist": self._cmd_watchlist,
             "/boost": self._cmd_boost,
             "/mind": self._cmd_mind,
+            "/wallets": self._cmd_wallets,
             "/mute": self._cmd_mute,
             "/unmute": self._cmd_unmute,
             "/buy": self._cmd_buy,
@@ -809,6 +811,51 @@ class TelegramCommandListener(BaseCollector):
             earned = f"EARNED — rug precision {gate[0]:.2f} over {gate[1]} graded rug calls"
         state = "ON" if ls.veto_enabled else "off (MEMEINTEL_LEARNING_VETO_ENABLED)"
         return f"p(rug) veto: {state} | authority: {earned}"
+
+    async def _cmd_wallets(self, args: list[str]) -> str:
+        """Progress readout for the smart-wallet data clock (Part 17
+        groundwork, added 2026-07-14): how much has been recorded and for
+        how long — NOT reputation scores, which don't exist yet (Rule 8:
+        report what's true, not what the roadmap will eventually show)."""
+        sw = self._ctx.settings.smart_wallet
+        try:
+            stats = self._ctx.storage.wallet_sighting_stats()
+        except Exception as exc:  # noqa: BLE001 — advisory command, never crash the poll loop
+            self._logger.warning("wallet sighting stats unavailable: %s", exc)
+            return "Couldn't read wallet-sighting stats right now — try again shortly."
+
+        lines = ["SMART-WALLET DATA CLOCK"]
+        lines.append(f"clock: {'ON' if sw.enabled else 'off (MEMEINTEL_SMART_WALLET_ENABLED)'}")
+        clock = next((s for s in stats if s["source"] == "goplus_holders"), None)
+        if clock is None:
+            lines.append("no sightings recorded yet" if sw.enabled else
+                         "nothing recorded — enable the clock to start it")
+        else:
+            lines.append(f"{clock['sightings']} sightings | {clock['wallets']} distinct "
+                         f"wallets | {clock['tokens']} tokens covered")
+            running_for = self._parse_seen_at(clock["earliest"])
+            latest = self._parse_seen_at(clock["latest"])
+            if running_for is not None:
+                lines.append(f"running for: {_fmt_duration((self._now() - running_for).total_seconds())}")
+            if latest is not None:
+                lines.append(f"last recorded: {_fmt_duration((self._now() - latest).total_seconds())} ago")
+            lines.append("reputation scoring needs several weeks of this plus resolved "
+                         "outcomes before it means anything — not built yet.")
+        others = [s for s in stats if s["source"] != "goplus_holders"]
+        if others:
+            other_total = sum(s["sightings"] for s in others)
+            lines.append(f"({other_total} additional sighting(s) from manual /check or "
+                         "`wallets` CLI lookups, other sources)")
+        return "\n".join(lines)
+
+    def _parse_seen_at(self, value: str | None) -> datetime | None:
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
 
     async def _cmd_mute(self, args: list[str]) -> str:
         address, error = self._validated_address(args, "/mute <address>")

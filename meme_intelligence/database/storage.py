@@ -586,6 +586,25 @@ class Storage:
         ).fetchall()
         return [row["wallet"] for row in rows]
 
+    def wallet_sighting_stats(self) -> list[dict]:
+        """Per-source progress summary over ``wallet_sightings`` (Part 17):
+        how many sightings/wallets/tokens each source has contributed and
+        the recording window, newest-active source first. Powers
+        /wallets — the data-clock's own progress readout, honest about
+        having nothing yet rather than guessing (Rule 8)."""
+        rows = self._conn.execute(
+            """SELECT COALESCE(source, 'unlabeled') AS source,
+                      COUNT(*) AS sightings,
+                      COUNT(DISTINCT wallet) AS wallets,
+                      COUNT(DISTINCT token_id) AS tokens,
+                      MIN(seen_at) AS earliest,
+                      MAX(seen_at) AS latest
+               FROM wallet_sightings
+               GROUP BY COALESCE(source, 'unlabeled')
+               ORDER BY MAX(seen_at) DESC"""
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     # ---- Research journal (Part 11, Section 8) ----
 
     def add_journal(self, token: TokenIdentity | None, kind: str, content: str) -> int:
