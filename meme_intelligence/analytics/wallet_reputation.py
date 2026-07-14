@@ -21,11 +21,21 @@ Honesty contract (Rule 8):
   floor) — no second definition of "winner" (Rule 17/18). A token whose
   measured windows hit neither threshold is *undetermined* and counts
   toward neither win_rate nor rug_avoidance (sideways proves nothing).
+* **No hindsight credit** (adversarial-review finding 2026-07-14): a
+  wallet whose first sighting POSTdates a token's first measured outcome
+  cannot claim it was "early" — restart re-records and late-recheck
+  snapshots capture post-pump chasers, not smart money. Such pairs are
+  excluded from credit and reported separately.
 * ``early_entry_rate`` and ``median_position_usd`` stay ``None``: holder
   snapshots carry no peak-attention timing and no USD position size, and
   the formula already treats unmeasured dimensions as absent, not neutral.
 * A wallet below ``min_resolved`` measurable tokens gets NO score — one
   lucky pick is not a track record.
+
+The join and all counting run inside SQLite (``wallet_reputation_rollup``/
+``wallet_reputation_totals``), so memory stays proportional to the wallets
+actually reported, never to raw sighting rows — this is called from the
+monitor's Telegram poll loop on a 1GB droplet (adversarial-review finding).
 
 This module only reads and computes. Persisting scores, feeding them into
 the live scan, and the smart-money alert are later, separate steps.
@@ -45,9 +55,11 @@ from meme_intelligence.core.logging_setup import get_logger
 
 _logger = get_logger("analytics.wallet_reputation")
 
-# The data-clock's provenance tag (workflow/smart_wallets.py). Other sighting
-# sources (manual /check runs, wallets CLI) have different collection biases,
-# so reputation is computed per-source rather than blended silently (Rule 9).
+# The data-clock's provenance tag — the single canonical definition;
+# workflow/smart_wallets.py (the writer) and the /wallets command (the
+# reader) both import it, so the string cannot drift apart silently.
+# Other sighting sources (manual /check runs, wallets CLI) have different
+# collection biases, so reputation is computed per-source (Rule 9).
 DEFAULT_SIGHTING_SOURCE = "goplus_holders"
 
 
@@ -62,6 +74,7 @@ class WalletReputationEntry:
     wins: int                    # tokens that hit the success threshold
     deaths: int                  # tokens whose liquidity died (confirmed rug/failure)
     pending_tokens: int          # sightings still awaiting measurable outcomes
+    hindsight_tokens: int        # sighted only AFTER the outcome was measured — no credit
     first_seen: datetime | None  # earliest sighting (clock time, UTC)
     last_seen: datetime | None
 
@@ -78,6 +91,7 @@ class ReputationReport:
     tokens_sighted: int          # distinct tokens with sightings
     tokens_resolved: int         # sighted tokens with a win/loss label
     tokens_pending: int          # sighted tokens with no measurable outcome yet
+    pairs_hindsight: int         # (wallet, token) pairs excluded as hindsight
 
 
 def _parse_stamp(value) -> datetime | None:
@@ -90,24 +104,6 @@ def _parse_stamp(value) -> datetime | None:
     return stamp if stamp.tzinfo is not None else stamp.replace(tzinfo=timezone.utc)
 
 
-def _label(aggregate: dict, settings: BacktestSettings) -> tuple[bool, bool]:
-    """(won, died) for one token's measured outcome windows.
-
-    Mirrors ``evaluate_predictions``: won when the BEST window hit the
-    success threshold; died/failed when liquidity fell below the survival
-    floor or the WORST window hit the failure threshold. The two are
-    independent — a token can pump 60% and then rug, and an early holder's
-    record honestly carries both the win and the death.
-    """
-    best = aggregate.get("best_change")
-    worst = aggregate.get("worst_change")
-    died = bool(aggregate.get("died"))
-    won = best is not None and best >= settings.success_price_change_percent
-    lost = died or (worst is not None
-                    and worst <= settings.failure_price_change_percent)
-    return won, lost
-
-
 def compute_wallet_reputations(
     storage,
     settings: BacktestSettings,
@@ -117,68 +113,40 @@ def compute_wallet_reputations(
 ) -> ReputationReport:
     """Join wallet sightings against measured token outcomes and score.
 
-    Pure read-and-compute over two indexed SQLite tables — cheap enough to
-    run on demand (no persisted score table yet; that is a later step once
-    the numbers have been watched for a while).
+    Pure read-and-compute; the heavy lifting is SQL-side. ``min_resolved``
+    below 1 is rejected loudly — it would divide by a zero-resolved wallet
+    downstream, and "score wallets with no track record" is never a
+    meaningful request (Rule 6).
     """
-    sightings = storage.wallet_sightings_for_reputation(source=source)
-    aggregates = {row["token_id"]: row for row in storage.token_outcome_aggregates()}
+    if min_resolved < 1:
+        raise ValueError(f"min_resolved must be at least 1, got {min_resolved}")
 
-    per_wallet: dict[str, dict] = {}
-    tokens_sighted: set[int] = set()
-    tokens_resolved: set[int] = set()
-    tokens_pending: set[int] = set()
-
-    for row in sightings:
-        wallet, token_id = row["wallet"], row["token_id"]
-        tokens_sighted.add(token_id)
-        stats = per_wallet.setdefault(wallet, {
-            "resolved": 0, "wins": 0, "deaths": 0, "pending": 0,
-            "first_seen": None, "last_seen": None,
-        })
-        seen = _parse_stamp(row.get("first_seen_at"))
-        if seen is not None:
-            if stats["first_seen"] is None or seen < stats["first_seen"]:
-                stats["first_seen"] = seen
-            if stats["last_seen"] is None or seen > stats["last_seen"]:
-                stats["last_seen"] = seen
-
-        aggregate = aggregates.get(token_id)
-        if aggregate is None:
-            stats["pending"] += 1
-            tokens_pending.add(token_id)
-            continue
-        won, lost = _label(aggregate, settings)
-        if not won and not lost:
-            # Measured but undetermined: sideways proves nothing (Rule 8) —
-            # it is neither a win nor an avoided/hit rug.
-            stats["pending"] += 1
-            tokens_pending.add(token_id)
-            continue
-        tokens_resolved.add(token_id)
-        stats["resolved"] += 1
-        if won:
-            stats["wins"] += 1
-        if lost and bool(aggregate.get("died")):
-            stats["deaths"] += 1
+    label_params = dict(
+        source=source,
+        success_change_percent=settings.success_price_change_percent,
+        failure_change_percent=settings.failure_price_change_percent,
+    )
+    rows = storage.wallet_reputation_rollup(min_resolved=min_resolved, **label_params)
+    totals = storage.wallet_reputation_totals(**label_params)
 
     entries: list[WalletReputationEntry] = []
-    for wallet, stats in per_wallet.items():
-        if stats["resolved"] < min_resolved:
-            continue
+    for row in rows:
+        resolved = int(row["resolved"])
+        first_seen = _parse_stamp(row.get("first_seen_at"))
+        last_seen = _parse_stamp(row.get("last_seen_at"))
         span_days = None
-        if stats["first_seen"] is not None and stats["last_seen"] is not None:
-            span_days = (stats["last_seen"] - stats["first_seen"]).total_seconds() / 86400.0
+        if first_seen is not None and last_seen is not None:
+            span_days = (last_seen - first_seen).total_seconds() / 86400.0
         record = WalletTrackRecord(
-            wallet=wallet,
-            tokens_traded=stats["resolved"],
-            win_rate=stats["wins"] / stats["resolved"],
+            wallet=row["wallet"],
+            tokens_traded=resolved,
+            win_rate=int(row["wins"]) / resolved,
             # No peak-attention timing and no USD sizes in holder snapshots —
             # unmeasured stays unmeasured (Rule 8), the formula's coverage
             # honestly shrinks instead.
             early_entry_rate=None,
             median_position_usd=None,
-            rug_avoidance_rate=1.0 - (stats["deaths"] / stats["resolved"]),
+            rug_avoidance_rate=1.0 - (int(row["deaths"]) / resolved),
             active_span_days=span_days,
         )
         scored = wallet_reputation(record)
@@ -186,40 +154,55 @@ def compute_wallet_reputations(
             continue  # nothing measurable (cannot happen with resolved>0, but honest)
         score, coverage = scored
         entries.append(WalletReputationEntry(
-            wallet=wallet, score=score, coverage=coverage,
-            resolved_tokens=stats["resolved"], wins=stats["wins"],
-            deaths=stats["deaths"], pending_tokens=stats["pending"],
-            first_seen=stats["first_seen"], last_seen=stats["last_seen"],
+            wallet=row["wallet"], score=score, coverage=coverage,
+            resolved_tokens=resolved, wins=int(row["wins"]),
+            deaths=int(row["deaths"]), pending_tokens=int(row["pending"]),
+            hindsight_tokens=int(row["hindsight"]),
+            first_seen=first_seen, last_seen=last_seen,
         ))
     entries.sort(key=lambda e: (e.score, e.resolved_tokens), reverse=True)
 
     report = ReputationReport(
         entries=tuple(entries),
-        wallets_seen=len(per_wallet),
+        wallets_seen=totals["wallets_seen"],
         wallets_scored=len(entries),
         min_resolved=min_resolved,
-        tokens_sighted=len(tokens_sighted),
-        tokens_resolved=len(tokens_resolved),
-        tokens_pending=len(tokens_pending),
+        tokens_sighted=totals["tokens_sighted"],
+        tokens_resolved=totals["tokens_resolved"],
+        tokens_pending=totals["tokens_sighted"] - totals["tokens_resolved"],
+        pairs_hindsight=totals["pairs_hindsight"],
     )
     _logger.info(
         "wallet reputation: %d/%d wallets scored (min_resolved=%d) over "
-        "%d sighted tokens (%d resolved, %d pending)",
+        "%d sighted tokens (%d resolved, %d pending, %d hindsight pairs excluded)",
         report.wallets_scored, report.wallets_seen, min_resolved,
-        report.tokens_sighted, report.tokens_resolved, report.tokens_pending)
+        report.tokens_sighted, report.tokens_resolved, report.tokens_pending,
+        report.pairs_hindsight)
     return report
 
 
 def _short(wallet: str) -> str:
-    return wallet[:4] + "…" + wallet[-4:] if len(wallet) > 12 else wallet
+    """Truncate AND neutralize a wallet string for display. Wallet
+    "addresses" originate in GoPlus API responses (untrusted): control
+    characters and backticks are stripped like every other externally-
+    sourced identity, because a short malicious string bypasses truncation
+    entirely (adversarial-review finding)."""
+    cleaned = "".join(ch for ch in str(wallet) if ch.isprintable()).replace("`", "'")
+    cleaned = cleaned.strip() or "unknown"
+    return cleaned[:4] + "…" + cleaned[-4:] if len(cleaned) > 12 else cleaned
 
 
 def render_reputation_report(report: ReputationReport, *, top: int = 20) -> str:
     """Human-readable report for the CLI and the /wallets Telegram command."""
+    top = max(1, top)  # a nonsense top would slice from the wrong end below
     lines = ["WALLET REPUTATION (Part 17 × Part 24)"]
     lines.append(
         f"{report.wallets_seen} wallet(s) sighted over {report.tokens_sighted} token(s) "
         f"— {report.tokens_resolved} resolved, {report.tokens_pending} awaiting outcomes")
+    if report.pairs_hindsight:
+        lines.append(
+            f"{report.pairs_hindsight} sighting(s) excluded as hindsight — recorded only "
+            "after their token's outcome was already measured (no credit for chasing)")
     if not report.entries:
         lines.append(
             f"no wallet has ≥{report.min_resolved} resolved tokens yet — the clock "

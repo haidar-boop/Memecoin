@@ -813,10 +813,11 @@ class TelegramCommandListener(BaseCollector):
         return f"p(rug) veto: {state} | authority: {earned}"
 
     async def _cmd_wallets(self, args: list[str]) -> str:
-        """Progress readout for the smart-wallet data clock (Part 17
-        groundwork, added 2026-07-14): how much has been recorded and for
-        how long — NOT reputation scores, which don't exist yet (Rule 8:
-        report what's true, not what the roadmap will eventually show)."""
+        """Smart-wallet progress on the phone (Part 17, 2026-07-14): the
+        data clock's recording stats plus the reputation section — wallets
+        scored from sightings joined against measured outcomes, with honest
+        denominators, and nothing invented while the sample is thin."""
+        from meme_intelligence.analytics.wallet_reputation import DEFAULT_SIGHTING_SOURCE
         sw = self._ctx.settings.smart_wallet
         try:
             stats = self._ctx.storage.wallet_sighting_stats()
@@ -826,7 +827,7 @@ class TelegramCommandListener(BaseCollector):
 
         lines = ["SMART-WALLET DATA CLOCK"]
         lines.append(f"clock: {'ON' if sw.enabled else 'off (MEMEINTEL_SMART_WALLET_ENABLED)'}")
-        clock = next((s for s in stats if s["source"] == "goplus_holders"), None)
+        clock = next((s for s in stats if s["source"] == DEFAULT_SIGHTING_SOURCE), None)
         if clock is None:
             lines.append("no sightings recorded yet" if sw.enabled else
                          "nothing recorded — enable the clock to start it")
@@ -840,7 +841,7 @@ class TelegramCommandListener(BaseCollector):
             if latest is not None:
                 lines.append(f"last recorded: {_fmt_duration((self._now() - latest).total_seconds())} ago")
             lines.extend(self._reputation_lines())
-        others = [s for s in stats if s["source"] != "goplus_holders"]
+        others = [s for s in stats if s["source"] != DEFAULT_SIGHTING_SOURCE]
         if others:
             other_total = sum(s["sightings"] for s in others)
             lines.append(f"({other_total} additional sighting(s) from manual /check or "

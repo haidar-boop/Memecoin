@@ -201,6 +201,18 @@ _MIGRATIONS = {
     ),
 }
 
+# Indexes on MIGRATED columns must be created AFTER _migrate() runs — putting
+# them in _SCHEMA crashed startup on any pre-migration database ("no such
+# column: source"), because executescript runs before the ALTER TABLEs (the
+# old-database migration test caught this before it reached the droplet).
+_POST_MIGRATION_INDEXES = (
+    # Covers the reputation rollup's source-filtered (wallet, token) grouping,
+    # with seen_at included so MIN(seen_at) never touches the base table —
+    # keeps the join an index scan as the clock's table grows for months.
+    """CREATE INDEX IF NOT EXISTS idx_sightings_source_pair
+       ON wallet_sightings(source, wallet, token_id, seen_at)""",
+)
+
 
 @dataclass(frozen=True)
 class WatchlistEntry:
@@ -250,6 +262,8 @@ class Storage:
         self._conn.execute("PRAGMA busy_timeout=30000")
         self._conn.executescript(_SCHEMA)
         self._migrate()
+        for index_sql in _POST_MIGRATION_INDEXES:
+            self._conn.execute(index_sql)
         self._conn.commit()
 
     def _migrate(self) -> None:
@@ -600,32 +614,116 @@ class Storage:
         ).fetchall()
         return [row["wallet"] for row in rows]
 
-    def wallet_sightings_for_reputation(self, *, source: str) -> list[dict]:
-        """One row per (wallet, token) pair from one sighting source: the
-        join key for wallet reputation (Part 17 × Part 24). Duplicate rows
-        (restart re-records — the documented append-only contract) collapse
-        here, keeping the earliest ``seen_at``."""
+    # Shared CTEs for the wallet-reputation join (Part 17 × Part 24).
+    #
+    # ``pair``: one row per (wallet, token) from one sighting source —
+    # duplicate append-only rows (restart re-records) collapse to the
+    # EARLIEST seen_at. ``agg``: per-token best/worst measured price change,
+    # whether liquidity ever died (NULL survived is unknown, never a rug —
+    # Rule 8), and when its FIRST outcome was measured. ``labeled`` buckets
+    # each pair:
+    #   hindsight — the wallet's first sighting POSTdates the token's first
+    #     measured outcome, so "early on a winner" cannot be claimed; the
+    #     pair earns no credit (adversarial-review finding 2026-07-14:
+    #     post-pump top-holder snapshots re-recorded after a restart were
+    #     collecting full win credit). Timestamps are aware-UTC isoformat
+    #     everywhere, so lexical comparison is chronological; an unparseable
+    #     seen_at fails the comparison and lands in hindsight — no proof of
+    #     being early means no credit (Rule 8).
+    #   resolved — measured and hit the success threshold, the failure
+    #     threshold, or died (same thresholds evaluate_predictions grades
+    #     with; passed in as parameters so the definition lives in one
+    #     place, BacktestSettings).
+    #   pending — no outcomes yet, or measured but undetermined.
+    # Aggregation happens IN SQL so memory stays O(reported wallets), not
+    # O(sighting rows) — the Python-side join materialized hundreds of MB
+    # at realistic table sizes on the 1GB droplet (review finding).
+    _REPUTATION_CTES = """
+        WITH pair AS (
+            SELECT wallet, token_id, MIN(seen_at) AS first_seen_at
+            FROM wallet_sightings WHERE source = :source
+            GROUP BY wallet, token_id
+        ),
+        agg AS (
+            SELECT token_id,
+                   MAX(price_change_percent) AS best_change,
+                   MIN(price_change_percent) AS worst_change,
+                   MAX(CASE WHEN survived = 0 THEN 1 ELSE 0 END) AS died,
+                   MIN(measured_at) AS first_measured_at
+            FROM outcomes GROUP BY token_id
+        ),
+        labeled AS (
+            SELECT p.wallet, p.token_id, p.first_seen_at,
+                   CASE
+                     WHEN a.token_id IS NULL THEN 'pending'
+                     WHEN p.first_seen_at > a.first_measured_at THEN 'hindsight'
+                     WHEN (a.best_change IS NOT NULL AND a.best_change >= :success)
+                       OR a.died = 1
+                       OR (a.worst_change IS NOT NULL AND a.worst_change <= :failure)
+                       THEN 'resolved'
+                     ELSE 'pending'
+                   END AS bucket,
+                   CASE WHEN a.best_change IS NOT NULL
+                             AND a.best_change >= :success THEN 1 ELSE 0 END AS won,
+                   COALESCE(a.died, 0) AS death
+            FROM pair p LEFT JOIN agg a ON a.token_id = p.token_id
+        )
+    """
+
+    def wallet_reputation_rollup(
+        self, *, source: str, success_change_percent: float,
+        failure_change_percent: float, min_resolved: int,
+    ) -> list[dict]:
+        """Per-wallet reputation raw material: resolved/wins/deaths/pending/
+        hindsight counts and the sighting window, ONLY for wallets clearing
+        ``min_resolved`` — the gate runs in SQL so thin wallets never
+        materialize in Python."""
         rows = self._conn.execute(
-            """SELECT wallet, token_id, MIN(seen_at) AS first_seen_at
-               FROM wallet_sightings WHERE source = ?
-               GROUP BY wallet, token_id""",
-            (source,),
+            self._REPUTATION_CTES + """
+            SELECT wallet,
+                   SUM(bucket = 'resolved') AS resolved,
+                   SUM(CASE WHEN bucket = 'resolved' AND won = 1 THEN 1 ELSE 0 END) AS wins,
+                   SUM(CASE WHEN bucket = 'resolved' AND death = 1 THEN 1 ELSE 0 END) AS deaths,
+                   SUM(bucket = 'pending') AS pending,
+                   SUM(bucket = 'hindsight') AS hindsight,
+                   MIN(first_seen_at) AS first_seen_at,
+                   MAX(first_seen_at) AS last_seen_at
+            FROM labeled GROUP BY wallet
+            HAVING SUM(bucket = 'resolved') >= :min_resolved""",
+            {"source": source, "success": success_change_percent,
+             "failure": failure_change_percent, "min_resolved": min_resolved},
         ).fetchall()
         return [dict(row) for row in rows]
 
-    def token_outcome_aggregates(self) -> list[dict]:
-        """Per-token best/worst measured price change and whether liquidity
-        ever died, over ALL measured outcome windows (Part 24). SQL MAX/MIN
-        ignore NULL price changes; a token with only-NULL changes still
-        reports its survival verdict."""
-        rows = self._conn.execute(
-            """SELECT token_id,
-                      MAX(price_change_percent) AS best_change,
-                      MIN(price_change_percent) AS worst_change,
-                      MAX(CASE WHEN survived = 0 THEN 1 ELSE 0 END) AS died
-               FROM outcomes GROUP BY token_id""",
-        ).fetchall()
-        return [dict(row) for row in rows]
+    def wallet_reputation_totals(
+        self, *, source: str, success_change_percent: float,
+        failure_change_percent: float,
+    ) -> dict:
+        """Honest denominators for the reputation report: distinct wallets and
+        tokens sighted, how many sighted tokens have a resolved label (token-
+        level — independent of which wallet saw them when), and how many
+        (wallet, token) pairs were excluded as hindsight."""
+        row = self._conn.execute(
+            self._REPUTATION_CTES + """
+            SELECT COUNT(DISTINCT wallet) AS wallets_seen,
+                   COUNT(DISTINCT token_id) AS tokens_sighted,
+                   SUM(bucket = 'hindsight') AS pairs_hindsight,
+                   COUNT(DISTINCT CASE WHEN token_id IN (
+                       SELECT a2.token_id FROM agg a2
+                       WHERE (a2.best_change IS NOT NULL AND a2.best_change >= :success)
+                          OR a2.died = 1
+                          OR (a2.worst_change IS NOT NULL AND a2.worst_change <= :failure)
+                   ) THEN token_id END) AS tokens_resolved
+            FROM labeled""",
+            {"source": source, "success": success_change_percent,
+             "failure": failure_change_percent},
+        ).fetchone()
+        return {
+            "wallets_seen": row["wallets_seen"] or 0,
+            "tokens_sighted": row["tokens_sighted"] or 0,
+            "tokens_resolved": row["tokens_resolved"] or 0,
+            "pairs_hindsight": row["pairs_hindsight"] or 0,
+        }
 
     def wallet_sighting_stats(self) -> list[dict]:
         """Per-source progress summary over ``wallet_sightings`` (Part 17):

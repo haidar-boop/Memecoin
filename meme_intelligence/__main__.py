@@ -816,6 +816,17 @@ async def _cmd_reputation(args, settings) -> int:
         compute_wallet_reputations,
         render_reputation_report,
     )
+    # CLI overrides bypass SmartWalletSettings' own validation, so they are
+    # checked here — --min-resolved 0 reached a zero-resolved wallet's
+    # win-rate division and crashed with a raw traceback (adversarial-review
+    # finding; Rule 6: a bad flag earns a clear message, not a stack dump).
+    if args.min_resolved is not None and args.min_resolved < 1:
+        print("--min-resolved must be at least 1 (a wallet with no resolved "
+              "tokens has no track record to score).")
+        return 2
+    if args.top < 1:
+        print("--top must be at least 1.")
+        return 2
     with Storage(settings.database.path) as storage:
         report = compute_wallet_reputations(
             storage, settings.backtest,

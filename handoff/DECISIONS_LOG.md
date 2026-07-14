@@ -1457,6 +1457,37 @@ turns recorded holder sightings into wallet reputation scores. Built as
   three regression tests (NULL-price deaths, /wallets failure path,
   injection guard).
 
+**Second-opinion pass (same day, operator-requested, fleet capped at 10
+agents):** 17 findings raised, 6 verified-confirmed, all fixed:
+
+1. **No hindsight credit (the big one).** The join credited wallets
+   sighted AFTER a token's outcome was already measured — restart
+   re-records and late-recheck holder snapshots capture post-pump
+   chasers, and a reproduced chaser wallet scored 86/100 on wins measured
+   two weeks before it was ever seen. Sightings whose first record
+   postdates the token's first measured outcome are now a separate
+   `hindsight` bucket: no credit, surfaced honestly in the report
+   (unparseable timestamps also land there — no proof of early means no
+   credit, Rule 8).
+2. The whole join now aggregates IN SQLite (`wallet_reputation_rollup`/
+   `_totals` + a covering index): the Python-side join materialized
+   ~330MB and stalled the shared event loop (scan + trade buttons) for
+   3+ seconds at realistic table sizes on the 1GB droplet. Memory is now
+   O(scored wallets). The index is created AFTER `_migrate()` — putting
+   it in the schema script crashed startup on pre-migration databases
+   ("no such column: source"); the old-database migration test caught
+   that before it reached the droplet.
+3. CLI `reputation --min-resolved 0` crashed with a raw
+   ZeroDivisionError (bypassed settings validation); both the CLI and
+   `compute_wallet_reputations` now reject it loudly. Nonsense `--top`
+   values clamped (previously sliced from the wrong end and fabricated
+   the "… and N more" count).
+4. Test hardening from surviving-mutant analysis: price-only losses
+   (worst ≤ -50% without death), exact-threshold boundaries, sort
+   direction, and CLI-render sanitization are now all pinned.
+   `goplus_holders` now has one canonical definition
+   (`DEFAULT_SIGHTING_SOURCE`) imported by writer and readers.
+
 ## Notable implementation choices (Rule 19)
 
 - **Python 3.11 + asyncio** over Node.js (both allowed by spec): the

@@ -870,7 +870,7 @@ async def test_wallets_reputation_failure_degrades_gracefully(monkeypatch):
 
         def boom(*a, **k):
             raise RuntimeError("database is locked")
-        monkeypatch.setattr(storage, "token_outcome_aggregates", boom)
+        monkeypatch.setattr(storage, "wallet_reputation_rollup", boom)
         settings = make_settings(MEMEINTEL_SMART_WALLET_ENABLED="true")
         listener, calls = make_listener(storage, settings=settings)
         await listener._handle_update(message_update("/wallets"))

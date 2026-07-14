@@ -28,20 +28,23 @@ def seed(storage: Storage, *, wallet: str, tokens: list[TokenIdentity]) -> None:
 
 
 def outcome(storage: Storage, tok: TokenIdentity, *, change: float | None,
-            survived: bool | None = True, window: float = 24.0) -> None:
+            survived: bool | None = True, window: float = 24.0,
+            at: datetime = NOW) -> None:
     """Record one measured outcome window for a token (needs a snapshot id —
-    outcomes reference the prediction snapshot, so make a minimal one)."""
+    outcomes reference the prediction snapshot, so make a minimal one).
+    ``at`` is the measurement time — the hindsight guard compares it against
+    sighting times, so tests can measure outcomes before/after sightings."""
     token_id = storage.upsert_token(tok)
     cursor = storage._conn.execute(
         """INSERT INTO snapshots (token_id, created_at, final_score, classification,
                                   confidence, coverage, category_scores, overrides, source)
            VALUES (?, ?, 70.0, 'watchlist', 'medium', 0.5, '{}', '[]', 'test')""",
-        (token_id, NOW.isoformat()),
+        (token_id, at.isoformat()),
     )
     storage._conn.commit()
     storage.record_outcome(
         snapshot_id=int(cursor.lastrowid), token_id=token_id, window_hours=window,
-        target_at=NOW.isoformat(), measured_at=NOW.isoformat(),
+        target_at=at.isoformat(), measured_at=at.isoformat(),
         price_usd=1.0, price_change_percent=change, liquidity_usd=5000.0,
         survived=survived, source="test",
     )
@@ -171,3 +174,112 @@ def test_death_with_no_price_data_still_counts_as_death(storage):
     assert entry.deaths == 1
     assert entry.wins == 1
     assert report.tokens_pending == 1      # the all-unknown token stays pending
+
+
+# ---- Second-opinion review findings (2026-07-14, capped fleet) ----
+
+def test_hindsight_sightings_earn_no_credit(storage):
+    """A wallet first sighted AFTER a token's outcome was already measured
+    cannot claim it was early — restart re-records and late-recheck
+    snapshots capture post-pump chasers. Reproduces the review's exact
+    scenario: sighted 07-14 on tokens whose wins were measured 07-01;
+    previously scored 86/100, must now score nothing."""
+    early = datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc)
+    tokens = [token(1), token(2), token(3)]
+    with Storage(":memory:", now_func=lambda: NOW) as db:
+        for t in tokens:
+            outcome(db, t, change=120.0, at=early)  # wins measured July 1 ...
+        seed(db, wallet="ChaserW", tokens=tokens)   # ... sighted July 14
+        report = compute_wallet_reputations(db, SETTINGS, min_resolved=1)
+        assert report.wallets_scored == 0           # no hindsight credit
+        assert report.pairs_hindsight == 3
+        assert "excluded as hindsight" in render_reputation_report(report)
+
+
+def test_same_instant_sighting_keeps_credit(storage):
+    """The normal path: sighting at analysis time, outcome measured at or
+    after it — credit stands (the guard only excludes strictly-later
+    sightings)."""
+    seed(storage, wallet="W", tokens=[token(1)])
+    outcome(storage, token(1), change=90.0)         # same NOW instant
+    report = compute_wallet_reputations(storage, SETTINGS, min_resolved=1)
+    assert report.wallets_scored == 1
+    assert report.pairs_hindsight == 0
+
+
+def test_price_only_loss_resolves_without_death(storage):
+    """Kills the mutant `lost = died`: a -60% worst window with liquidity
+    intact is a RESOLVED loss (win_rate denominator grows) but NOT a death
+    (rug avoidance untouched)."""
+    tokens = [token(1), token(2), token(3)]
+    seed(storage, wallet="W", tokens=tokens)
+    outcome(storage, tokens[0], change=-60.0, survived=True)   # price loss, alive
+    outcome(storage, tokens[1], change=80.0)
+    outcome(storage, tokens[2], change=70.0)
+    report = compute_wallet_reputations(storage, SETTINGS, min_resolved=3)
+    entry = report.entries[0]
+    assert entry.resolved_tokens == 3
+    assert entry.wins == 2
+    assert entry.deaths == 0        # a crash is not a rug
+
+
+def test_exact_thresholds_count(storage):
+    """Pins >= / <= at the boundaries: exactly +50% is a win, exactly -50%
+    is a loss (mirrors evaluate_predictions)."""
+    tokens = [token(1), token(2)]
+    seed(storage, wallet="W", tokens=tokens)
+    outcome(storage, tokens[0], change=50.0)    # exactly the success threshold
+    outcome(storage, tokens[1], change=-50.0, survived=True)  # exactly failure
+    report = compute_wallet_reputations(storage, SETTINGS, min_resolved=2)
+    entry = report.entries[0]
+    assert entry.resolved_tokens == 2 and entry.wins == 1 and entry.deaths == 0
+
+
+def test_entries_sorted_best_first(storage):
+    """Kills the sort-direction mutant: the strongest wallet leads."""
+    good, bad = [token(n) for n in (1, 2, 3)], [token(n) for n in (4, 5, 6)]
+    seed(storage, wallet="GoodW", tokens=good)
+    seed(storage, wallet="BadW", tokens=bad)
+    for t in good:
+        outcome(storage, t, change=100.0)
+    for t in bad:
+        outcome(storage, t, change=-90.0, survived=False)
+    report = compute_wallet_reputations(storage, SETTINGS, min_resolved=3)
+    assert [e.wallet for e in report.entries] == ["GoodW", "BadW"]
+    assert report.entries[0].score > report.entries[1].score
+
+
+def test_min_resolved_below_one_is_rejected(storage):
+    """The CLI can pass arbitrary overrides; the computation refuses a
+    nonsense gate loudly instead of dividing by zero downstream."""
+    with pytest.raises(ValueError, match="min_resolved"):
+        compute_wallet_reputations(storage, SETTINGS, min_resolved=0)
+
+
+def test_render_guards_nonsense_top_and_counts_honestly(storage):
+    """--top 0/negative used to slice from the wrong end and fabricate the
+    '… and N more' count; render clamps and stays truthful."""
+    wallets = [f"Wallet{i:02d}" for i in range(3)]
+    tokens = [token(n) for n in (1, 2, 3)]
+    for t in tokens:
+        outcome(storage, t, change=100.0)
+    for w in wallets:
+        seed(storage, wallet=w, tokens=tokens)
+    report = compute_wallet_reputations(storage, SETTINGS, min_resolved=3)
+    text = render_reputation_report(report, top=-1)   # clamped to 1
+    assert "… and 2 more" in text                     # 3 scored, 1 shown
+    assert text.count("/100") == 1
+
+
+def test_render_sanitizes_malicious_wallet_strings(storage):
+    """Wallet strings originate in GoPlus responses; a short malicious one
+    bypasses truncation and must still be neutralized in the report."""
+    evil = "aa\n`@here`"
+    tokens = [token(n) for n in (1, 2, 3)]
+    seed(storage, wallet=evil, tokens=tokens)
+    for t in tokens:
+        outcome(storage, t, change=100.0)
+    report = compute_wallet_reputations(storage, SETTINGS, min_resolved=3)
+    text = render_reputation_report(report)
+    assert "`" not in text and "aa\n" not in text
+    assert "aa'@here'" in text

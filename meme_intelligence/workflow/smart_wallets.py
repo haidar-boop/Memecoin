@@ -23,13 +23,15 @@ deliberately unbuilt until enough labeled data accumulates (Rule 2).
 
 from __future__ import annotations
 
+from meme_intelligence.analytics.wallet_reputation import DEFAULT_SIGHTING_SOURCE
 from meme_intelligence.core.logging_setup import get_logger
 from meme_intelligence.core.models import SecurityProfile
 from meme_intelligence.workflow.controller import _BoundedKeySet
 
 # Provenance tag stored on every sighting this recorder writes, so later
-# feeds (e.g. a real trade stream) stay distinguishable (Rule 9).
-_SOURCE = "goplus_holders"
+# feeds (e.g. a real trade stream) stay distinguishable (Rule 9). Imported
+# from the reputation module so writer and reader can never drift apart.
+_SOURCE = DEFAULT_SIGHTING_SOURCE
 
 # Sighting side for "appeared in the circulating top-N holder list".
 # Deliberately distinct from "buy"/"sell": a holder snapshot carries no
