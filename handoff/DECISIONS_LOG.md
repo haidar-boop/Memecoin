@@ -1760,6 +1760,51 @@ week for 429s in the log after turning it on).
 end-to-end scanner tests proving the holdings bypass). Suite: **899
 passing**.
 
+## 2026-07-15 — Retrain threading bug fixed: the classifier had never trained in production
+
+Droplet journal (operator screenshot): `mind layer retrain failed: SQLite
+objects created in a thread can only be used in that same thread` — every
+scheduled retrain, every time. Root cause: `workflow/controller.py` runs
+`await asyncio.to_thread(self._learning.retrain_if_due)` (deliberately —
+a synchronous rebuild once stalled an emergency `/dump`), but
+`LearningStore`'s SQLite connection was created on the event-loop thread
+with the default `check_same_thread=True`. The worker thread died on the
+retrain's FIRST statement (`resolved_count`). Consequence, honestly
+stated: the LightGBM classifier has likely NEVER successfully trained in
+production — the mind layer's good numbers (rug precision 0.97) came from
+the analog memory + rug engine, which use instant learning and never
+needed the retrain path. Failure was safe (logged and swallowed) but
+permanent.
+
+**Fix:** `LearningStore` is now explicitly thread-safe: connection opened
+with `check_same_thread=False`, and every method holds an `RLock` for its
+whole body via a small `@_locked` decorator — whole-method scope keeps
+multi-statement transactions (e.g. `record_label` + final-bucket refresh +
+commit) atomic rather than interleavable between the event-loop thread and
+the retrain worker; RLock lets composite methods (`get_record`) nest their
+helpers. The research desk's `Storage` keeps its stricter
+same-thread-only contract — only the learning store crosses threads.
+Reproduced the crash first, then verified the fix end-to-end: regression
+tests pin cross-thread reads, writes, composite methods, and the exact
+controller call shape (`asyncio.to_thread(service.retrain_if_due)`) both
+for the quick not-due path and a real first train. Suite: **901 passing**.
+
+**Snapshot restoration note (same session):** the operator asked to get
+"as close as you can to the snapshot" (the 2026-07-08→11 golden window).
+The one config ingredient that window had and today lacks is wallet
+intelligence in the monitor. Deploy gotcha found while restoring it: the
+droplet `.env` has carried `MEMEINTEL_WALLET_ENABLE_IN_MONITOR=false`
+since 2026-07-11, and `load_dotenv` gives the FIRST occurrence of a key
+precedence — so the earlier suggested `echo ...=true >> .env` append was a
+silent NO-OP (matches the operator's log showing zero Helius activity
+after that restart). The correct block deletes the stale line first
+(`sed -i '/MEMEINTEL_WALLET_ENABLE_IN_MONITOR/d' .env` then append). The
+safety improvements added since the golden window (rug screen on every
+buy-side alert, veto suppresses instead of downgrades, ceilings/freshness
+per the operator's own later complaints) are deliberately kept — the
+snapshot's magic (smart-money accumulation on fresh small coins) lives
+inside those limits, now with the credit gate keeping it affordable.
+
 ## Notable implementation choices (Rule 19)
 
 - **Python 3.11 + asyncio** over Node.js (both allowed by spec): the

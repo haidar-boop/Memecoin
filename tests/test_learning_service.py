@@ -390,3 +390,19 @@ def test_retrain_not_due_below_threshold():
     service.resolve_outcome("c1", "solana", 24.0, 80.0)
     # Only one resolved coin, far below min_train_samples.
     assert service.retrain_if_due() is False
+
+
+async def test_retrain_if_due_runs_in_a_worker_thread():
+    """Regression: workflow/controller.py runs retrain via
+    `await asyncio.to_thread(self._learning.retrain_if_due)` (so a full
+    rebuild can't stall an emergency /dump). Before the store was made
+    thread-safe this exact call raised sqlite3.ProgrammingError on its
+    FIRST statement (resolved_count) — every scheduled retrain failed and
+    the classifier never trained. Both the quick not-due path and a real
+    first train must now survive the thread hop."""
+    import asyncio
+    service = _service()
+    assert await asyncio.to_thread(service.retrain_if_due) is False  # nothing resolved
+    _seed(service, n_each=30)  # past min_train_samples -> first train is due
+    assert await asyncio.to_thread(service.retrain_if_due) is True
+    assert service._classifier.is_ready

@@ -9,16 +9,32 @@ this store is the labeled-record + metrics backbone they are rebuilt from.
 
 Conventions mirror :mod:`meme_intelligence.database.storage` deliberately
 (Rule 5 / Rule 18): WAL mode for safe concurrent monitor + cron access, a
-single ``_SCHEMA`` script, synchronous calls from the event-loop thread, and
-an injectable clock for deterministic tests. This is a *separate* database
-file from the research desk's so the mind layer stays modular (Rule 4) and
-its heavy write cadence never contends with the main tables.
+single ``_SCHEMA`` script, and an injectable clock for deterministic tests.
+This is a *separate* database file from the research desk's so the mind
+layer stays modular (Rule 4) and its heavy write cadence never contends
+with the main tables.
+
+Threading: unlike the research desk's ``Storage`` (event-loop thread only),
+this store is deliberately THREAD-SAFE. The scanner runs
+``retrain_if_due`` in a worker thread via ``asyncio.to_thread`` — a
+synchronous rebuild once stalled an emergency ``/dump`` — and that worker
+reads this store while the event-loop thread keeps recording detections
+and serving ``/mind``. The connection is opened with
+``check_same_thread=False`` and every method holds ``self._lock`` (an
+RLock, so composite methods like ``get_record`` can nest their helpers)
+for its WHOLE body, keeping each method's multi-statement transaction
+atomic rather than interleavable. Without this, every scheduled retrain
+died with "SQLite objects created in a thread can only be used in that
+same thread" — the classifier never trained once in production
+(2026-07-15 droplet journal finding).
 """
 
 from __future__ import annotations
 
+import functools
 import json
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -113,8 +129,22 @@ CREATE TABLE IF NOT EXISTS learning_predictions (
 """
 
 
+def _locked(method):
+    """Hold ``self._lock`` for the method's whole body (see module docstring:
+    the retrain worker thread and the event-loop thread share one
+    connection; whole-method scope keeps multi-statement transactions
+    atomic)."""
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
 class LearningStore:
-    """SQLite-backed persistence for the self-learning layer."""
+    """SQLite-backed persistence for the self-learning layer (thread-safe)."""
 
     def __init__(
         self,
@@ -124,9 +154,14 @@ class LearningStore:
     ) -> None:
         self._now = now_func
         self._logger = get_logger("learning.store")
+        self._lock = threading.RLock()
         if path != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(path, timeout=30.0)
+        # check_same_thread=False is safe ONLY because every access is
+        # serialized behind self._lock (@_locked on every method) — the
+        # retrain worker thread must be able to read while the event-loop
+        # thread owns the connection's birth thread.
+        self._conn = sqlite3.connect(path, timeout=30.0, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout=30000")
@@ -134,6 +169,7 @@ class LearningStore:
         self._migrate()
         self._conn.commit()
 
+    @_locked
     def _migrate(self) -> None:
         """Add post-release columns to databases from older builds (Rule 18)."""
         existing = {row["name"] for row in
@@ -150,6 +186,7 @@ class LearningStore:
                 if "duplicate column" not in str(exc).lower():
                     raise
 
+    @_locked
     def close(self) -> None:
         self._conn.close()
 
@@ -161,6 +198,7 @@ class LearningStore:
 
     # ---- Coin lifecycle ----
 
+    @_locked
     def record_detection(
         self,
         token: TokenIdentity,
@@ -200,6 +238,7 @@ class LearningStore:
         ).fetchone()
         return int(row["id"])
 
+    @_locked
     def coin_id(self, token: TokenIdentity) -> int | None:
         row = self._conn.execute(
             "SELECT id FROM learning_coins WHERE chain = ? AND address = ?",
@@ -209,6 +248,7 @@ class LearningStore:
 
     # ---- Trajectory snapshots (Section 1/2) ----
 
+    @_locked
     def append_snapshot(self, coin_id: int, snapshot: CoinSnapshot) -> int:
         captured = snapshot.captured_at.isoformat() if snapshot.captured_at else None
         data = {
@@ -233,6 +273,7 @@ class LearningStore:
         self._conn.commit()
         return int(cursor.lastrowid)
 
+    @_locked
     def snapshots_for(self, coin_id: int) -> list[CoinSnapshot]:
         rows = self._conn.execute(
             """SELECT data FROM learning_snapshots
@@ -243,6 +284,7 @@ class LearningStore:
 
     # ---- Outcome labels (Section 1) ----
 
+    @_locked
     def record_label(self, coin_id: int, label: OutcomeLabel) -> None:
         """Persist a resolved horizon label and refresh the coin's final bucket.
 
@@ -265,6 +307,7 @@ class LearningStore:
         self._refresh_final_bucket(coin_id)
         self._conn.commit()
 
+    @_locked
     def _refresh_final_bucket(self, coin_id: int) -> None:
         rows = self._conn.execute(
             """SELECT horizon_hours, bucket FROM learning_labels
@@ -286,6 +329,7 @@ class LearningStore:
 
     # ---- Rug signals (Section 5a) ----
 
+    @_locked
     def record_rug_signals(self, coin_id: int, signals: list[RugSignal]) -> int:
         if not signals:
             return 0
@@ -298,6 +342,7 @@ class LearningStore:
         self._conn.commit()
         return len(signals)
 
+    @_locked
     def rug_signals_for(self, coin_id: int) -> list[RugSignal]:
         rows = self._conn.execute(
             "SELECT name, points, detail FROM learning_rug_signals WHERE coin_id = ?",
@@ -308,6 +353,7 @@ class LearningStore:
 
     # ---- Deployer blacklist (Section 5a / Section 7) ----
 
+    @_locked
     def blacklist_deployer(self, creator: str, chain: str) -> int:
         """Record a confirmed rug for a creator wallet; returns new rug count."""
         now = self._now().isoformat()
@@ -326,6 +372,7 @@ class LearningStore:
         ).fetchone()
         return int(row["rug_count"])
 
+    @_locked
     def mark_deployer_counted(self, coin_id: int) -> bool:
         """Atomically claim the one-time deployer-blacklist count for a coin.
 
@@ -341,6 +388,7 @@ class LearningStore:
         self._conn.commit()
         return cursor.rowcount > 0
 
+    @_locked
     def deployer_rug_count(self, creator: str | None, chain: str) -> int:
         """How many confirmed rugs this creator wallet is linked to (0 if clean)."""
         if not creator:
@@ -353,12 +401,14 @@ class LearningStore:
 
     # ---- Labeled dataset (feeds FAISS + LightGBM) ----
 
+    @_locked
     def resolved_count(self) -> int:
         row = self._conn.execute(
             "SELECT COUNT(*) AS n FROM learning_coins WHERE final_bucket IS NOT NULL",
         ).fetchone()
         return int(row["n"])
 
+    @_locked
     def resolved_records(self, *, limit: int | None = None) -> list[CoinRecord]:
         """Every resolved coin as a full :class:`CoinRecord` (newest first).
 
@@ -389,6 +439,7 @@ class LearningStore:
             ))
         return records
 
+    @_locked
     def _labels_for(self, coin_id: int) -> list[OutcomeLabel]:
         rows = self._conn.execute(
             """SELECT horizon_hours, bucket, forward_return_percent, resolved_at
@@ -406,6 +457,7 @@ class LearningStore:
             ))
         return labels
 
+    @_locked
     def coin_final_bucket(self, coin_id: int) -> OutcomeBucket | None:
         """The coin's resolved outcome bucket, or None if still unresolved."""
         row = self._conn.execute(
@@ -415,6 +467,7 @@ class LearningStore:
             return None
         return OutcomeBucket(row["final_bucket"])
 
+    @_locked
     def get_record(self, coin_id: int) -> CoinRecord | None:
         """Full lifecycle record for one coin (resolved or not)."""
         row = self._conn.execute(
@@ -437,6 +490,7 @@ class LearningStore:
             rug_signals=tuple(self.rug_signals_for(coin_id)),
         )
 
+    @_locked
     def unresolved_coins(self) -> list[tuple[int, TokenIdentity, datetime, float | None]]:
         """Coins still awaiting outcome resolution: (id, token, detected_at, price)."""
         rows = self._conn.execute(
@@ -454,6 +508,7 @@ class LearningStore:
 
     # ---- Self-evaluation metrics (Section 8) ----
 
+    @_locked
     def record_metrics(self, window: str, payload: dict) -> int:
         cursor = self._conn.execute(
             "INSERT INTO learning_metrics (created_at, window, payload) VALUES (?, ?, ?)",
@@ -464,6 +519,7 @@ class LearningStore:
 
     # ---- Prediction records (Section 8 / Section 10) ----
 
+    @_locked
     def record_prediction(self, coin_id: int, payload: dict) -> bool:
         """Persist the coin's FIRST evaluation verdict; returns True if stored.
 
@@ -480,12 +536,14 @@ class LearningStore:
         self._conn.commit()
         return cursor.rowcount > 0
 
+    @_locked
     def get_prediction(self, coin_id: int) -> dict | None:
         row = self._conn.execute(
             "SELECT payload FROM learning_predictions WHERE coin_id = ?", (coin_id,),
         ).fetchone()
         return json.loads(row["payload"]) if row else None
 
+    @_locked
     def update_prediction(self, coin_id: int, payload: dict) -> None:
         """Overwrite a stored prediction payload (e.g. to mark it graded)."""
         self._conn.execute(
@@ -494,6 +552,7 @@ class LearningStore:
         )
         self._conn.commit()
 
+    @_locked
     def metrics_history(self, window: str | None = None, limit: int = 50) -> list[dict]:
         if window is None:
             rows = self._conn.execute(

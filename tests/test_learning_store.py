@@ -117,3 +117,23 @@ def test_resolved_records_carry_full_lifecycle(store):
     assert len(record.snapshots) == 1
     assert len(record.rug_signals) == 1
     assert record.label_for(6.0).bucket is OutcomeBucket.RUG
+
+
+async def test_store_is_safe_from_a_worker_thread():
+    """Regression (2026-07-15 droplet journal): the scanner runs
+    retrain_if_due via asyncio.to_thread, so this store — created on the
+    event-loop thread — is read AND written from a worker thread. The old
+    check_same_thread connection made every scheduled retrain die with
+    'SQLite objects created in a thread can only be used in that same
+    thread', so the classifier never trained once in production. The store
+    is now lock-serialized and thread-safe."""
+    import asyncio
+    store = LearningStore(":memory:", now_func=lambda: NOW)
+    # Cross-thread read (the first statement retrain_if_due executes).
+    assert await asyncio.to_thread(store.resolved_count) == 0
+    # Cross-thread write, idempotent against a main-thread write.
+    cid = store.record_detection(TOKEN)
+    assert await asyncio.to_thread(store.record_detection, TOKEN) == cid
+    # Composite method whose helpers nest inside the lock (RLock required).
+    record = await asyncio.to_thread(store.get_record, cid)
+    assert record is not None and record.token.address == TOKEN.address
