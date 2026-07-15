@@ -347,6 +347,23 @@ class Storage:
         return TokenIdentity(chain=row["chain"], address=row["address"],
                              symbol=row["symbol"], name=row["name"])
 
+    def token_first_seen(self, token: TokenIdentity) -> datetime | None:
+        """When the bot FIRST recorded this token — a known lower bound on the
+        coin's age (a token tracked for 3 days is at least 3 days old, whatever
+        its current deepest pool's creation time says). ``None`` for a token
+        never seen before or an unparseable timestamp (Rule 8: an unknown age
+        stays unknown, it never becomes zero)."""
+        row = self._conn.execute(
+            "SELECT first_seen FROM tokens WHERE chain = ? AND address = ?",
+            (token.chain, token.address),
+        ).fetchone()
+        if row is None or not row["first_seen"]:
+            return None
+        try:
+            return datetime.fromisoformat(row["first_seen"])
+        except ValueError:
+            return None
+
     def table_counts(self) -> dict:
         """Cheap DB totals for the /status command (Project 2)."""
         def count(sql: str) -> int:

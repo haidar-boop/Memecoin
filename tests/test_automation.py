@@ -249,7 +249,7 @@ async def test_declining_score_suppresses_the_weak_opportunity_tier():
     score_drop_review flagged it as declining."""
     rules = AutomationRules(
         # Forces the WEAK "early_opportunity" fallback instead of the strict
-        # strong_candidate tier (fixture liquidity is 90k) — matching the
+        # strong_candidate tier (fixture liquidity is 45k) — matching the
         # real coin, which never cleared the strict bar either.
         AlertThresholds(strong_candidate_min_liquidity_usd=100_000.0),
         AlertEngineSettings(), now_func=lambda: NOW)
@@ -695,6 +695,53 @@ async def test_old_pool_still_gets_protective_alerts():
     assert not (types & _BUY_SIDE_ALERT_TYPES)
 
 
+async def test_old_token_with_fresh_pool_still_suppressed():
+    """The gate uses the LARGER of pool age and tracked age: a coin the bot
+    first saw 3 days ago that migrates to a brand-new pool is NOT a fresh
+    find, even though its deepest pair is 2 hours old (review finding)."""
+    result = await pipeline_result(
+        pair=make_pair(pair_created_at=NOW - timedelta(hours=2)))
+    types = {e.alert_type for e in make_rules().evaluate(
+        result, token_first_seen=NOW - timedelta(days=3))}
+    assert not (types & _BUY_SIDE_ALERT_TYPES)
+    # A first look (no first_seen) with the same fresh pool sends normally.
+    types = {e.alert_type for e in make_rules().evaluate(result)}
+    assert types & _BUY_SIDE_ALERT_TYPES
+
+
+async def test_suppression_is_logged_once_and_quiet_pass_is_silent(caplog):
+    """Rule 13: a suppressed pitch leaves one log trace naming the gate and
+    values — but the scanner's provisional probe (quiet=True) logs nothing,
+    or every suppressed coin would log identical lines twice per cycle."""
+    import logging as _logging
+    result = await pipeline_result(pair=make_pair(market_cap=400_000.0))
+    with caplog.at_level(_logging.INFO, logger="meme_intelligence.alerts.rules"):
+        make_rules().evaluate(result, quiet=True)
+        assert not caplog.records                      # provisional pass: silent
+        make_rules().evaluate(result)
+    messages = [r.getMessage() for r in caplog.records]
+    assert len(messages) == 1                          # real pass: exactly one line
+    # The reason names ONLY the ceiling that tripped, with real values —
+    # never a disabled "max 0" ceiling (review finding).
+    assert "market cap $400,000 vs max $100,000" in messages[0]
+    assert "liquidity" not in messages[0]
+
+
+def test_format_age_boundaries():
+    """Ages are floored to display precision: never '60m' (that is '1h'-land),
+    never a green 'Pool age 24h' on a pool that passed the 24h gate by two
+    minutes, and the h->d switch is consistent at exactly 48h."""
+    from meme_intelligence.alerts.notification_engine import _format_age
+    assert _format_age(59.9 / 60.0) == "59m"     # not "60m"
+    assert _format_age(0.5) == "30m"
+    assert _format_age(1.0) == "1h"
+    assert _format_age(3.55) == "3.5h"
+    assert _format_age(23.96) == "23.9h"         # not "24h" under a 24h gate
+    assert _format_age(47.99) == "47.9h"
+    assert _format_age(48.0) == "2d"
+    assert _format_age(60.0) == "2.5d"
+
+
 def test_negative_age_gate_rejected():
     with pytest.raises(ConfigurationError, match="opportunity_max_age_hours"):
         AlertThresholds(opportunity_max_age_hours=-1.0)
@@ -711,33 +758,42 @@ def test_negative_ceiling_rejected():
         AlertThresholds(opportunity_max_liquidity_usd=-1.0)
 
 
-def test_floor_above_ceiling_yields_to_the_ceiling():
+def test_floor_above_ceiling_yields_to_the_ceiling(caplog):
     """A floor above the ceiling used to raise at startup — but with the
     ceilings now ON by default, a stale .env floor line above $50k/$100k
     would have crash-looped the droplet on a plain `git pull` deploy and
     killed the protective alerts too. The conflicting FLOOR is disabled
-    (with a logged warning) so the service stays up and the operator's
-    newer ceiling directive wins."""
-    thresholds = AlertThresholds(opportunity_min_liquidity_usd=200_000.0,
-                                 opportunity_max_liquidity_usd=100_000.0)
+    with a logged warning (asserted — the 'loud' half of the contract is
+    part of the design) and the note is kept on ``config_notes`` so
+    __main__ can re-emit it once real log handlers exist."""
+    import logging as _logging
+    with caplog.at_level(_logging.WARNING, logger="meme_intelligence.config.settings"):
+        thresholds = AlertThresholds(opportunity_min_liquidity_usd=200_000.0,
+                                     opportunity_max_liquidity_usd=100_000.0)
     assert thresholds.opportunity_min_liquidity_usd == 0.0   # floor yielded
     assert thresholds.opportunity_max_liquidity_usd == 100_000.0
-    # Same rule for the market-cap pair.
-    thresholds = AlertThresholds(opportunity_min_market_cap_usd=500_000.0)
+    assert any("floor is DISABLED" in r.message for r in caplog.records)
+    assert any("floor is DISABLED" in note for note in thresholds.config_notes)
+    # Same rule for the market-cap pair, and EQUALITY counts as a conflict
+    # (floor == ceiling would mean "only coins at exactly $X").
+    thresholds = AlertThresholds(opportunity_min_market_cap_usd=100_000.0)
     assert thresholds.opportunity_min_market_cap_usd == 0.0  # default cap is 100k
-    # A coherent floor-under-ceiling pair is untouched.
+    # A coherent floor-under-ceiling pair is untouched and produces no notes.
     ok = AlertThresholds(opportunity_min_liquidity_usd=10_000.0)
     assert ok.opportunity_min_liquidity_usd == 10_000.0
+    assert ok.config_notes == ()
 
 
 def test_ceiling_below_strong_candidate_floor_warns_but_boots(caplog):
-    """A liquidity ceiling under the strong-candidate depth floor makes HIGH
-    buy-side tiers unreachable — that mistake must be loudly visible at
-    startup, but never a crash (the seatbelt keeps running)."""
+    """A liquidity ceiling at or under the strong-candidate depth floor makes
+    HIGH buy-side tiers unreachable — that mistake must be loudly visible at
+    startup, but never a crash (the seatbelt keeps running). Equality is
+    included: ceiling == floor leaves only coins at exactly $X eligible."""
     import logging as _logging
     with caplog.at_level(_logging.WARNING, logger="meme_intelligence.config.settings"):
         AlertThresholds(opportunity_max_liquidity_usd=20_000.0)
-    assert any("HIGH buy-side alert" in r.message for r in caplog.records)
+        AlertThresholds(opportunity_max_liquidity_usd=25_000.0)  # == default floor
+    assert sum("HIGH buy-side alert" in r.message for r in caplog.records) == 2
 
 
 async def test_unknown_liquidity_is_blocked_as_untradeable():

@@ -63,6 +63,7 @@ from meme_intelligence.scanners.launch_monitor import (
 from meme_intelligence.workflow.pipeline import PipelineResult, ResearchPipeline
 from meme_intelligence.workflow.watchlist_review import (
     TIER_FOR_CLASSIFICATION as _TIER_FOR_CLASSIFICATION,
+    stale_watchlist_reason,
 )
 
 # Alert types whose evidence rests on market data and therefore get
@@ -648,6 +649,12 @@ class ContinuousScanner:
         # token's first-ever look. Read BEFORE this run's snapshot is
         # recorded below, so a first look can never read as "below peak."
         peak_score = self._storage.peak_score(token)
+        # When the bot FIRST saw this token — a lower bound on the coin's age
+        # for the freshness gate (a tracked-for-3-days coin migrating to a
+        # brand-new pool is not a fresh find). Read BEFORE this run's
+        # snapshot/upsert so a genuine first look stays None (review finding:
+        # pool age alone let old coins with new pools through the 24h gate).
+        first_seen = self._storage.token_first_seen(token)
 
         # Free deterministic screens + AI verification of gate-passing
         # opportunities (Part 32.5 Section 8: deep analysis only after
@@ -671,7 +678,8 @@ class ContinuousScanner:
         ai_inconclusive = self._ai_verified.get(verify_key, False)
         deterministic_veto: str | None = None
         if not result.security.is_destructive:
-            provisional = self._rules.evaluate(result, previous_score=previous_score)
+            provisional = self._rules.evaluate(result, previous_score=previous_score,
+                                               token_first_seen=first_seen, quiet=True)
             fires_buy_side = any(e.alert_type in _BUY_SIDE_ALERT_TYPES for e in provisional)
             fires_high_tier = any(
                 e.alert_type in ("high_priority_opportunity", "strong_candidate")
@@ -765,7 +773,8 @@ class ContinuousScanner:
                                       peak_score=peak_score,
                                       ai_verification_inconclusive=ai_inconclusive,
                                       deterministic_risk_veto=deterministic_veto,
-                                      operator_interest=interest)
+                                      operator_interest=interest,
+                                      token_first_seen=first_seen)
         if result.ai_judgment is not None:
             events = [self._annotate_with_ai(event, result.ai_judgment)
                       for event in events]
@@ -1125,6 +1134,20 @@ class ContinuousScanner:
                 continue  # analyzed moments ago this cycle; nothing new to learn
             if entry.tier is WatchlistTier.TIER_3_RESEARCH_ONLY:
                 continue  # research-only entries wait for the daily routine
+            # Staleness door (handoff Part 14): a coin that has sat on the
+            # watchlist past the age cap without graduating is archived
+            # BEFORE any provider call is spent on it — the freshness gate
+            # already guarantees its buy-side alerts could never send, so
+            # rechecking it is pure API burn. Holdings are exempt.
+            stale = stale_watchlist_reason(
+                entry,
+                max_age_days=self._settings.workflow.watchlist_max_age_days,
+                now=self._now(), holding=self._storage.is_holding(entry.token))
+            if stale is not None:
+                self._storage.archive(entry.token, stale)
+                self._logger.info("watchlist entry %s archived: %s",
+                                  entry.token.address, stale)
+                continue
             # Fetch via get_token_pairs, which RAISES on a provider outage,
             # rather than get_best_pair, which collapses "all providers down"
             # into the same None as "token has no pairs" (bug-hunt finding:

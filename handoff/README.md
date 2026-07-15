@@ -10,7 +10,7 @@ ceiling, decline/peak-decline suppression, honest re-alert framing, the
 smart-wallet data clock + reputation connector, and /wallets — and it runs
 24/7 on the operator's droplet sending Telegram alerts and executing
 operator-tapped buy/dump trades from a dedicated low-balance wallet
-(**never auto-trading**). Branch: **`claude/ceiling-and-boost`** (supersedes
+(**never auto-trading**). Branch: **`claude/bot-owners-manual-0a16e5`** (supersedes
 `claude/memecoin-onboarding-yrvjbg`).
 
 ## Read in this order

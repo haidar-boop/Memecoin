@@ -58,7 +58,7 @@ from meme_intelligence.collectors.security_data import GoPlusClient
 from meme_intelligence.config.settings import Settings, get_settings
 from meme_intelligence.core.cache import TTLCache
 from meme_intelligence.core.errors import CollectorError, InsufficientDataError
-from meme_intelligence.core.logging_setup import setup_logging
+from meme_intelligence.core.logging_setup import get_logger, setup_logging
 from meme_intelligence.core.models import DexPair
 from meme_intelligence.core.rate_limiter import RateLimiter
 from meme_intelligence.scanners.discovery import DiscoveryEngine, scan_new_pools
@@ -764,6 +764,7 @@ async def _cmd_watchlist(args, settings) -> int:
                     changes = await review_entries(
                         storage, service, pipeline,
                         limit=settings.workflow.watchlist_review_limit,
+                        max_age_days=settings.workflow.watchlist_max_age_days,
                     )
             finally:
                 if jupiter_client is not None:
@@ -1130,6 +1131,11 @@ async def _cmd_monitor(args, settings) -> int:
 async def _run(args: argparse.Namespace) -> int:
     settings = get_settings()
     setup_logging(settings.log_level, settings.log_dir)
+    # Config warnings (e.g. a stale .env floor self-disabled against the
+    # ceiling) fired during get_settings(), BEFORE handlers existed — re-emit
+    # them now so they reach the rotating log file, not just bare stderr.
+    for note in getattr(settings.alerts, "config_notes", ()):
+        get_logger("config").warning(note)
     handler = {
         "search": _cmd_search,
         "token": _cmd_token,

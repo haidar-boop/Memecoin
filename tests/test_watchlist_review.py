@@ -189,3 +189,60 @@ async def test_on_result_callback_invoked():
             limit=5, on_result=callback,
         )
         assert seen == ["GOOD"]
+
+
+# ---- Watchlist staleness door (handoff Part 14, built 2026-07-14) -------------
+
+async def test_stale_entry_archived_without_market_call():
+    """A coin past the age cap is archived BEFORE any provider call is spent
+    on it — the freshness gate already guarantees its buy-side alerts could
+    never send, so rechecking it is pure API burn."""
+    tok = token("STALE")
+
+    class ExplodingMarket:
+        async def get_token_pairs(self, address, chain=None):
+            raise AssertionError("stale entry must not cost a market call")
+
+    # The storage clock is frozen 4 days before the review clock, so the
+    # entry reads as added 4 days ago — over the 3-day cap.
+    with Storage(":memory:", now_func=lambda: NOW - timedelta(days=4)) as storage:
+        storage.update_watchlist(tok, WatchlistTier.TIER_2_DEVELOPING, score=70.0)
+        changes = await review_entries(
+            storage, ExplodingMarket(), make_pipeline({}),
+            limit=5, max_age_days=3.0, now_func=lambda: NOW,
+        )
+        assert [c.change for c in changes] == ["archived"]
+        assert "staleness door" in changes[0].detail
+        assert not storage.get_watchlist()          # archived, no longer tracked
+        assert storage.get_watchlist(include_archived=True)  # history preserved
+
+
+async def test_fresh_entry_and_holdings_survive_the_staleness_door():
+    """Under the cap → reviewed normally; over the cap but HELD → exempt
+    (never auto-prune what the operator owns)."""
+    held = token("HELD")
+    with Storage(":memory:", now_func=lambda: NOW - timedelta(days=4)) as storage:
+        storage.update_watchlist(held, WatchlistTier.TIER_2_DEVELOPING, score=70.0)
+        storage.set_holding(held, note="operator bought")
+        changes = await review_entries(
+            storage,
+            FakeMarket({held.address: [make_pair(held)]}),
+            make_pipeline({held.address: clean_profile(held)}),
+            limit=5, max_age_days=3.0, now_func=lambda: NOW,
+        )
+        assert all(c.change != "archived" for c in changes)
+        assert storage.get_watchlist()               # still tracked
+
+
+async def test_staleness_door_zero_is_off():
+    tok = token("OLDIE")
+    with Storage(":memory:", now_func=lambda: NOW - timedelta(days=30)) as storage:
+        storage.update_watchlist(tok, WatchlistTier.TIER_2_DEVELOPING, score=70.0)
+        changes = await review_entries(
+            storage,
+            FakeMarket({tok.address: [make_pair(tok)]}),
+            make_pipeline({tok.address: clean_profile(tok)}),
+            limit=5, max_age_days=0.0, now_func=lambda: NOW,
+        )
+        assert all(c.change != "archived" for c in changes)
+        assert storage.get_watchlist()

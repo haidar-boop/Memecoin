@@ -9,6 +9,7 @@ flows through alert verification).
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Awaitable, Callable
 
 from meme_intelligence.core.enums import Classification, MarketRegime, WatchlistTier
@@ -29,6 +30,30 @@ TIER_FOR_CLASSIFICATION = {
 _logger = get_logger("workflow.watchlist_review")
 
 
+def stale_watchlist_reason(entry, *, max_age_days: float, now,
+                           holding: bool) -> str | None:
+    """The watchlist STALENESS DOOR (handoff Part 14, approved design).
+
+    Archive reason when ``entry`` has sat on the watchlist longer than
+    ``max_age_days``, else ``None``. The watchlist's only other exits are
+    death (<$500 liquidity), falling to Avoid, or pairs vanishing — a
+    mediocre "undead" coin otherwise lingers in the recheck rotation forever.
+    A simple age cap only, no clever conditions (Rule 21). Operator holdings
+    are exempt (``holding``) — never auto-prune what he owns. ``max_age_days``
+    0 = OFF. Archive is not delete: history/learning/reputation rows all
+    remain, and a truly revived coin re-enters via fresh discovery."""
+    if max_age_days <= 0.0 or holding:
+        return None
+    try:
+        age_days = (now - entry.added_at).total_seconds() / 86400.0
+    except Exception:  # noqa: BLE001 — a bad timestamp must never break the review
+        return None
+    if age_days <= max_age_days:
+        return None
+    return (f"watchlist staleness door: tracked {age_days:.1f}d "
+            f"(cap {max_age_days:g}d) without graduating")
+
+
 async def review_entries(
     storage: Storage,
     market_client,  # exposes get_token_pairs(token_address, chain=None)
@@ -39,9 +64,14 @@ async def review_entries(
     skip: frozenset[str] | set[str] = frozenset(),
     snapshot_source: str = "watchlist_review",
     on_result: Callable[[PipelineResult], Awaitable[None]] | None = None,
+    max_age_days: float = 0.0,
+    now_func: Callable[[], object] | None = None,
 ) -> list[WatchlistChange]:
     """Re-assess up to ``limit`` tracked tokens; returns every change made.
 
+    * Tokens past the staleness door (``max_age_days`` on the watchlist,
+      holdings exempt, 0 = off) are archived without spending a provider
+      call — see :func:`stale_watchlist_reason`.
     * Tokens whose trading pairs disappeared are archived (dead market).
     * Tokens re-assessed to Avoid are archived with the score recorded.
     * Everything else is re-tiered per its new classification; unchanged
@@ -50,6 +80,7 @@ async def review_entries(
     * ``skip`` (lowercased addresses) excludes tokens already analyzed in
       the same run — nothing new to learn seconds later (Rule 10).
     """
+    now = (now_func or (lambda: datetime.now(timezone.utc)))()
     changes: list[WatchlistChange] = []
     reviewed = 0
     # Least-recently-updated first: with the default tier/score ordering the
@@ -60,6 +91,12 @@ async def review_entries(
         if reviewed >= limit:
             break
         if entry.token.address.lower() in skip:
+            continue
+        stale = stale_watchlist_reason(
+            entry, max_age_days=max_age_days, now=now,
+            holding=storage.is_holding(entry.token))
+        if stale is not None:
+            changes.append(storage.archive(entry.token, stale))
             continue
 
         try:

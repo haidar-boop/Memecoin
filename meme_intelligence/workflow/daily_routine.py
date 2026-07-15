@@ -333,6 +333,7 @@ class DailyRoutine:
             skip=skip,
             snapshot_source="daily_routine",
             on_result=collect_risks,
+            max_age_days=self._settings.workflow.watchlist_max_age_days,
         )
         # Only surface meaningful movements; silent refreshes stay silent.
         report.watchlist_changes.extend(c for c in changes if c.change != "updated")

@@ -1588,9 +1588,78 @@ fixed in the same session:
 
 **Deploy note:** `load_dotenv` gives the FIRST occurrence of a key in
 `.env` precedence, so stale `MEMEINTEL_ALERTS_OPPORTUNITY_MAX_*` lines
-would silently override the new defaults — the deploy block therefore
-deletes any such lines before restarting. Suite after fixes: **878
-passing**.
+would silently override the new defaults — the update block sent to the
+operator (and now recorded in the owner's manual Part 1 deploy loop and
+OPERATIONS.md step 3b) deletes any such lines before restarting. Suite
+after fixes: **878 passing**.
+
+## 2026-07-14 (late evening) — Max-effort review of the ceiling/freshness change: all 15 findings fixed, staleness door built
+
+Operator ran `/code-review` + `/security-review` at max effort over the
+ceiling/freshness commit (a 25-agent-capped fleet: 10 finder angles, 1-vote
+adversarial verification, security pass), then said "fix all at once."
+Security review: **no vulnerabilities** (new checklist line renders only
+static text + a formatted number; suppression logic cannot be abused to
+elevate alerts or reach trading; log lines use lazy %-formatting with no
+secrets). Code review: 29 verified candidates merged to 15 findings — every
+one fixed in this batch:
+
+1. **Config warnings now reach the log file.** They fire during
+   `get_settings()`, before `setup_logging()` — previously lastResort
+   stderr only. Warnings are kept on `AlertThresholds.config_notes`
+   (non-field attribute) and `__main__._run` re-emits them once handlers
+   exist.
+2. **Deploy docs contradiction fixed.** The manual's Part 1 deploy loop and
+   README now point at `claude/bot-owners-manual-0a16e5` and include the
+   `sed -i '/MEMEINTEL_ALERTS_OPPORTUNITY_MAX/d' .env` stale-line cleanup
+   (`.env` FIRST-occurrence precedence); OPERATIONS.md gained deploy-checklist
+   step 3b (changed defaults vs stale .env lines) and its "fails loudly"
+   troubleshooting row now notes the floor/ceiling self-heal exception.
+3. **Coin age, not just pool age.** `_too_old` now takes the LARGER of pool
+   age and how long the bot has tracked the token (`tokens.first_seen`, new
+   `Storage.token_first_seen`, threaded from `_process_result`, read before
+   the run's snapshot so a first look stays None) — a week-old coin migrating
+   to a fresh pool no longer reads as a fresh find (Rule 8: tracked-for-3-days
+   is EVIDENCE of age, a known lower bound).
+4. **Suppression logging deduped + suppression work skipped when no buy-side
+   event fired.** The scanner's provisional evaluate passes `quiet=True`;
+   the classification chain (and its clock reads) only runs when a buy-side
+   alert actually exists.
+5. **Equality boundaries closed** (`<` → `<=`): floor == ceiling now counts
+   as a conflict (floor yields, warned); ceiling == strong-candidate depth
+   floor now warns (only exactly-$X coins could ever reach HIGH).
+6. **No None-format crash / no double clock read**: `_oversized`/`_too_old`
+   now RETURN their reason strings (computed once from the same values that
+   tripped), instead of evaluate() re-deriving them — this also fixed the
+   misleading "vs max 0" log when one ceiling is off.
+7. **`_format_age` floors to displayed precision** — never "60m", never a
+   green "Pool age 24h" on a pool that passed the gate by two minutes;
+   h→d switch consistent at 48h. Pinned by tests.
+8. **Reuse:** `_is_new_launch` now calls the shared `_hours_since`/
+   `_pool_age_hours` instead of re-implementing the subtraction; the wider
+   consolidation (seven age computations, three duration formatters across
+   modules) is DEFERRED — cross-module churn for cleanup is a Rule 3 risk
+   worth its own pass.
+9. **THE WATCHLIST STALENESS DOOR IS BUILT** (handoff Part 14, the approved
+   design, unchanged): `workflow.watchlist_max_age_days` (default 3,
+   `MEMEINTEL_WORKFLOW_WATCHLIST_MAX_AGE_DAYS`, 0 = off). Implemented once in
+   `watchlist_review.stale_watchlist_reason()`, used by BOTH the scanner
+   recheck and `review_entries` (daily routine / `watchlist --refresh`).
+   Stale coins are archived BEFORE any provider call is spent (the freshness
+   gate already guarantees their buy-side alerts could never send — rechecking
+   them was pure API burn). Holdings exempt; archive-not-delete.
+10. **Known, accepted:** with the 24h gate ON, the fully-verified
+    `high_priority_opportunity` tier is effectively retired (community data
+    takes days to appear; by then every coin is past the gate) —
+    `strong_candidate` is the operational HIGH tier. Consistent with the
+    operator's fresh-coins-only directive; revisit only if a fast community
+    source ever lands. Also accepted: the self-heal lives in `__post_init__`
+    where env-vs-default provenance is unknowable — an explicit floor loses
+    to the default ceiling; fine until thresholds become runtime-editable.
+
+Tests and docs updated throughout (stale comments, missing caplog assert on
+the self-heal warning, the manual's step-4 checklist enumeration + Part 2.12
+/ Part 13 / Part 14 staleness-door status). Suite: **884 passing**.
 
 ## Notable implementation choices (Rule 19)
 

@@ -13,15 +13,22 @@ through Telegram. **It never trades on its own — every real trade is a
 button the operator taps.** Wallet keys live only in the droplet `.env`,
 never in git or chat.
 
-**The branch that matters: `claude/ceiling-and-boost`.** The droplet pulls
-it. It supersedes `claude/memecoin-onboarding-yrvjbg`.
+**The branch that matters: `claude/bot-owners-manual-0a16e5`** (since
+2026-07-14 — it supersedes `claude/ceiling-and-boost`, which superseded
+`claude/memecoin-onboarding-yrvjbg`). The droplet pulls it.
 
 **Deploy loop (the only one you need):**
 ```bash
 cd ~/meme-intelligence
-git pull origin claude/ceiling-and-boost
+git fetch origin claude/bot-owners-manual-0a16e5
+git checkout claude/bot-owners-manual-0a16e5
+git pull origin claude/bot-owners-manual-0a16e5
+sed -i '/MEMEINTEL_ALERTS_OPPORTUNITY_MAX/d' .env
 sudo systemctl restart meme-intelligence
 ```
+(The `sed` line removes stale ceiling overrides: `.env` gives the FIRST
+occurrence of a key precedence, so a leftover `..._OPPORTUNITY_MAX_*` line
+would silently override the shipped defaults. Harmless when none exist.)
 
 **Read order for a new session:** this manual → `handoff/PROJECT_RULES.md`
 (the 21 mandatory engineering rules) → `handoff/OPERATOR.md` (who runs this
@@ -166,7 +173,7 @@ excellent and battle-tested (the seatbelt); the directional edge is thin and
 small-sample (the crystal ball). The bot's realistic job: filter out the
 thousands that die, hand over a slightly-better-than-even shot on survivors.
 
-## 2.12 APPROVED NEXT STEP (not yet built): the watchlist staleness door
+## 2.12 APPROVED NEXT STEP: the watchlist staleness door — **BUILT 2026-07-14 (evening)**
 Operator's own theory, confirmed in code: the watchlist has only three exit
 conditions (dead liquidity <$500, score falls to Avoid, pairs vanish) — a
 mediocre "undead" coin lingers forever, stays in the recheck rotation, and
@@ -363,7 +370,7 @@ Five modules: `controller.py` (24/7 loop), `pipeline.py` (shared per-token analy
 
 - `TIER_FOR_CLASSIFICATION` (watchlist_review.py): ELITE/STRONG → TIER_1_HIGH_PRIORITY, WATCHLIST → TIER_2_DEVELOPING, SPECULATIVE → TIER_3_RESEARCH_ONLY; AVOID has no tier.
 - Recheck every `workflow.watchlist_recheck_cycles` (10) cycles, up to `watchlist_review_limit` (10) entries, **least-recently-updated first** (bug fix: tier/score ordering starved everything below top-N forever). Tier-3 entries are skipped in the scanner (daily routine handles them).
-- **Three archive conditions**: (1) a SUCCESSFUL `get_token_pairs` call returns no pairs ("no active trading pairs remain") — provider outages raise and are skipped, never archived (a 2-failure blip once permanently archived healthy tokens; use `get_token_pairs`, not `get_best_pair`); (2) re-assessment falls to AVOID; (3) liquidity < `alert_engine.dead_liquidity_usd` (500) — a dead token also never re-enters the watchlist regardless of score. **NO staleness door exists yet** — approved as the next build.
+- **Three archive conditions**: (1) a SUCCESSFUL `get_token_pairs` call returns no pairs ("no active trading pairs remain") — provider outages raise and are skipped, never archived (a 2-failure blip once permanently archived healthy tokens; use `get_token_pairs`, not `get_best_pair`); (2) re-assessment falls to AVOID; (3) liquidity < `alert_engine.dead_liquidity_usd` (500) — a dead token also never re-enters the watchlist regardless of score. (4) the **staleness door** (built 2026-07-14 evening): ANY coin on the watchlist longer than `workflow.watchlist_max_age_days` (default 3, `MEMEINTEL_WORKFLOW_WATCHLIST_MAX_AGE_DAYS`, 0 = off) is archived BEFORE any provider call is spent on it; operator holdings exempt; archive-not-delete.
 
 ### Launch funnel & retries
 
@@ -408,7 +415,7 @@ Passive-only, behind `settings.smart_wallet.enabled`. Records GoPlus top holders
 1. **Dead token**: `_token_death_rule` short-circuits — returns only CRITICAL emergencies + the post-mortem, then interest-gates.
 2. **Hard suppression of ALL buy-side types** (`_BUY_SIDE_ALERT_TYPES` = the two HIGH tiers + early_opportunity, momentum, smart_money_accumulation) when any of: `deterministic_risk_veto` set (rug engine COMBINED score / firing risk alert / honeypot / earned mind p(rug) vote — never a single soft flag); `_untradeable` (liquidity OR mcap None/NaN/<=0 — missing counts as untradeable); `_oversized` (liquidity > `opportunity_max_liquidity_usd` or mcap > `opportunity_max_market_cap_usd`; defaults ON since 2026-07-14 at 50000/100000, 0 = OFF, unknown never trips it); `_too_old` (pool older than `opportunity_max_age_hours`, default 24h, 0 = OFF; unknown creation time never trips it — the checklist shows "Pool age: not verified" instead).
 3. **Weak-tier suppression** (`_DECLINE_SUPPRESSED_TYPES` = early_opportunity, momentum, smart_money_accumulation; strong tiers exempt): `_score_declining` (one-step drop >= 15) OR `_below_peak` (score >= `peak_decline_suppression_points` (15) below the token's all-time peak — closes the "collapsed coin creeps back +2-3/recheck for days" bug). First-ever look (`previous_score`/`peak_score` None) never suppresses.
-4. **Safety checklist** attached (never suppresses) to surviving buy-side alerts: sellable, mint authority, freeze authority, sell tax vs `checklist_sell_tax_max_percent` (15%), deployer honeypot history, liquidity vs `opportunity_min_liquidity_usd` comfort floor (0.0 = note only), market cap floor (only if set), top-wallet concentration note ("normal for a new launch" when pool younger than `checklist_new_launch_minutes` = 60). Icons pass ✅ / warn ⚠️ / note ℹ️ / unknown ❔; header "passed X/Y" counts only pass+warn.
+4. **Safety checklist** attached (never suppresses) to surviving buy-side alerts: sellable, mint authority, freeze authority, sell tax vs `checklist_sell_tax_max_percent` (15%), deployer honeypot history, liquidity vs `opportunity_min_liquidity_usd` comfort floor (0.0 = note only), market cap floor (only if set), pool age (✅ with the verified age; ℹ️ note when the freshness gate is off; ❔ "not verified" when the source reports no creation time), top-wallet concentration note ("normal for a new launch" when pool younger than `checklist_new_launch_minutes` = 60). Icons pass ✅ / warn ⚠️ / note ℹ️ / unknown ❔; header "passed X/Y" counts only pass+warn.
 5. **Interest gate** (`gate_events_by_interest`, enabled by `AlertEngineSettings.risk_alerts_require_interest=True`): if `operator_interest=False` and no HIGH `INTEREST_ALERT_TYPES` (`high_priority_opportunity`, `strong_candidate`) in the same batch, all `_PROTECTIVE_ALERT_TYPES` (emergency_review, risk_warning, score_drop_review, token_death, whale_exit, insider_risk, community_fake, security_change) demote to LOW with a "informational only" reason — below external sinks' min-priority, so the phone never buzzes.
 
 ### NotificationEngine (dispatch + cooldown)
@@ -739,8 +746,9 @@ All 17 subcommands live in `meme_intelligence/__main__.py` (`main()` → `_run()
 - **The smart-wallet reputation scores will stay empty for weeks** until the
   data clock and the outcome cron have overlapping history. This is honest
   behavior, not a bug — /wallets says so explicitly.
-- **The watchlist has no staleness door yet** (see Part 14). Until it ships,
-  mediocre "undead" coins linger in the recheck rotation indefinitely.
+- ~~The watchlist has no staleness door yet~~ **Built 2026-07-14 evening**
+  (see Part 14): coins age off the watchlist after 3 days (configurable,
+  holdings exempt, archive-not-delete).
 - **Test environment:** the dev container lacks numpy/solders/anthropic/
   joblib; the resulting failures are environmental (exact list in Part 12).
   On the droplet with full deps the suite is green.

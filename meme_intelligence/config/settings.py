@@ -273,30 +273,42 @@ class AlertThresholds:
         # is the newer instruction, and the floor's original job (0-liquidity
         # junk) is already covered by the untradeable hard block — so the
         # conflicting FLOOR yields (disabled, 0.0) with a loud warning.
+        # Equality counts as a conflict: floor == ceiling would mean "only
+        # coins at exactly $X" — never what anyone intends.
+        #
+        # These warnings fire during Settings construction, BEFORE the CLI has
+        # configured logging (review finding: they only reached Python's bare
+        # lastResort stderr, never the rotating log file). They are therefore
+        # also collected into ``self.config_notes`` so __main__ can re-emit
+        # them once real handlers exist.
+        notes: list[str] = []
         for floor, cap in (("opportunity_min_liquidity_usd", "opportunity_max_liquidity_usd"),
                            ("opportunity_min_market_cap_usd", "opportunity_max_market_cap_usd")):
             lo, hi = getattr(self, floor), getattr(self, cap)
-            if hi > 0.0 and lo > 0.0 and hi < lo:
-                logging.getLogger("meme_intelligence.config.settings").warning(
-                    "alert threshold '%s' (%s) is above the '%s' ceiling (%s): "
-                    "the floor is DISABLED so buy-side alerts keep flowing under "
-                    "the ceiling — remove the stale floor from .env to silence "
-                    "this warning", floor, lo, cap, hi)
+            if hi > 0.0 and lo > 0.0 and hi <= lo:
+                notes.append(
+                    f"alert threshold '{floor}' ({lo}) is at or above the "
+                    f"'{cap}' ceiling ({hi}): the floor is DISABLED so buy-side "
+                    "alerts keep flowing under the ceiling — remove the stale "
+                    "floor from .env to silence this warning")
                 object.__setattr__(self, floor, 0.0)
-        # A liquidity ceiling below the strong-candidate depth floor would make
-        # the HIGH alert tiers structurally unreachable (everything deep enough
-        # for HIGH is over the ceiling; everything under the ceiling demotes to
-        # MEDIUM) — on a HIGH-filtered phone that is permanent silence. Warn
-        # loudly rather than raise, for the same never-crash-the-seatbelt
-        # reason as above.
-        if 0.0 < self.opportunity_max_liquidity_usd < self.strong_candidate_min_liquidity_usd:
-            logging.getLogger("meme_intelligence.config.settings").warning(
-                "opportunity_max_liquidity_usd (%s) is below "
-                "strong_candidate_min_liquidity_usd (%s): no coin can ever earn "
+        # A liquidity ceiling at or below the strong-candidate depth floor
+        # makes the HIGH alert tiers structurally unreachable (deep enough for
+        # HIGH is over the ceiling; under the ceiling demotes to MEDIUM) — on
+        # a HIGH-filtered phone that is permanent silence. Warn loudly rather
+        # than raise, for the same never-crash-the-seatbelt reason as above.
+        if 0.0 < self.opportunity_max_liquidity_usd <= self.strong_candidate_min_liquidity_usd:
+            notes.append(
+                f"opportunity_max_liquidity_usd ({self.opportunity_max_liquidity_usd}) "
+                "is at or below strong_candidate_min_liquidity_usd "
+                f"({self.strong_candidate_min_liquidity_usd}): no coin can ever earn "
                 "a HIGH buy-side alert with this combination — raise the ceiling "
-                "or lower the strong-candidate depth floor",
-                self.opportunity_max_liquidity_usd,
-                self.strong_candidate_min_liquidity_usd)
+                "or lower the strong-candidate depth floor")
+        # Not a dataclass field (env cannot set it; asdict/replace unaffected).
+        object.__setattr__(self, "config_notes", tuple(notes))
+        logger = logging.getLogger("meme_intelligence.config.settings")
+        for note in notes:
+            logger.warning(note)
         _check_range("alert threshold 'checklist_sell_tax_max_percent'",
                      self.checklist_sell_tax_max_percent, 0.0, 100.0)
 
@@ -756,6 +768,17 @@ class WorkflowSettings:
     insufficient_data_min_coverage: float = 0.5     # below this = "too early to judge"
     insufficient_data_retry_minutes: float = 15.0   # wait this long before another look
     insufficient_data_max_age_minutes: float = 120.0  # give up once the pool itself is this old
+    # The watchlist STALENESS DOOR (Part 14 of the handoff — approved
+    # 2026-07-14, built with the freshness-gate fix batch): archive ANY coin
+    # after this many days on the watchlist, however its numbers wobble. The
+    # watchlist's only other exits are death, falling to Avoid, or pairs
+    # vanishing — without an age cap a mediocre "undead" coin lingers in the
+    # recheck rotation forever, burning provider budget on alerts the
+    # freshness gate guarantees can never send. Operator holdings (/holding)
+    # are exempt; archived is not deleted (history, learning, and reputation
+    # all keep the rows; a truly revived coin re-enters via fresh discovery).
+    # ON by default per the agreed design; 0 = OFF.
+    watchlist_max_age_days: float = 3.0
 
     def __post_init__(self) -> None:
         if not self.networks.strip():
@@ -776,6 +799,10 @@ class WorkflowSettings:
             raise ConfigurationError(
                 "insufficient_data_max_age_minutes must be >= "
                 "insufficient_data_retry_minutes (must allow at least one retry)")
+        age_cap = self.watchlist_max_age_days
+        if not math.isfinite(age_cap) or age_cap < 0:
+            raise ConfigurationError(
+                f"workflow setting 'watchlist_max_age_days' must be >= 0, got {age_cap}")
 
     @property
     def network_list(self) -> list[str]:
