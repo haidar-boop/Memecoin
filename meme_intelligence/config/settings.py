@@ -1242,6 +1242,21 @@ class LearningSettings:
     drift_accuracy_floor: float = 0.40       # ensemble accuracy below -> full retrain
     drift_min_samples: int = 30              # graded finals needed before drift can fire
     scaler_refit_every_n: int = 500          # re-fit StandardScaler cadence
+    # Training/clustering set cap (2026-07-15 incident): _rebuild() and
+    # refresh_archetypes() used to pull EVERY resolved coin ever seen,
+    # unbounded — at 24,884 coins a single full rebuild (scaler + FAISS
+    # index + 480-tree LightGBM + HDBSCAN archetype clustering, ALL over the
+    # entire history) ran the 1-vCPU/1GB droplet at ~100% CPU for 2.5+
+    # minutes and was memory-killed before it could finish — every restart
+    # re-triggered the same unbounded rebuild, a self-sustaining crash loop
+    # (Telegram going silent was the first visible symptom). The bot will
+    # only keep growing this table, so a hard cap is permanent, not a
+    # one-time patch. Newest-first (Storage.resolved_coin_ids orders by
+    # updated_at DESC), so the cap trades the OLDEST history for a bounded,
+    # safe cost — and recent coins are more representative of current
+    # meme-coin market conditions anyway. 0 = unlimited (tests only; never
+    # safe on a 1GB droplet at scale).
+    max_training_records: int = 5000
 
     # Trajectory capture cadence — Section 1 (drives external snapshot callers)
     fast_snapshot_seconds: int = 60          # snapshot cadence in the first window
@@ -1304,6 +1319,10 @@ class LearningSettings:
                 f"{self.veto_metrics_ttl_seconds}")
         if not self.horizon_hours():
             raise ConfigurationError("learning: horizons_hours must list at least one horizon")
+        if self.max_training_records < 0:
+            raise ConfigurationError(
+                "learning max_training_records must be >= 0 (0 = unlimited), got "
+                f"{self.max_training_records}")
 
     def horizon_hours(self) -> tuple[float, ...]:
         """Parse ``horizons_hours`` into an ordered tuple of positive floats."""

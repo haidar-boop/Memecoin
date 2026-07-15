@@ -1880,6 +1880,54 @@ Expected droplet behavior after deploy: the 8,690 backlog drains over
 roughly 5-6 hours of recheck passes while Telegram stays responsive
 throughout; /mind answers in seconds. Suite: **904 passing**.
 
+## 2026-07-15 (later) — The real crash-loop cause: unbounded retrain, not just unsynchronized state
+
+The bounded-drain fix didn't hold: the operator reported /status uptime
+stuck at "2 min" on every check, replying exactly ~2 minutes after being
+asked — a live, ongoing crash loop, confirmed by `journalctl`: `Main
+process exited, code=killed, status=9/KILL`, `Consumed 2min 37s CPU
+time`, then an immediate restart, retraining from scratch again, every
+single boot — with NO drift warning ever logged, meaning the "due"
+condition was the coin-count/first-train trigger, not drift, on EVERY
+boot.
+
+**Root cause:** `_rebuild()` and `refresh_archetypes()` pulled ALL
+resolved coins ever seen — no cap, growing with the bot's lifetime.
+2026-07-14 night's streaming fix (bf8fbf7) fixed the transient
+snapshot-materialization memory peak and the store-lock starvation, but
+NOT the cost of the rebuild ITSELF at full scale: retraining a 480-tree
+classifier and re-clustering (HDBSCAN) 24,884 records is a genuinely
+heavy, ~100%-CPU, multi-minute job on a 1-vCPU/1GB droplet — heavy enough
+that the process was very likely being killed mid-archetype-fit, BEFORE
+`persist()` ever ran (no "rebuild complete" line, no "failed to persist"
+line, and no drift-warning line ever appeared in the logs — consistent
+with death happening between the classifier-trained log line and the
+end of `_rebuild()`). Because nothing survived to disk, `last_retrain_
+count` stayed frozen at its old value and the very next boot saw the
+exact same "due" condition and repeated the entire expensive rebuild —
+self-sustaining, and only getting heavier as the bot resolves more coins
+over its lifetime.
+
+Reproduced the persistence mechanism itself in isolation first (a
+disk-backed LearningStore round-tripping save -> fresh-process load ->
+retrain_if_due correctly declining) to rule out a simple save/load bug
+before concluding the cost of the unbounded rebuild was the real
+culprit — the isolated mechanism worked correctly at small scale, which
+is what pointed at scale/cost rather than a logic bug.
+
+**Fix:** `LearningSettings.max_training_records` (default 5000, 0 =
+unlimited) caps `_rebuild()`/`refresh_archetypes()` to the newest N
+resolved coins (`Storage.resolved_coin_ids` already orders newest-first —
+built for the streaming fix, reused here, Rule 18). Retrain SCHEDULING
+(`_last_retrain_count`) still tracks the TRUE total resolved count, only
+the training/clustering DATA is capped, so `retrain_every_n` pacing is
+unaffected. Recency bias is a feature, not just a safety valve: recent
+coins better reflect current meme-coin market conditions than the bot's
+entire history. Permanent fix, not a one-time patch — the resolved-coin
+table will only keep growing.
+
+Suite: **908 passing**.
+
 ## Notable implementation choices (Rule 19)
 
 - **Python 3.11 + asyncio** over Node.js (both allowed by spec): the

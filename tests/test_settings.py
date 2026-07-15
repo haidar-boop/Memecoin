@@ -327,6 +327,22 @@ def test_learning_veto_env_overrides():
     assert settings.learning.veto_min_samples == 25
 
 
+def test_learning_max_training_records_defaults_bounded_and_validates():
+    """2026-07-15 OOM crash-loop: an unbounded retrain over the bot's full
+    lifetime history ran a 1GB droplet out of memory. The cap must default
+    to a real, safe bound (not 0/unlimited) and reject negative values;
+    0 is the explicit unlimited escape hatch."""
+    from meme_intelligence.config.settings import LearningSettings
+
+    assert LearningSettings().max_training_records == 5000
+    with pytest.raises(ConfigurationError, match="max_training_records"):
+        LearningSettings(max_training_records=-1)
+    assert LearningSettings(max_training_records=0).max_training_records == 0
+    settings = Settings.from_env(
+        env={"MEMEINTEL_LEARNING_MAX_TRAINING_RECORDS": "2000"})
+    assert settings.learning.max_training_records == 2000
+
+
 def test_liquidity_probe_rejects_bad_sell_confirm_fraction():
     with pytest.raises(ConfigurationError, match="sell_confirm_fraction"):
         LiquidityProbeSettings(sell_confirm_fraction=0.0)

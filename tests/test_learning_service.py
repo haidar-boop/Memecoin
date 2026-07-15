@@ -409,3 +409,51 @@ async def test_retrain_if_due_runs_in_a_worker_thread():
     # The streamed rebuild (2026-07-15 memory fix) must fill the analog
     # index with every resolved coin, exactly like the old bulk path did.
     assert service._analog.size == 60
+
+
+# ---- Training-set size cap (2026-07-15 OOM crash-loop) ---------------------
+
+def test_rebuild_respects_max_training_records():
+    """The 2026-07-15 incident: _rebuild() pulled EVERY resolved coin ever
+    seen, unbounded — at 24,884 coins a single full rebuild (retrain +
+    HDBSCAN over the whole history) ran the 1-vCPU/1GB droplet at ~100% CPU
+    for 2.5+ minutes and was memory-killed before persist() ever ran, so
+    every restart re-triggered the same unbounded rebuild forever. The cap
+    bounds the analog index (and therefore the training/clustering set) to
+    the newest N resolved coins, regardless of how much history exists."""
+    # Cap set above min_train_samples (20) so the classifier still trains --
+    # this test is about the CAP, not about starving the cold-start floor.
+    env = dict(_ENV, MEMEINTEL_LEARNING_MAX_TRAINING_RECORDS="25")
+    settings = Settings.from_env(env=env)
+    store = LearningStore(":memory:", now_func=lambda: NOW)
+    service = LearningService(settings, store=store, now_func=lambda: NOW)
+    _seed(service, n_each=15)  # 30 resolved coins, past the cap of 25
+    assert store.resolved_count() == 30
+    assert service.retrain_if_due() is True
+    assert service._analog.size == 25                # capped, not 30
+    assert service._classifier.is_ready
+    # Book-keeping still tracks the TRUE total, not the capped training
+    # slice -- retrain_every_n scheduling must not think fewer coins have
+    # resolved than actually have.
+    assert service._last_retrain_count == 30
+
+
+def test_refresh_archetypes_respects_max_training_records():
+    env = dict(_ENV, MEMEINTEL_LEARNING_MAX_TRAINING_RECORDS="25")
+    settings = Settings.from_env(env=env)
+    store = LearningStore(":memory:", now_func=lambda: NOW)
+    service = LearningService(settings, store=store, now_func=lambda: NOW)
+    _seed(service, n_each=15)
+    service.retrain_if_due()
+    n = service.refresh_archetypes()
+    assert n <= 25
+
+
+def test_max_training_records_zero_is_unlimited():
+    env = dict(_ENV, MEMEINTEL_LEARNING_MAX_TRAINING_RECORDS="0")
+    settings = Settings.from_env(env=env)
+    store = LearningStore(":memory:", now_func=lambda: NOW)
+    service = LearningService(settings, store=store, now_func=lambda: NOW)
+    _seed(service, n_each=15)  # 30 resolved
+    service.retrain_if_due()
+    assert service._analog.size == 30                # nothing dropped

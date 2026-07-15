@@ -526,11 +526,22 @@ class LearningService:
         # extraction pass yields the GIL every few hundred coins so the
         # event-loop thread (Telegram, trade buttons, scanning) stays
         # responsive while this runs in the retrain worker.
+        #
+        # Streaming alone was not enough: even one-at-a-time, a rebuild over
+        # ALL resolved coins still trains a 480-tree classifier and
+        # re-clusters (HDBSCAN) the ENTIRE history every time it fires — at
+        # 24,884 coins that alone ran the droplet at ~100% CPU for 2.5+
+        # minutes and crossed the memory cap regardless of the streaming fix
+        # (same incident). ``max_training_records`` (0 = unlimited) bounds
+        # the pull to the newest N resolved coins, capping the cost of every
+        # rebuild permanently rather than letting it grow with the bot's
+        # lifetime history.
+        limit = self._ls.max_training_records or None
         vectors: list[np.ndarray] = []
         buckets: list = []
         times: list = []
         entries: list[AnalogEntry] = []
-        for i, record in enumerate(self._store.iter_resolved_records()):
+        for i, record in enumerate(self._store.iter_resolved_records(limit=limit)):
             if not record.final_bucket.is_resolved:
                 continue
             vectors.append(self._extractor.extract(record.snapshots).vector)
@@ -566,11 +577,14 @@ class LearningService:
         """Re-cluster the fingerprint set so new coin types get named (Section 7)."""
         if not self._scaler.is_fitted:
             return 0
-        # Same streaming discipline as _rebuild: never hold every record's
-        # snapshot series in memory at once.
+        # Same streaming discipline AND the same training-set cap as
+        # _rebuild (see its docstring) — HDBSCAN over the full history is
+        # exactly the kind of unbounded-with-lifetime-growth cost that
+        # caused the 2026-07-15 crash loop.
+        limit = self._ls.max_training_records or None
         vectors: list[np.ndarray] = []
         buckets: list = []
-        for i, record in enumerate(self._store.iter_resolved_records()):
+        for i, record in enumerate(self._store.iter_resolved_records(limit=limit)):
             vectors.append(self._extractor.extract(record.snapshots).vector)
             buckets.append(record.final_bucket)
             if i % 250 == 249:
