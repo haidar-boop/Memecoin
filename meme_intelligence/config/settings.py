@@ -841,6 +841,24 @@ class WalletIntelSettings:
     dominant_buyer_volume_fraction: float = 0.60  # one wallet above = artificial demand
     min_buy_volume_for_dominance_usd: float = 500.0  # below this, dominance is meaningless dust
     enable_in_monitor: bool = False       # wallet calls in the continuous scanner
+    # Credit-gating (2026-07-15, DECISIONS_LOG 2026-07-11 "re-enable criteria"):
+    # a wallet lookup spends real, metered Helius/Birdeye credits. Wired
+    # unconditionally into the pipeline, it used to run on EVERY analyzed
+    # Solana token in the 24/7 monitor — that exhausted the free Helius tier
+    # within ~3 days and 429'd the trading wallet's own balance reads
+    # alongside it (the incident that got this whole layer turned off). The
+    # pipeline now only spends a lookup on a candidate that could plausibly
+    # still earn a buy-side alert: not destructive, and clearing this
+    # minimum security score (reuses ``SecurityAnalyzer``'s own bands — 50 is
+    # "Moderate Risk" or better; a coin scoring worse than that will never
+    # clear an alert gate regardless of what its wallets are doing). Combined
+    # with the buy-side ceiling/freshness-gate/untradeable checks
+    # (AlertThresholds — applied in the pipeline, not duplicated here), the
+    # original plan's estimated 5-10x reduction should hold. Tokens the
+    # operator holds (`/holding`) always get checked regardless of this gate
+    # (`ResearchPipeline.analyze_pair(..., force_wallet_check=True)`) — a
+    # coin he owns needs whale-exit visibility whatever its size or age.
+    credit_gate_min_security_score: float = 50.0
 
     def __post_init__(self) -> None:
         for name in ("whale_min_percent", "risk_whale_percent", "top_holders_limit",
@@ -856,6 +874,8 @@ class WalletIntelSettings:
             raise ConfigurationError(
                 "wallet setting 'min_buy_volume_for_dominance_usd' must be positive, "
                 f"got {self.min_buy_volume_for_dominance_usd}")
+        _check_range("wallet setting 'credit_gate_min_security_score'",
+                     self.credit_gate_min_security_score, 0.0, 100.0)
 
 
 @dataclass(frozen=True)

@@ -433,7 +433,11 @@ class ContinuousScanner:
         pair = await self._market.get_best_pair(address, chain=chain)
         if pair is None:
             return None
-        return await self._pipeline.analyze_pair(pair, regime=self._regime)
+        # A manual, operator-initiated lookup (rate-limited to one at a time
+        # plus a 60s result cache) is exactly the deliberate, rare spend the
+        # credit gate is not meant to block — always check wallets here.
+        return await self._pipeline.analyze_pair(
+            pair, regime=self._regime, force_wallet_check=True)
 
     async def run(self, max_cycles: int | None = None) -> list[CycleStats]:
         """Run scan cycles until stopped or ``max_cycles`` is reached."""
@@ -529,7 +533,9 @@ class ContinuousScanner:
             if key in self._seen or key in self._retry_pending:
                 continue
 
-            result = await self._pipeline.analyze_pair(candidate.pair, regime=self._regime)
+            result = await self._pipeline.analyze_pair(
+                candidate.pair, regime=self._regime,
+                force_wallet_check=self._storage.is_holding(token))
             if result is None:
                 # Security data not indexed yet — do NOT mark as seen: a
                 # never-actually-analyzed token must stay a live candidate
@@ -616,7 +622,8 @@ class ContinuousScanner:
                 continue
 
             stats.candidates += 1
-            result = await self._pipeline.analyze_pair(pair, regime=self._regime)
+            result = await self._pipeline.analyze_pair(
+                pair, regime=self._regime, force_wallet_check=self._storage.is_holding(token))
             if result is None:
                 # Security data not indexed yet — retry rather than losing
                 # the candidate (fresh launches lag the security providers).
@@ -1168,7 +1175,9 @@ class ContinuousScanner:
                 self._storage.archive(entry.token, "no active trading pairs remain")
                 continue
             pair = max(pairs, key=lambda p: p.liquidity_usd or 0.0)
-            result = await self._pipeline.analyze_pair(pair, regime=self._regime)
+            result = await self._pipeline.analyze_pair(
+                pair, regime=self._regime,
+                force_wallet_check=self._storage.is_holding(entry.token))
             if result is None:
                 continue
             rechecked += 1
@@ -1267,7 +1276,9 @@ class ContinuousScanner:
                 self._seen.add(key)  # pool is gone — nothing left to wait for
                 continue
             pair = max(pairs, key=lambda p: p.liquidity_usd or 0.0)
-            result = await self._pipeline.analyze_pair(pair, regime=self._regime)
+            result = await self._pipeline.analyze_pair(
+                pair, regime=self._regime,
+                force_wallet_check=self._storage.is_holding(pair.base_token))
             if result is None:
                 # Security data still not indexed — re-pace (do NOT leave it
                 # due, which re-hammered the failing provider every cycle).

@@ -192,6 +192,18 @@ def test_wallet_dominance_usd_now_validated():
         WalletIntelSettings(min_buy_volume_for_dominance_usd=-1.0)
 
 
+def test_wallet_credit_gate_min_security_score_default_and_range():
+    from meme_intelligence.config.settings import Settings, WalletIntelSettings
+    assert WalletIntelSettings().credit_gate_min_security_score == 50.0
+    with pytest.raises(ConfigurationError):
+        WalletIntelSettings(credit_gate_min_security_score=-1.0)
+    with pytest.raises(ConfigurationError):
+        WalletIntelSettings(credit_gate_min_security_score=101.0)
+    settings = Settings.from_env(
+        env={"MEMEINTEL_WALLET_CREDIT_GATE_MIN_SECURITY_SCORE": "70"})
+    assert settings.wallet.credit_gate_min_security_score == 70.0
+
+
 def test_provider_cooldown_now_validated():
     from meme_intelligence.config.settings import ProviderSettings
     with pytest.raises(ConfigurationError):

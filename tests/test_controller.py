@@ -926,6 +926,48 @@ async def test_metered_services_run_when_opted_in():
         assert ai.judge_calls == 1
 
 
+async def test_credit_gate_skips_wallet_lookup_on_oversized_candidate():
+    """End-to-end through the real scanner (not just the pipeline unit
+    tests): a coin already past the buy-side ceiling can never earn an
+    opportunity alert, so the wallet credit gate skips it even with
+    enable_in_monitor on."""
+    oversized = _dc.replace(make_pair(), liquidity_usd=2_000_000.0, market_cap=5_000_000.0)
+    wallet = RecordingWalletService()
+    settings = Settings.from_env(env={
+        "MEMEINTEL_WALLET_ENABLE_IN_MONITOR": "true",
+        "MEMEINTEL_AI_VERIFY_OPPORTUNITIES": "false",
+    })
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner = make_scanner_with_metered(
+            storage, [oversized], {oversized.base_token.address: clean_profile(oversized.base_token)},
+            wallet=wallet, settings=settings,
+        )
+        history = await scanner.run(max_cycles=1)
+        assert history[0].analyzed == 1        # analysis still ran
+        assert wallet.gather_calls == []        # just no wallet credit spent
+
+
+async def test_credit_gate_still_checks_wallets_for_a_held_oversized_coin():
+    """A coin the operator holds always gets a wallet check regardless of
+    the ceiling — whale-exit visibility matters most for money he already
+    put in, whatever the coin's current size (2026-07-15 credit gate)."""
+    oversized = _dc.replace(make_pair(), liquidity_usd=2_000_000.0, market_cap=5_000_000.0)
+    wallet = RecordingWalletService()
+    settings = Settings.from_env(env={
+        "MEMEINTEL_WALLET_ENABLE_IN_MONITOR": "true",
+        "MEMEINTEL_AI_VERIFY_OPPORTUNITIES": "false",
+    })
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        storage.set_holding(oversized.base_token)
+        scanner = make_scanner_with_metered(
+            storage, [oversized], {oversized.base_token.address: clean_profile(oversized.base_token)},
+            wallet=wallet, settings=settings,
+        )
+        history = await scanner.run(max_cycles=1)
+        assert history[0].analyzed == 1
+        assert wallet.gather_calls == [oversized.base_token.address]
+
+
 async def test_security_change_triggers_critical_alert_on_recheck():
     """Part 18 Section 10 end-to-end: a token turning honeypot between
     analyses produces a CRITICAL security_change alert."""

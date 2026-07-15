@@ -741,8 +741,17 @@ All 17 subcommands live in `meme_intelligence/__main__.py` (`main()` → `_run()
   but no affordable data source does (researched twice: nothing viable under
   $20/mo; Twitter API and PumpPortal trade streams are both metered).
 - **Wallet intelligence (Helius) is OFF in the monitor** — it exhausted the
-  free Helius credits and produced 429 noise. Deliberate operator decision;
-  do not turn it back on without a paid plan + credit gating.
+  free Helius credits and produced 429 noise. Deliberate operator decision.
+  **2026-07-15: credit-gating shipped** (`ResearchPipeline._worth_wallet_
+  lookup`) — a lookup now only spends on a candidate that could still earn
+  a buy-side alert (not destructive, security score >= `MEMEINTEL_WALLET_
+  CREDIT_GATE_MIN_SECURITY_SCORE` default 50, not past the buy-side
+  ceiling/freshness gate); held coins (`/holding`) always get checked
+  regardless. Estimated 5-10x fewer calls — may fit the free tier, not
+  guaranteed. Still off by default; turn on with
+  `MEMEINTEL_WALLET_ENABLE_IN_MONITOR=true` + restart when ready, and watch
+  the log for 429s the first week. A paid Helius plan (~$49/mo) remains the
+  fallback if the free tier still isn't enough.
 - **The smart-wallet reputation scores will stay empty for weeks** until the
   data clock and the outcome cron have overlapping history. This is honest
   behavior, not a bug — /wallets says so explicitly.

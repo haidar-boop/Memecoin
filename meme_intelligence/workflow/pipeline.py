@@ -10,6 +10,7 @@ per module; Rule 18: extend, don't duplicate).
 from __future__ import annotations
 
 import dataclasses
+import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable
@@ -98,6 +99,8 @@ class ResearchPipeline:
         self._ai = ai_service
         self._now = now_func
         self._logger = get_logger("workflow.pipeline")
+        self._wallet_settings = settings.wallet
+        self._alert_thresholds = settings.alerts
 
         self._security = SecurityAnalyzer(settings.security, settings.security_weights)
         self._onchain = OnChainAnalyzer(settings.onchain, settings.onchain_weights)
@@ -120,6 +123,7 @@ class ResearchPipeline:
         *,
         narrative_inputs: NarrativeInputs | None = None,
         research_mode: ResearchMode = ResearchMode.STANDARD,
+        force_wallet_check: bool = False,
     ) -> PipelineResult | None:
         """Full chain for one pair; ``None`` when security data is unavailable
         (a token that cannot be security-screened is not analyzable — Part 4).
@@ -130,6 +134,13 @@ class ResearchPipeline:
         deterministic chain (Rule 10 — expensive analysis only after
         filtering) and fills whichever judgment slots remain empty; without
         it those categories honestly report "no data" (Rule 8).
+
+        ``force_wallet_check`` bypasses the wallet-lookup credit gate (see
+        :meth:`_worth_wallet_lookup`) — set by the caller for a token the
+        operator holds or explicitly asked about (a manual ``/check`` or
+        ``plan``/``report``/``wallets`` CLI run), where the lookup is
+        deliberate and rare rather than part of the automated scan volume
+        the gate exists to control.
         """
         try:
             profile = await self._goplus.get_token_security(pair.chain, pair.base_token.address)
@@ -173,10 +184,14 @@ class ResearchPipeline:
             return None
 
         # Wallet intelligence (Part 17): Solana-only, costs metered credits,
-        # so it only runs when a wallet service was provided (Rule 10).
+        # so it only runs when a wallet service was provided (Rule 10) AND
+        # (unless the caller forced it) the candidate could still plausibly
+        # earn a buy-side alert — credit-gating (2026-07-15) that makes
+        # leaving the monitor flag on affordable; see _worth_wallet_lookup.
         wallet = None
         onchain_profile = derive_onchain_profile(pair, profile)
-        if self._wallet_service is not None and pair.chain in ("solana", "sol"):
+        if (self._wallet_service is not None and pair.chain in ("solana", "sol")
+                and (force_wallet_check or self._worth_wallet_lookup(pair, security))):
             try:
                 data = await self._wallet_service.gather(pair.base_token)
                 wallet = self._wallet.assess(data, pair)
@@ -367,3 +382,71 @@ class ResearchPipeline:
             foundation=foundation, ai_judgment=judgment,
             opportunity=self._opportunity.rank(master.category_scores, result.risk.risk_score),
         )
+
+    # ---- Wallet-lookup credit gate (2026-07-15) ----
+
+    def _worth_wallet_lookup(self, pair: DexPair, security: SecurityAssessment) -> bool:
+        """True when a wallet lookup on this candidate could still plausibly
+        pay off — i.e. it has not already been ruled out of ever earning a
+        buy-side alert. A wallet lookup spends a real, metered Helius/Birdeye
+        credit; running it unconditionally on every analyzed token (the prior
+        behavior) exhausted the free tier in days (DECISIONS_LOG 2026-07-11)
+        while contributing nothing on a coin that fails independently of what
+        its wallets are doing.
+
+        Reuses the SAME facts ``AutomationRules`` will independently check
+        downstream (Rule 18) rather than re-deriving new thresholds: a
+        destructive or untradeable coin, or one already past the buy-side
+        ceiling/freshness window, cannot fire opportunity/momentum/smart-
+        money alerts regardless of wallet data. The security-score floor is
+        the one NEW criterion — a coin already scoring below "Moderate Risk"
+        (``SecurityAnalyzer`` bands) is unlikely to clear any alert gate
+        either. Unknown security score never trips this floor (Rule 8:
+        absent data is not evidence the coin is bad) — it only filters on a
+        CONFIRMED low score.
+
+        Protective alerts (whale_exit, insider_risk, emergency/risk warnings)
+        are NOT gated by ceiling/age and would ideally always see fresh
+        wallet data — but a coin that clears none of the checks below can
+        never generate a NEW protective finding from wallet data that the
+        untradeable/destructive checks haven't already covered, and holdings
+        bypass this gate entirely via ``force_wallet_check`` (the caller
+        checks ``storage.is_holding``), which is where that matters.
+
+        ``security.overall_score`` is never ``None`` here: ``analyze_pair``
+        already returned early on ``InsufficientDataError`` from
+        ``SecurityAnalyzer.assess`` before this method is reachable, so a
+        confirmed low score is always what filters, never an absent one
+        (Rule 8 is satisfied by construction, not by a null check here)."""
+        if security.is_destructive:
+            return False
+        if security.overall_score < self._wallet_settings.credit_gate_min_security_score:
+            return False
+        t = self._alert_thresholds
+        liq, mcap = pair.liquidity_usd, pair.market_cap
+        if liq is None or not math.isfinite(liq) or liq <= 0.0:
+            return False  # untradeable — mirrors AutomationRules._untradeable
+        if mcap is None or not math.isfinite(mcap) or mcap <= 0.0:
+            return False
+        if t.opportunity_max_liquidity_usd > 0.0 and liq > t.opportunity_max_liquidity_usd:
+            return False  # already past the size ceiling — mirrors _oversized
+        if t.opportunity_max_market_cap_usd > 0.0 and mcap > t.opportunity_max_market_cap_usd:
+            return False
+        if t.opportunity_max_age_hours > 0.0:
+            age_hours = self._pair_age_hours(pair)
+            if age_hours is not None and age_hours > t.opportunity_max_age_hours:
+                return False  # already past the freshness window — mirrors _too_old
+        return True
+
+    def _pair_age_hours(self, pair: DexPair) -> float | None:
+        """Pool age in hours, or ``None`` when unverifiable — mirrors
+        ``AutomationRules._pool_age_hours``; kept local rather than shared
+        to avoid a workflow<->alerts import cycle (Rule 4)."""
+        created = pair.pair_created_at
+        if created is None:
+            return None
+        try:
+            age_hours = (self._now() - created).total_seconds() / 3600.0
+        except Exception:  # noqa: BLE001 — a bad timestamp must never break analysis
+            return None
+        return age_hours if age_hours >= 0.0 else None

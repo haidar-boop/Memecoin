@@ -1711,6 +1711,55 @@ two bugs in the NEW code, both fixed with regression tests:
 
 Suite: **888 passing**.
 
+## 2026-07-15 — Wallet-intelligence credit gate: make re-enabling affordable, free
+
+Follow-on to the ceiling/freshness work: the operator asked what changed
+between "the bot was perfect" (2026-07-08 evening -> 2026-07-11 morning,
+wallet/smart-money intelligence live in the scanner) and now. Answer: that
+layer was paused 2026-07-11 ("i need to make money first off this bot...
+for now we dont need it") after it exhausted the free Helius tier running
+on EVERY analyzed token and 429'd the trading wallet's own balance checks
+alongside it. It has been off ever since. The originally agreed re-enable
+criteria needed a paid Helius plan (~$49/mo) AND credit-gating together.
+Operator's choice this round: build the free option first, no recurring
+cost yet.
+
+**What shipped:** `ResearchPipeline._worth_wallet_lookup()` — a wallet
+lookup now only runs on a candidate that could still plausibly earn a
+buy-side alert: not destructive, clearing a minimum security score
+(`MEMEINTEL_WALLET_CREDIT_GATE_MIN_SECURITY_SCORE`, default 50 = GoPlus
+"Moderate Risk" or better), and not already excluded by the buy-side
+ceiling/freshness-gate/untradeable checks (reuses `AlertThresholds` —
+Rule 18, no new thresholds invented). A coin that fails any of these can
+never fire an opportunity/momentum/smart-money alert regardless of what
+its wallets are doing, so spending a metered credit on it is pure waste.
+
+**Holdings are exempt.** `analyze_pair(..., force_wallet_check=True)` — set
+by `ContinuousScanner` via `storage.is_holding(token)` at all five of its
+internal call sites (main scan, launch funnel, watchlist recheck,
+insufficient-data retry, `/check`), so a coin the operator actually owns
+always gets whale-exit visibility whatever its size or age. `/check` also
+always forces (a manual, rate-limited, 60s-cached single-token lookup is
+exactly the deliberate spend the gate is not meant to block). The
+`plan`/`report`/`wallets` CLI commands were never gated in the first place
+— they build wallet_service unconditionally for a single explicit token,
+never loop, and were never the credit-exhaustion source (the ONLY place
+`wallet_service` was ever wired into a repeated automated loop is the
+`monitor` command's `ContinuousScanner`, confirmed by tracing every
+`ResearchPipeline` construction site in `__main__.py`).
+
+**Not flipped on.** `wallet.enable_in_monitor` stays `false` by default in
+code, same as every other opt-in subsystem — the operator sets
+`MEMEINTEL_WALLET_ENABLE_IN_MONITOR=true` in `.env` himself when he's ready
+to re-enable, now cheap enough to plausibly fit the free tier (estimated
+5-10x fewer calls per the original 07-11 plan; not guaranteed, since the
+free tier's exact ceiling isn't published — worth watching the first
+week for 429s in the log after turning it on).
+
+9 new tests (pipeline gate unit tests + settings validation + two
+end-to-end scanner tests proving the holdings bypass). Suite: **899
+passing**.
+
 ## Notable implementation choices (Rule 19)
 
 - **Python 3.11 + asyncio** over Node.js (both allowed by spec): the
