@@ -1686,9 +1686,19 @@ two bugs in the NEW code, both fixed with regression tests:
    tracked age to hours. Final form: for 0x addresses the lookup is always
    MIN(first_seen) across case variants (chronological — timestamps are
    aware-UTC isoformat text); pinned by a duplicate-row regression test.
-   A fourth round on that final diff returned zero findings.
+   The fourth round then surfaced the two remaining consequences of the
+   same root cause (duplicate tokens rows per EVM case variant): peak_score
+   and score_history still matched exactly (peak-decline suppression read
+   None for a checksummed re-sighting), and the lower(address) scan had no
+   index (measured ~7000x slowdown at 200k rows on the event-loop thread).
+   Final form: one shared `Storage._address_match_sql()` fragment used by
+   token_first_seen / peak_score / score_history (0x = case-insensitive
+   across variants, Solana exact by design) backed by a new
+   `idx_tokens_chain_lower_addr` expression index in the schema (original
+   columns — safe outside the post-migration list). All EVM-only paths;
+   the production Solana-only config was never affected.
 
-Suite: **886 passing**.
+Suite: **887 passing**.
 
 ## Notable implementation choices (Rule 19)
 

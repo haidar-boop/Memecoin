@@ -57,6 +57,16 @@ CREATE TABLE IF NOT EXISTS tokens (
     UNIQUE (chain, address)
 );
 
+-- Expression index for the EVM case-variant lookups (token_first_seen /
+-- _token_id_variants): WHERE chain = ? AND lower(address) = lower(?) would
+-- otherwise full-scan a table that grows one row per token ever seen — a
+-- measured ~7000x slowdown at realistic size, blocking the event loop the
+-- scanner AND the trade buttons share. Original (non-migrated) columns, so
+-- the schema script is the right home (the post-migration list is only for
+-- indexes touching migrated columns).
+CREATE INDEX IF NOT EXISTS idx_tokens_chain_lower_addr
+    ON tokens(chain, lower(address));
+
 CREATE TABLE IF NOT EXISTS snapshots (
     id INTEGER PRIMARY KEY,
     token_id INTEGER NOT NULL REFERENCES tokens(id),
@@ -353,33 +363,34 @@ class Storage:
         its current deepest pool's creation time says). ``None`` for a token
         never seen before or an unparseable timestamp (Rule 8: an unknown age
         stays unknown, it never becomes zero)."""
-        if token.address.lower().startswith("0x"):
-            # EVM addresses arrive checksummed from some providers and
-            # lowercased from others, and each variant gets its OWN tokens
-            # row (UNIQUE(chain, address) is case-sensitive) — so the
-            # EARLIEST first_seen across case variants is the truth, always.
-            # An exact-match-first lookup self-shadowed: the case-variant's
-            # own snapshot upsert created a fresh row whose first_seen then
-            # won every later lookup, truncating a 30-day tracked age to
-            # hours (re-review finding). Timestamps are aware-UTC isoformat
-            # TEXT, so MIN() is chronological. Solana base58 stays
-            # exact-match (case-sensitive by design).
-            row = self._conn.execute(
-                "SELECT MIN(first_seen) AS first_seen FROM tokens "
-                "WHERE chain = ? AND lower(address) = lower(?)",
-                (token.chain, token.address),
-            ).fetchone()
-        else:
-            row = self._conn.execute(
-                "SELECT first_seen FROM tokens WHERE chain = ? AND address = ?",
-                (token.chain, token.address),
-            ).fetchone()
+        where, params = self._address_match_sql(token)
+        row = self._conn.execute(
+            f"SELECT MIN(first_seen) AS first_seen FROM tokens t WHERE {where}",
+            params,
+        ).fetchone()
         if row is None or not row["first_seen"]:
             return None
         try:
             return datetime.fromisoformat(row["first_seen"])
         except ValueError:
             return None
+
+    @staticmethod
+    def _address_match_sql(token: TokenIdentity) -> tuple[str, tuple]:
+        """WHERE fragment (against alias ``t``) matching EVERY tokens row for
+        this token. EVM addresses arrive checksummed from some providers and
+        lowercased from others, and each variant gets its OWN row
+        (``UNIQUE(chain, address)`` is case-sensitive) — history queries
+        (first_seen, peak score, score history) must aggregate across the
+        variants or a checksummed re-analysis silently loses the token's past
+        (re-review finding: the freshness gate's tracked age collapsed from
+        30 days to hours, and peak-decline suppression read ``None``). Solana
+        base58 stays exact-match (case-sensitive by design). Backed by the
+        ``idx_tokens_chain_lower_addr`` expression index."""
+        if token.address.lower().startswith("0x"):
+            return ("t.chain = ? AND lower(t.address) = lower(?)",
+                    (token.chain, token.address))
+        return "t.chain = ? AND t.address = ?", (token.chain, token.address)
 
     def table_counts(self) -> dict:
         """Cheap DB totals for the /status command (Project 2)."""
@@ -437,22 +448,24 @@ class Storage:
         the immediately-preceding snapshot let a collapsed coin creep back up
         a few points per recheck for days without ever reading as "declining"
         (operator complaint 2026-07-14 — old coins re-pitched as fresh)."""
+        where, params = self._address_match_sql(token)
         row = self._conn.execute(
-            """SELECT MAX(s.final_score) AS peak
-               FROM snapshots s JOIN tokens t ON t.id = s.token_id
-               WHERE t.chain = ? AND t.address = ?""",
-            (token.chain, token.address),
+            f"""SELECT MAX(s.final_score) AS peak
+                FROM snapshots s JOIN tokens t ON t.id = s.token_id
+                WHERE {where}""",
+            params,
         ).fetchone()
         return row["peak"] if row and row["peak"] is not None else None
 
     def score_history(self, token: TokenIdentity, limit: int = 30) -> list[dict]:
         """Recent snapshots for one token, newest first (Part 28 score tracking)."""
+        where, params = self._address_match_sql(token)
         rows = self._conn.execute(
-            """SELECT s.created_at, s.final_score, s.classification, s.coverage, s.source
-               FROM snapshots s JOIN tokens t ON t.id = s.token_id
-               WHERE t.chain = ? AND t.address = ?
-               ORDER BY s.created_at DESC LIMIT ?""",
-            (token.chain, token.address, limit),
+            f"""SELECT s.created_at, s.final_score, s.classification, s.coverage, s.source
+                FROM snapshots s JOIN tokens t ON t.id = s.token_id
+                WHERE {where}
+                ORDER BY s.created_at DESC LIMIT ?""",
+            (*params, limit),
         ).fetchall()
         return [dict(row) for row in rows]
 

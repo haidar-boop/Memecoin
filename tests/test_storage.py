@@ -464,3 +464,25 @@ def test_token_first_seen_matches_evm_case_variants():
         # Unknown token stays None (Rule 8).
         other = TokenIdentity(chain="solana", address="NeverSeen1", symbol="NEW")
         assert storage.token_first_seen(other) is None
+
+
+def test_score_history_and_peak_span_evm_case_variants():
+    """peak_score / score_history must aggregate across EVM case-variant
+    rows exactly like token_first_seen (re-review finding: a collapsed coin
+    re-sighted under checksummed casing read previous_score=None and
+    peak_score=None, so peak-decline suppression never fired while
+    first_seen simultaneously, and correctly, called the coin old)."""
+    import dataclasses as _dc
+    evm_lower = TokenIdentity(chain="ethereum", address="0xabc123def456", symbol="EVM")
+    evm_checksum = TokenIdentity(chain="ethereum", address="0xAbC123dEf456", symbol="EVM")
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        master = _dc.replace(make_master(score=85.0), token=evm_lower)
+        storage.record_snapshot(master, source="test")
+        assert storage.peak_score(evm_checksum) == 85.0
+        assert len(storage.score_history(evm_checksum)) == 1
+        # Solana stays exact-match: a case variant is a DIFFERENT token.
+        sol = TokenIdentity(chain="solana", address="SolAddrCase", symbol="SOL1")
+        sol_variant = TokenIdentity(chain="solana", address="soladdrcase", symbol="SOL1")
+        storage.record_snapshot(_dc.replace(make_master(score=70.0), token=sol),
+                                source="test")
+        assert storage.peak_score(sol_variant) is None
