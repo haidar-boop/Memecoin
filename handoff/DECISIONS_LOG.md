@@ -1679,7 +1679,14 @@ two bugs in the NEW code, both fixed with regression tests:
    fall back to case-insensitive matching for 0x addresses — a checksummed
    re-analysis of a lowercased-recorded token silently lost its tracked age
    and the freshness gate fell back to pool age alone. Same 0x fallback
-   added (Solana base58 stays exact — case-sensitive by design).
+   added (Solana base58 stays exact — case-sensitive by design). A third
+   verification round then caught that exact-match-FIRST self-shadows: the
+   case-variant's own snapshot upsert creates a second tokens row whose
+   fresh first_seen wins every later exact lookup, collapsing a 30-day
+   tracked age to hours. Final form: for 0x addresses the lookup is always
+   MIN(first_seen) across case variants (chronological — timestamps are
+   aware-UTC isoformat text); pinned by a duplicate-row regression test.
+   A fourth round on that final diff returned zero findings.
 
 Suite: **886 passing**.
 

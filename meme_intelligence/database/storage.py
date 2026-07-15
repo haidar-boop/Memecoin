@@ -353,19 +353,25 @@ class Storage:
         its current deepest pool's creation time says). ``None`` for a token
         never seen before or an unparseable timestamp (Rule 8: an unknown age
         stays unknown, it never becomes zero)."""
-        row = self._conn.execute(
-            "SELECT first_seen FROM tokens WHERE chain = ? AND address = ?",
-            (token.chain, token.address),
-        ).fetchone()
-        if row is None and token.address.lower().startswith("0x"):
-            # Same fallback as find_token/is_holding: EVM addresses arrive
-            # checksummed from some providers and lowercased from others —
-            # a case-variant miss would silently disable the tracked-age
-            # half of the freshness gate (Solana base58 stays exact-match).
+        if token.address.lower().startswith("0x"):
+            # EVM addresses arrive checksummed from some providers and
+            # lowercased from others, and each variant gets its OWN tokens
+            # row (UNIQUE(chain, address) is case-sensitive) — so the
+            # EARLIEST first_seen across case variants is the truth, always.
+            # An exact-match-first lookup self-shadowed: the case-variant's
+            # own snapshot upsert created a fresh row whose first_seen then
+            # won every later lookup, truncating a 30-day tracked age to
+            # hours (re-review finding). Timestamps are aware-UTC isoformat
+            # TEXT, so MIN() is chronological. Solana base58 stays
+            # exact-match (case-sensitive by design).
             row = self._conn.execute(
-                "SELECT first_seen FROM tokens "
-                "WHERE chain = ? AND lower(address) = lower(?) "
-                "ORDER BY id ASC LIMIT 1",
+                "SELECT MIN(first_seen) AS first_seen FROM tokens "
+                "WHERE chain = ? AND lower(address) = lower(?)",
+                (token.chain, token.address),
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                "SELECT first_seen FROM tokens WHERE chain = ? AND address = ?",
                 (token.chain, token.address),
             ).fetchone()
         if row is None or not row["first_seen"]:

@@ -444,12 +444,23 @@ def test_token_first_seen_matches_evm_case_variants():
     of a token first recorded lowercased must still find its first_seen —
     a case-variant miss silently disables the tracked-age half of the
     freshness gate. Solana base58 stays exact-match (case-sensitive)."""
+    from datetime import timedelta
     evm_lower = TokenIdentity(chain="ethereum", address="0xabc123def456", symbol="EVM")
     evm_checksum = TokenIdentity(chain="ethereum", address="0xAbC123dEf456", symbol="EVM")
-    with Storage(":memory:", now_func=lambda: NOW) as storage:
+    clock = {"now": NOW}
+    with Storage(":memory:", now_func=lambda: clock["now"]) as storage:
         storage.upsert_token(evm_lower)
         assert storage.token_first_seen(evm_lower) == NOW
         assert storage.token_first_seen(evm_checksum) == NOW   # case variant found
+        # The checksummed variant's own upsert creates a SECOND tokens row
+        # (UNIQUE is case-sensitive) with a much later first_seen — the
+        # earliest across variants must STILL win, or the tracked age
+        # collapses from days to hours on every later recheck (re-review
+        # finding: exact-match-first self-shadowed after this upsert).
+        clock["now"] = NOW + timedelta(days=30)
+        storage.upsert_token(evm_checksum)
+        assert storage.token_first_seen(evm_checksum) == NOW   # not day 30
+        assert storage.token_first_seen(evm_lower) == NOW
         # Unknown token stays None (Rule 8).
         other = TokenIdentity(chain="solana", address="NeverSeen1", symbol="NEW")
         assert storage.token_first_seen(other) is None
