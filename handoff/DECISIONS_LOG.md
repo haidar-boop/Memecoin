@@ -1659,7 +1659,29 @@ one fixed in this batch:
 
 Tests and docs updated throughout (stale comments, missing caplog assert on
 the self-heal warning, the manual's step-4 checklist enumeration + Part 2.12
-/ Part 13 / Part 14 staleness-door status). Suite: **884 passing**.
+/ Part 13 / Part 14 staleness-door status). Suite after this and the follow-up round: **886 passing**.
+
+## 2026-07-14 (night) — Re-review round: 2 staleness-door bugs found and fixed
+
+The fix batch itself was re-reviewed (4-agent find-and-verify fleet:
+evaluate-refactor, staleness-door, regressions, security lenses). Three
+lenses returned clean, including security. The staleness-door lens confirmed
+two bugs in the NEW code, both fixed with regression tests:
+
+1. **Resurrection loop (CONFIRMED).** `update_watchlist`'s UPSERT never
+   reset `added_at`, so a coin re-discovered after a staleness archive kept
+   its day-0 timestamp and was instantly re-archived on the next pass —
+   "a truly revived coin re-enters via fresh discovery" was impossible. The
+   UPSERT now restarts the clock ONLY on the archived→live transition; a
+   live entry's added_at is untouched.
+2. **EVM case-variant miss (PLAUSIBLE, EVM-only).** `token_first_seen` used
+   exact chain+address matching, unlike `find_token`/`is_holding` which
+   fall back to case-insensitive matching for 0x addresses — a checksummed
+   re-analysis of a lowercased-recorded token silently lost its tracked age
+   and the freshness gate fell back to pool age alone. Same 0x fallback
+   added (Solana base58 stays exact — case-sensitive by design).
+
+Suite: **886 passing**.
 
 ## Notable implementation choices (Rule 19)
 

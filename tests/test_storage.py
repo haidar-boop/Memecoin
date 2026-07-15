@@ -414,3 +414,42 @@ def test_peak_score_is_all_time_high(storage):
     for score in (90.0, 60.0, 63.0, 66.0):            # collapse then slow creep
         storage.record_snapshot(make_master(score=score), source="test")
     assert storage.peak_score(TOKEN) == 90.0
+
+
+def test_resurrection_from_archive_restarts_the_tracking_clock():
+    """Re-review finding 2026-07-14: the UPSERT kept the ORIGINAL added_at
+    when a coin came back from 'archived', so the staleness door instantly
+    re-archived every genuinely revived coin forever. Re-entry must open a
+    fresh tracking window; a live entry's added_at stays untouched."""
+    from datetime import timedelta
+    clock = {"now": NOW}
+    with Storage(":memory:", now_func=lambda: clock["now"]) as storage:
+        storage.update_watchlist(TOKEN, WatchlistTier.TIER_2_DEVELOPING, score=70.0)
+        original = storage.get_watchlist()[0].added_at
+        # A later refresh of a LIVE entry keeps the original added_at.
+        clock["now"] = NOW + timedelta(days=1)
+        storage.update_watchlist(TOKEN, WatchlistTier.TIER_2_DEVELOPING, score=71.0)
+        assert storage.get_watchlist()[0].added_at == original
+        # Archive, then resurrect 4 days later: added_at must be the
+        # resurrection time, not day 0.
+        storage.archive(TOKEN, "watchlist staleness door: tracked 4d")
+        clock["now"] = NOW + timedelta(days=4)
+        storage.update_watchlist(TOKEN, WatchlistTier.TIER_2_DEVELOPING, score=75.0)
+        entry = storage.get_watchlist()[0]
+        assert entry.added_at == NOW + timedelta(days=4)
+
+
+def test_token_first_seen_matches_evm_case_variants():
+    """Same 0x fallback as find_token/is_holding: a checksummed re-analysis
+    of a token first recorded lowercased must still find its first_seen —
+    a case-variant miss silently disables the tracked-age half of the
+    freshness gate. Solana base58 stays exact-match (case-sensitive)."""
+    evm_lower = TokenIdentity(chain="ethereum", address="0xabc123def456", symbol="EVM")
+    evm_checksum = TokenIdentity(chain="ethereum", address="0xAbC123dEf456", symbol="EVM")
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        storage.upsert_token(evm_lower)
+        assert storage.token_first_seen(evm_lower) == NOW
+        assert storage.token_first_seen(evm_checksum) == NOW   # case variant found
+        # Unknown token stays None (Rule 8).
+        other = TokenIdentity(chain="solana", address="NeverSeen1", symbol="NEW")
+        assert storage.token_first_seen(other) is None

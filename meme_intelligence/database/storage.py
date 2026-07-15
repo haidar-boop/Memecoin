@@ -357,6 +357,17 @@ class Storage:
             "SELECT first_seen FROM tokens WHERE chain = ? AND address = ?",
             (token.chain, token.address),
         ).fetchone()
+        if row is None and token.address.lower().startswith("0x"):
+            # Same fallback as find_token/is_holding: EVM addresses arrive
+            # checksummed from some providers and lowercased from others —
+            # a case-variant miss would silently disable the tracked-age
+            # half of the freshness gate (Solana base58 stays exact-match).
+            row = self._conn.execute(
+                "SELECT first_seen FROM tokens "
+                "WHERE chain = ? AND lower(address) = lower(?) "
+                "ORDER BY id ASC LIMIT 1",
+                (token.chain, token.address),
+            ).fetchone()
         if row is None or not row["first_seen"]:
             return None
         try:
@@ -528,6 +539,14 @@ class Storage:
                ON CONFLICT(token_id) DO UPDATE SET
                    tier = excluded.tier,
                    thesis = COALESCE(excluded.thesis, watchlist.thesis),
+                   -- Resurrection from 'archived' restarts the tracking clock:
+                   -- keeping the original added_at let the staleness door
+                   -- instantly re-archive a genuinely revived coin forever
+                   -- (re-review finding 2026-07-14) — re-entry must be a
+                   -- fresh 3-day window, exactly like a brand-new add.
+                   added_at = CASE WHEN watchlist.tier = 'archived'
+                                   THEN excluded.added_at
+                                   ELSE watchlist.added_at END,
                    updated_at = excluded.updated_at,
                    last_score = COALESCE(excluded.last_score, watchlist.last_score),
                    last_classification =
