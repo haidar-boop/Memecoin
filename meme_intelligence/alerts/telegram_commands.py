@@ -767,7 +767,13 @@ class TelegramCommandListener(BaseCollector):
             return ("Mind layer is off (MEMEINTEL_LEARNING_ENABLE_IN_MONITOR).\n"
                     f"Operator feedback: {feedback['up']} up / {feedback['down']} down "
                     "(advisory only)")
-        metrics = service.get_learning_metrics(persist=False)
+        # The metrics walk visits every resolved coin — run it in a worker
+        # thread (the learning store is thread-safe with per-coin locking)
+        # or it blocks the event loop, and with it every other Telegram
+        # command and the scan itself (2026-07-15 incident: a /mind against
+        # 24,884 resolved coins froze the bot for minutes; the operator's
+        # report was "worked once then stopped").
+        metrics = await asyncio.to_thread(service.get_learning_metrics, persist=False)
         rug = metrics.get("rug") or {}
         directional = metrics.get("directional") or {}
         lines = [

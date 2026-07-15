@@ -1133,19 +1133,28 @@ class ContinuousScanner:
         """
         entries = sorted(self._storage.get_watchlist(), key=lambda e: e.updated_at)
         limit = self._settings.workflow.watchlist_review_limit
+        stale_limit = self._settings.workflow.watchlist_stale_archive_limit
         rechecked = 0
-        for entry in entries:
+        archived = 0
+        for walked, entry in enumerate(entries):
             if rechecked >= limit:
                 break
+            if walked % 50 == 49:
+                # The stale drain is pure synchronous SQLite with no awaits —
+                # without an explicit yield, a large backlog freezes the event
+                # loop (and Telegram with it) for the whole walk (2026-07-15).
+                await asyncio.sleep(0)
             if entry.token.address.lower() in skip:
                 continue  # analyzed moments ago this cycle; nothing new to learn
-            if entry.tier is WatchlistTier.TIER_3_RESEARCH_ONLY:
-                continue  # research-only entries wait for the daily routine
             # Staleness door (handoff Part 14): a coin that has sat on the
             # watchlist past the age cap without graduating is archived
             # BEFORE any provider call is spent on it — the freshness gate
             # already guarantees its buy-side alerts could never send, so
-            # rechecking it is pure API burn. Holdings are exempt.
+            # rechecking it is pure API burn. Holdings are exempt. Checked
+            # BEFORE the tier-3 skip: the agreed design archives ANY coin
+            # past the cap, and tier-3 is where undead coins accumulate —
+            # skipping them first left thousands of zombies only the
+            # once-a-day routine could ever drain (2026-07-15 finding).
             stale = stale_watchlist_reason(
                 entry,
                 max_age_days=self._settings.workflow.watchlist_max_age_days,
@@ -1154,7 +1163,22 @@ class ContinuousScanner:
                 self._storage.archive(entry.token, stale)
                 self._logger.info("watchlist entry %s archived: %s",
                                   entry.token.address, stale)
+                archived += 1
+                if stale_limit > 0 and archived >= stale_limit:
+                    # A pre-door backlog (8,690 entries at first encounter)
+                    # must drain across passes, not in one loop-freezing
+                    # sweep — the next pass (every recheck cadence) picks up
+                    # where this one stopped. Rechecks of live entries pause
+                    # until the backlog clears; log it so the pause is
+                    # diagnosable rather than mysterious (Rule 13).
+                    self._logger.info(
+                        "watchlist stale-archive limit reached (%d this pass); "
+                        "%d entries still queued for the next pass",
+                        archived, max(0, len(entries) - walked - 1))
+                    break
                 continue
+            if entry.tier is WatchlistTier.TIER_3_RESEARCH_ONLY:
+                continue  # research-only entries wait for the daily routine
             # Fetch via get_token_pairs, which RAISES on a provider outage,
             # rather than get_best_pair, which collapses "all providers down"
             # into the same None as "token has no pairs" (bug-hunt finding:

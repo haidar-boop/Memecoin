@@ -1681,3 +1681,45 @@ async def test_realert_carries_history_note():
         assert sink2.sent
         assert all("prior alert(s) for this coin" in e.history_note
                    for e in sink2.sent)
+
+
+# ---- Staleness-door backlog drain (2026-07-15 "worked once then stopped") ----
+
+async def test_stale_archive_limit_bounds_one_recheck_pass():
+    """The door's first encounter with a pre-door backlog (8,690 entries on
+    the droplet) archived thousands in one uninterruptible synchronous sweep,
+    freezing the event loop and Telegram for minutes. One pass may now
+    archive at most watchlist_stale_archive_limit entries; the next pass
+    continues the drain."""
+    settings = Settings.from_env(env={
+        "MEMEINTEL_WORKFLOW_WATCHLIST_RECHECK_CYCLES": "1",
+        "MEMEINTEL_WORKFLOW_WATCHLIST_STALE_ARCHIVE_LIMIT": "3",
+    })
+    # Storage clock 10 days before the scanner clock -> every entry is stale.
+    with Storage(":memory:", now_func=lambda: NOW - timedelta(days=10)) as storage:
+        for i in range(8):
+            tok = TokenIdentity(chain="solana", address=f"Stale{i}", symbol=f"S{i}")
+            storage.update_watchlist(tok, WatchlistTier.TIER_2_DEVELOPING, score=70.0)
+        scanner = make_scanner_with_market(
+            storage, [], {}, FakeMarketService({}), settings=settings)
+        await scanner.run(max_cycles=1)
+        remaining = storage.get_watchlist()
+        assert len(remaining) == 5          # exactly 3 archived this pass
+        await scanner.run(max_cycles=1)     # next pass drains 3 more
+        assert len(storage.get_watchlist()) == 2
+
+
+async def test_scanner_staleness_door_now_covers_tier3_zombies():
+    """Tier-3 (research-only) is where undead coins accumulate, and the
+    scanner used to skip them BEFORE the stale check — thousands of zombies
+    only the once-a-day routine could drain. The stale check now runs first:
+    the agreed design archives ANY coin past the cap."""
+    settings = Settings.from_env(env={"MEMEINTEL_WORKFLOW_WATCHLIST_RECHECK_CYCLES": "1"})
+    with Storage(":memory:", now_func=lambda: NOW - timedelta(days=10)) as storage:
+        zombie = TokenIdentity(chain="solana", address="Zombie1", symbol="ZMB")
+        storage.update_watchlist(zombie, WatchlistTier.TIER_3_RESEARCH_ONLY, score=60.0)
+        scanner = make_scanner_with_market(
+            storage, [], {}, FakeMarketService({}), settings=settings)
+        await scanner.run(max_cycles=1)
+        assert storage.get_watchlist() == []                     # archived
+        assert storage.get_watchlist(include_archived=True)      # not deleted

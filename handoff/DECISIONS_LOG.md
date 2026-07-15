@@ -1847,6 +1847,39 @@ Watch items: MemoryMax=880M remains tight as resolved coins grow —
 revisit the cap (or training-set bounds, an operator decision) if
 `systemctl status` ever shows oom-kill again.
 
+## 2026-07-15 (night) — "Worked once then stopped": two event-loop starvers found via the operator's own /status reply
+
+The operator's /status screenshot carried the whole diagnosis: watchlist
+8,690 (the pre-door backlog), cycles 0 after 2 minutes of uptime, one
+answered command at 6:30 then silence — later corrected to "very very
+delayed," confirming starvation rather than a crash. Two synchronous
+walks were freezing the single event loop (Telegram dispatch is serial on
+it):
+
+1. **/mind walked every resolved coin ON the loop.** `_cmd_mind` called
+   `get_learning_metrics` synchronously; the walk materialized all 24,884
+   coins' FULL records (snapshot series included) just to read
+   `final_bucket`. Fixes: the metrics walk is now LEAN
+   (`resolved_coin_ids` + per-coin `get_prediction`/`coin_final_bucket` —
+   no snapshots ever loaded), and `_cmd_mind` runs it via
+   `asyncio.to_thread` (safe now that the learning store is thread-safe
+   with per-coin locking).
+2. **The staleness door's first drain was one uninterruptible sweep.**
+   On its first encounter with the 8,690-entry backlog, one recheck pass
+   archived every stale non-tier-3 entry back-to-back — two synchronous
+   commits each, no awaits — freezing the loop for minutes. Fixes: new
+   `workflow.watchlist_stale_archive_limit` (default 200, 0 = unlimited)
+   bounds one pass (backlog drains ~200 per recheck cadence with a Rule 13
+   log line when the limit trips); the walk yields to the loop every 50
+   entries; and the stale check moved BEFORE the tier-3 skip — tier-3 is
+   where undead coins accumulate, and skipping them first left thousands
+   of zombies only the once-a-day routine could drain (the agreed Part 14
+   design archives ANY coin past the cap).
+
+Expected droplet behavior after deploy: the 8,690 backlog drains over
+roughly 5-6 hours of recheck passes while Telegram stays responsive
+throughout; /mind answers in seconds. Suite: **904 passing**.
+
 ## Notable implementation choices (Rule 19)
 
 - **Python 3.11 + asyncio** over Node.js (both allowed by spec): the

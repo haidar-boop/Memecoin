@@ -586,17 +586,26 @@ class LearningService:
     # ---- Self-evaluation (Section 8) ----
 
     def get_learning_metrics(self, *, persist: bool = True) -> dict:
-        """Compute the self-evaluation metrics over resolved predictions."""
+        """Compute the self-evaluation metrics over resolved predictions.
+
+        Deliberately LEAN: grading needs only each coin's final bucket and
+        its stored prediction payload — never the snapshot series. The old
+        walk materialized every resolved coin's full record (24,884 coins ×
+        dozens of snapshots each) just to read ``final_bucket``, which made
+        every /mind command a multi-minute, memory-heavy crawl (2026-07-15
+        incident)."""
         records: list[PredictionRecord] = []
-        for record in self._store.iter_resolved_records():
-            coin_id = self._store.coin_id(record.token)
-            prediction = self._store.get_prediction(coin_id) if coin_id else None
+        for coin_id in self._store.resolved_coin_ids():
+            prediction = self._store.get_prediction(coin_id)
             if not prediction:
+                continue
+            bucket = self._store.coin_final_bucket(coin_id)
+            if bucket is None:
                 continue
             records.append(PredictionRecord(
                 predicted_distribution=prediction.get("distribution", {}),
                 predicted_label=prediction.get("predicted_label", ""),
-                actual_label=record.final_bucket.value,
+                actual_label=bucket.value,
                 archetype=prediction.get("archetype"),
                 novelty_flagged=prediction.get("novelty_flagged", False),
             ))

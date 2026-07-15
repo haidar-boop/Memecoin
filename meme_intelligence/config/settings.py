@@ -779,6 +779,14 @@ class WorkflowSettings:
     # all keep the rows; a truly revived coin re-enters via fresh discovery).
     # ON by default per the agreed design; 0 = OFF.
     watchlist_max_age_days: float = 3.0
+    # How many stale entries one recheck pass may archive before yielding to
+    # the next pass (0 = unlimited). The door's first encounter with a
+    # backlog built up before it existed (8,690 watchlist entries,
+    # 2026-07-15) tried to archive thousands in one uninterruptible sweep —
+    # two synchronous commits each — freezing the event loop, and with it
+    # Telegram, for minutes. Bounded, the backlog drains ~200 per recheck
+    # pass (every ~7.5 min at defaults) while the bot stays responsive.
+    watchlist_stale_archive_limit: int = 200
 
     def __post_init__(self) -> None:
         if not self.networks.strip():
@@ -803,6 +811,10 @@ class WorkflowSettings:
         if not math.isfinite(age_cap) or age_cap < 0:
             raise ConfigurationError(
                 f"workflow setting 'watchlist_max_age_days' must be >= 0, got {age_cap}")
+        if self.watchlist_stale_archive_limit < 0:
+            raise ConfigurationError(
+                "workflow setting 'watchlist_stale_archive_limit' must be >= 0, "
+                f"got {self.watchlist_stale_archive_limit}")
 
     @property
     def network_list(self) -> list[str]:
