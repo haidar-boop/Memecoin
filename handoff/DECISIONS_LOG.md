@@ -1805,6 +1805,48 @@ per the operator's own later complaints) are deliberately kept — the
 snapshot's magic (smart-money accumulation on fresh small coins) lives
 inside those limits, now with the credit gate keeping it affordable.
 
+## 2026-07-15 (evening) — First real retrain froze Telegram, then likely got the process memory-killed: rebuild now streams
+
+Minutes after the threading fix let the mind layer train for real for the
+first time ("classifier trained on 24884 samples"), the operator reported
+Telegram dead. Two compounding causes, both in the rebuild path the fix
+had just brought to life for the first time at production scale:
+
+1. **Lock starvation.** `resolved_records()` was one `@_locked` call that
+   ran ~3 nested queries per coin across all 24,884 coins while holding
+   the store lock. Any learning-store call from the event-loop thread
+   during that walk blocked the LOOP itself — and Telegram dispatch is
+   serial on that loop, so commands went unanswered. This resurrected the
+   exact stall `asyncio.to_thread` was added to prevent, through the lock
+   instead of the loop.
+2. **Memory peak past the cgroup cap.** The rebuild materialized every
+   CoinRecord WITH its full snapshot series simultaneously (and
+   `build_from_records` then re-extracted every fingerprint a second
+   time). The service's MemoryMax=880M was sized at ~740M when 6,362
+   coins existed; the 24,884-coin peak plus Python keeping high-water
+   arenas means the process was very plausibly oom-killed some minutes
+   after the clean-looking "rebuild complete" line — matching the
+   symptom's timing exactly.
+
+**Fix:** `LearningStore.iter_resolved_records()` — the id list is
+snapshotted under one short lock, then each coin's record takes and
+releases the lock on its own, so scanner/Telegram calls interleave
+between coins; `resolved_records()` is now just `list(...)` of it.
+`_rebuild`/`refresh_archetypes`/`get_learning_metrics` all stream: each
+record is dropped the moment its fingerprint is extracted (only the small
+vector/bucket/time/entry survive), fingerprints are extracted ONCE
+(analog rebuilt via `add_many` on the already-scaled matrix instead of
+`build_from_records` re-extracting everything), and the extraction loop
+yields the GIL every 250 coins for the 1-vCPU droplet. Regression tests:
+the lock is provably free mid-iteration (cross-thread call with a
+timeout while the generator is paused), and the streamed rebuild fills
+the analog index identically to the old bulk path. Suite: **902
+passing**.
+
+Watch items: MemoryMax=880M remains tight as resolved coins grow —
+revisit the cap (or training-set bounds, an operator decision) if
+`systemctl status` ever shows oom-kill again.
+
 ## Notable implementation choices (Rule 19)
 
 - **Python 3.11 + asyncio** over Node.js (both allowed by spec): the

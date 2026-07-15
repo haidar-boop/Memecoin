@@ -137,3 +137,29 @@ async def test_store_is_safe_from_a_worker_thread():
     # Composite method whose helpers nest inside the lock (RLock required).
     record = await asyncio.to_thread(store.get_record, cid)
     assert record is not None and record.token.address == TOKEN.address
+
+
+async def test_iter_resolved_records_releases_the_lock_between_coins():
+    """Regression (2026-07-15, second incident): resolved_records used to
+    hold the store lock across the ENTIRE per-coin walk — during the first
+    real 24k-coin retrain the event-loop thread blocked on its next store
+    call and Telegram went silent. The iterator must take the lock per coin
+    so other threads interleave mid-walk."""
+    import asyncio
+    store = LearningStore(":memory:", now_func=lambda: NOW)
+    for i in range(3):
+        tok = TokenIdentity(chain="solana", address=f"IterTok{i}", symbol=f"T{i}")
+        cid = store.record_detection(tok)
+        store.append_snapshot(cid, CoinSnapshot(age_seconds=0, price_usd=1.0))
+        store.record_label(cid, OutcomeLabel(horizon_hours=1.0, bucket=OutcomeBucket.PUMP,
+                                             forward_return_percent=80.0))
+    it = store.iter_resolved_records()
+    first = next(it)                       # generator now paused mid-walk
+    assert first is not None
+    # If the walk held the lock, this cross-thread call would deadlock the
+    # 2s timeout; releasing per coin lets it complete immediately.
+    count = await asyncio.wait_for(asyncio.to_thread(store.resolved_count), timeout=2.0)
+    assert count == 3
+    rest = list(it)
+    assert len(rest) == 2                  # walk resumes and completes
+    assert len(store.resolved_records()) == 3   # list form still equivalent

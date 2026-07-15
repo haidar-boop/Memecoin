@@ -406,3 +406,6 @@ async def test_retrain_if_due_runs_in_a_worker_thread():
     _seed(service, n_each=30)  # past min_train_samples -> first train is due
     assert await asyncio.to_thread(service.retrain_if_due) is True
     assert service._classifier.is_ready
+    # The streamed rebuild (2026-07-15 memory fix) must fill the analog
+    # index with every resolved coin, exactly like the old bulk path did.
+    assert service._analog.size == 60

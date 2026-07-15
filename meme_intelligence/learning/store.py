@@ -409,35 +409,45 @@ class LearningStore:
         return int(row["n"])
 
     @_locked
-    def resolved_records(self, *, limit: int | None = None) -> list[CoinRecord]:
-        """Every resolved coin as a full :class:`CoinRecord` (newest first).
-
-        This is the labeled training set the analog index and the classifier
-        are (re)built from. Snapshots, labels, and rug signals are loaded per
-        coin so the caller gets complete records without extra queries.
-        """
-        query = ("SELECT id, chain, address, symbol, name, detected_at, "
-                 "detection_price_usd, creator FROM learning_coins "
+    def resolved_coin_ids(self, *, limit: int | None = None) -> list[int]:
+        """Ids of every resolved coin, newest first — one short locked query."""
+        query = ("SELECT id FROM learning_coins "
                  "WHERE final_bucket IS NOT NULL ORDER BY updated_at DESC")
         if limit is not None:
             query += f" LIMIT {int(limit)}"
-        rows = self._conn.execute(query).fetchall()
-        records: list[CoinRecord] = []
-        for row in rows:
-            coin_id = int(row["id"])
-            token = TokenIdentity(chain=row["chain"], address=row["address"],
-                                  symbol=row["symbol"], name=row["name"])
-            labels = self._labels_for(coin_id)
-            records.append(CoinRecord(
-                token=token,
-                detected_at=datetime.fromisoformat(row["detected_at"]),
-                detection_price_usd=row["detection_price_usd"],
-                creator=row["creator"],
-                snapshots=tuple(self.snapshots_for(coin_id)),
-                labels=tuple(labels),
-                rug_signals=tuple(self.rug_signals_for(coin_id)),
-            ))
-        return records
+        return [int(r["id"]) for r in self._conn.execute(query).fetchall()]
+
+    def iter_resolved_records(self, *, limit: int | None = None):
+        """Stream resolved coins one full :class:`CoinRecord` at a time.
+
+        Deliberately NOT ``@_locked`` and deliberately a generator: the
+        training-set read visits every coin with several nested queries
+        each, and holding the lock for that whole walk froze the event-loop
+        thread (and with it Telegram and the trade buttons) for the entire
+        first real retrain — 24k+ coins — while also materializing every
+        snapshot series simultaneously, whose transient peak tripped the
+        droplet's 880M service memory cap (2026-07-15 incident: the process
+        was memory-killed minutes after a clean-looking rebuild and the
+        operator's first symptom was "Telegram isn't working"). The id list
+        is snapshotted under one short lock; each coin's record then takes
+        and releases the lock on its own (``get_record``), so scanner and
+        Telegram calls interleave between coins and the caller can drop
+        each record as soon as it is consumed. A coin resolving mid-walk
+        simply isn't part of this training pass — the same coin is picked
+        up by the next one (a training-set read needs no cross-coin
+        transaction)."""
+        for coin_id in self.resolved_coin_ids(limit=limit):
+            record = self.get_record(coin_id)
+            if record is not None:
+                yield record
+
+    def resolved_records(self, *, limit: int | None = None) -> list[CoinRecord]:
+        """Every resolved coin as a full :class:`CoinRecord` (newest first).
+
+        Convenience list form of :meth:`iter_resolved_records` — prefer the
+        iterator anywhere the caller doesn't genuinely need every record in
+        memory at once (see its docstring for why that matters at scale)."""
+        return list(self.iter_resolved_records(limit=limit))
 
     @_locked
     def _labels_for(self, coin_id: int) -> list[OutcomeLabel]:
