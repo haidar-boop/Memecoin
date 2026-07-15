@@ -486,3 +486,27 @@ def test_score_history_and_peak_span_evm_case_variants():
         storage.record_snapshot(_dc.replace(make_master(score=70.0), token=sol),
                                 source="test")
         assert storage.peak_score(sol_variant) is None
+
+
+def test_alert_history_and_security_facts_span_evm_case_variants():
+    """Round-5 re-review findings: alert_history feeds the interest gate and
+    latest_security_facts feeds the contract-change diff — both must survive
+    an EVM casing flip, or protective alerts demote to LOW (never delivered)
+    and a honeypot flip is buried under a fresh baseline."""
+    evm_lower = TokenIdentity(chain="ethereum", address="0xabc123def456", symbol="EVM")
+    evm_checksum = TokenIdentity(chain="ethereum", address="0xAbC123dEf456", symbol="EVM")
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        from types import SimpleNamespace
+        from meme_intelligence.core.enums import AlertPriority
+        event = SimpleNamespace(
+            token=evm_lower, priority=AlertPriority.HIGH,
+            alert_type="high_priority_opportunity", title="pitched",
+            reasons=("gates passed",), scores={"master": 90.0})
+        storage.record_alert(event, source="test")
+        assert storage.alert_history(evm_checksum)          # casing flip still sees it
+        storage.record_security_facts(evm_lower, {"is_honeypot": False})
+        facts = storage.latest_security_facts(evm_checksum)
+        assert facts == {"is_honeypot": False}              # baseline survives the flip
+        # Newest baseline wins across variants after the flip writes its own.
+        storage.record_security_facts(evm_checksum, {"is_honeypot": True})
+        assert storage.latest_security_facts(evm_lower) == {"is_honeypot": True}

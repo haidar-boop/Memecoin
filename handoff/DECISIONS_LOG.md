@@ -1695,10 +1695,21 @@ two bugs in the NEW code, both fixed with regression tests:
    token_first_seen / peak_score / score_history (0x = case-insensitive
    across variants, Solana exact by design) backed by a new
    `idx_tokens_chain_lower_addr` expression index in the schema (original
-   columns — safe outside the post-migration list). All EVM-only paths;
-   the production Solana-only config was never affected.
+   columns — safe outside the post-migration list). A fifth round then
+   swept every remaining Storage lookup feeding the alert path and found
+   the last two consumers of the same root cause, both CONFIRMED with
+   serious (EVM-only, currently dormant) consequences and both fixed the
+   same way: `alert_history` (feeds the interest gate — a casing flip hid
+   the HIGH alert that granted interest, demoting every later protective
+   alert to LOW, below the phone's delivery floor) and
+   `latest_security_facts` (a honeypot flip straddling a casing flip
+   diffed against None — no security-change alert, and the new baseline
+   buried the change permanently; newest-baseline-wins across variants,
+   token_id tiebreak for determinism). All EVM-only paths; the production
+   Solana-only config was never affected. A sixth verification round on
+   the final state returned zero findings.
 
-Suite: **887 passing**.
+Suite: **888 passing**.
 
 ## Notable implementation choices (Rule 19)
 

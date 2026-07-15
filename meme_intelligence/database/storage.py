@@ -596,11 +596,21 @@ class Storage:
     # ---- Security facts baseline (Part 18, Section 10) ----
 
     def latest_security_facts(self, token: TokenIdentity) -> dict | None:
-        """The last-known security facts for a token, or None on first sighting."""
+        """The last-known security facts for a token, or None on first sighting.
+
+        Variant-aware (see ``_address_match_sql``), newest baseline wins: a
+        contract change straddling an EVM casing flip previously diffed
+        against ``None`` — the honeypot flip fired no security-change alert
+        and the new baseline buried it permanently (re-review finding
+        2026-07-14). Writes still key on the current casing's row; this read
+        picking the most recent row across variants keeps the diff chain
+        intact."""
+        where, params = self._address_match_sql(token)
         row = self._conn.execute(
-            """SELECT f.facts FROM security_facts f JOIN tokens t ON t.id = f.token_id
-               WHERE t.chain = ? AND t.address = ?""",
-            (token.chain, token.address),
+            f"""SELECT f.facts FROM security_facts f JOIN tokens t ON t.id = f.token_id
+               WHERE {where}
+               ORDER BY f.updated_at DESC, f.token_id DESC LIMIT 1""",
+            params,
         ).fetchone()
         return json.loads(row["facts"]) if row else None
 
@@ -884,14 +894,20 @@ class Storage:
                 (limit,),
             ).fetchall()
         else:
+            # Variant-aware (see _address_match_sql): the interest gate reads
+            # this history — an EVM casing flip must not hide the HIGH alert
+            # that granted interest, or every later protective alert on the
+            # coin demotes to LOW and never reaches the phone (re-review
+            # finding 2026-07-14).
+            where, params = self._address_match_sql(token)
             rows = self._conn.execute(
-                """SELECT a.id, a.created_at, a.priority, a.alert_type, a.title,
+                f"""SELECT a.id, a.created_at, a.priority, a.alert_type, a.title,
                           a.reasons, a.score_at_alert, a.outcome,
                           t.chain, t.address, t.symbol
                    FROM alerts a JOIN tokens t ON t.id = a.token_id
-                   WHERE t.chain = ? AND t.address = ?
+                   WHERE {where}
                    ORDER BY a.id DESC LIMIT ?""",
-                (token.chain, token.address, limit),
+                (*params, limit),
             ).fetchall()
         history = []
         for row in rows:
