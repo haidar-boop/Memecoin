@@ -1723,3 +1723,80 @@ async def test_scanner_staleness_door_now_covers_tier3_zombies():
         await scanner.run(max_cycles=1)
         assert storage.get_watchlist() == []                     # archived
         assert storage.get_watchlist(include_archived=True)      # not deleted
+
+
+# ---- Scanner stall watchdog (operator request, 2026-07-15) ----
+
+class RecordingWatchdog:
+    """Stand-in for ScannerWatchdog recording the controller's wiring."""
+
+    instances: list = []
+
+    def __init__(self, settings, age_func, notify, *, now_func=None):
+        self.settings = settings
+        self.age_func = age_func
+        self.notify = notify
+        self.started = False
+        self.stopped = False
+        RecordingWatchdog.instances.append(self)
+
+    async def start(self):
+        self.started = True
+
+    async def stop(self):
+        self.stopped = True
+
+
+async def test_seconds_since_last_cycle_tracks_progress():
+    pair = make_pair()
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner, _ = make_scanner(storage, [pair],
+                                  {pair.base_token.address: clean_profile(pair.base_token)})
+        assert scanner.seconds_since_last_cycle() is None  # not started yet
+        await scanner.run(max_cycles=1)
+        # Clock is frozen at NOW, so a just-completed cycle reads 0s old.
+        assert scanner.seconds_since_last_cycle() == 0.0
+
+
+async def test_watchdog_started_and_stopped_with_the_scanner(monkeypatch):
+    monkeypatch.setattr("meme_intelligence.workflow.controller.ScannerWatchdog",
+                        RecordingWatchdog)
+    RecordingWatchdog.instances.clear()
+    pair = make_pair()
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner, _ = make_scanner(storage, [pair],
+                                  {pair.base_token.address: clean_profile(pair.base_token)})
+        await scanner.run(max_cycles=1)
+    assert len(RecordingWatchdog.instances) == 1
+    wd = RecordingWatchdog.instances[0]
+    assert wd.started and wd.stopped                # full lifecycle
+    assert wd.notify is None                        # no telegram listener wired here
+    assert wd.age_func() == 0.0                     # reads the scanner's heartbeat
+
+
+async def test_watchdog_disabled_by_flag(monkeypatch):
+    monkeypatch.setattr("meme_intelligence.workflow.controller.ScannerWatchdog",
+                        RecordingWatchdog)
+    RecordingWatchdog.instances.clear()
+    settings = Settings.from_env(env={"MEMEINTEL_WORKFLOW_WATCHDOG_ENABLED": "false"})
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner = make_scanner_with_market(storage, [], {}, FakeMarketService({}),
+                                           settings=settings)
+        await scanner.run(max_cycles=1)
+    assert RecordingWatchdog.instances == []        # never constructed
+
+
+async def test_watchdog_start_failure_does_not_stop_the_scanner(monkeypatch):
+    class ExplodingWatchdog(RecordingWatchdog):
+        async def start(self):
+            raise RuntimeError("watchdog boot failure")
+
+    monkeypatch.setattr("meme_intelligence.workflow.controller.ScannerWatchdog",
+                        ExplodingWatchdog)
+    RecordingWatchdog.instances.clear()
+    pair = make_pair()
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner, _ = make_scanner(storage, [pair],
+                                  {pair.base_token.address: clean_profile(pair.base_token)})
+        history = await scanner.run(max_cycles=1)   # must not raise
+        assert len(history) == 1                    # scanning proceeded normally

@@ -16,7 +16,7 @@
   Telegram control + copy-address button), **Project 3** (mind-layer P(rug)
   veto — built, veto flag off until authority is earned), and **Project 6**
   (live buy/dump from Telegram — see below).
-- **908 tests passing** (`python -m pytest tests/ -q`, all optional deps installed).
+- **925 tests passing** (`python -m pytest tests/ -q`, all optional deps installed).
 - **Live in production**: 24/7 on the operator's $6/mo DigitalOcean droplet
   (systemd service `meme-intelligence`, repo at `~/meme-intelligence`),
   Telegram alerts arriving on his phone.
@@ -194,6 +194,14 @@ sudo systemctl restart meme-intelligence
 
 ## Update log for this file
 
+- 2026-07-15 — scanner stall watchdog built (operator request after the
+  OOM crash-loop recovery): `workflow/watchdog.py`, an isolated task that
+  Telegram-messages the operator when no scan cycle completes for 15 min
+  (re-alert 1h, "resumed" note on recovery, log-only if Telegram is
+  down). Zero work added to the scan loop; on by default
+  (`MEMEINTEL_WORKFLOW_WATCHDOG_*`). It cannot report a dead process
+  (systemd handles restarts) — it reports alive-but-stuck. See
+  DECISIONS_LOG 2026-07-15 (after recovery). 908 → 925 tests.
 - 2026-07-12 — safety checklist on buy-side alerts: only a rug (the rug
   engine's combined `deterministic_risk_veto`) OR an untradeable coin (0/missing
   liquidity or market cap, `_untradeable`) suppresses; every OTHER soft signal

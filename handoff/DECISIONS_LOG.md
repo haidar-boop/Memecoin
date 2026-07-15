@@ -1928,6 +1928,44 @@ table will only keep growing.
 
 Suite: **908 passing**.
 
+## 2026-07-15 (after recovery) — Scanner stall watchdog: the bot now tells the operator when it's stuck
+
+With the crash loop fixed and confirmed recovered (/status showing 9m
+uptime / 12 cycles), the operator asked how to make sure "nothing like
+this happens again" and approved building a self-check — with the hard
+condition that it must never interfere with scanning.
+
+**Built:** `workflow/watchdog.py::ScannerWatchdog` — an isolated
+background asyncio task started/stopped by `ContinuousScanner.run()`
+alongside the Telegram listener (same lifecycle pattern, same "a helper
+that can't start must not stop the scanner" guard). Every
+`watchdog_check_seconds` (60s) it reads
+`ContinuousScanner.seconds_since_last_cycle()` — a timestamp the scan
+loop already stamps after each successful cycle (failing cycles
+deliberately don't count as progress; before the first cycle it measures
+from scanner start, so a boot that never completes one cycle also
+trips). Past `watchdog_stall_seconds` (15 min) it sends ONE Telegram
+message via the command listener's new public `send_text()` (with
+restart instructions), repeats only after `watchdog_realert_seconds`
+(1h), and sends a one-time "resumed" note on recovery.
+
+**Non-interference guarantees (the operator's condition):** the scan
+loop gains exactly one timestamp assignment per cycle — nothing else.
+The watchdog only reads; every check iteration is wrapped in a
+catch-all (a watchdog bug or Telegram outage logs a warning and waits
+for the next tick); no notifier = log-only mode; start failure is
+caught in run() and scanning proceeds.
+
+**Honest limitation, told to the operator:** an in-process watchdog
+dies with the process — it cannot report a hard OOM kill (systemd
+Restart= covers those). It catches the alive-but-stuck case: hung
+provider call, starved event loop, wedged cycle — exactly the failure
+mode of this week's incidents.
+
+Config: `MEMEINTEL_WORKFLOW_WATCHDOG_{ENABLED,STALL_SECONDS,
+CHECK_SECONDS,REALERT_SECONDS}` (Rule 17), on by default, validated
+(stall >= check). Suite: **925 passing** (+17).
+
 ## Notable implementation choices (Rule 19)
 
 - **Python 3.11 + asyncio** over Node.js (both allowed by spec): the

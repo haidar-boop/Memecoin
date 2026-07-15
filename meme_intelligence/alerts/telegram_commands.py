@@ -436,6 +436,15 @@ class TelegramCommandListener(BaseCollector):
         if reply:
             await self._reply(reply, reply_markup=markup)
 
+    async def send_text(self, text: str) -> bool:
+        """Unprompted plain-text message to the operator chat.
+
+        Public entry point for out-of-band notifications (the scanner
+        watchdog). Same delivery path as command replies: never raises,
+        returns False on failure so the caller can log-and-move-on.
+        """
+        return await self._reply(text)
+
     async def _reply(self, text: str, *, reply_markup: dict | None = None) -> bool:
         """Plain-text reply to the operator chat. No parse_mode (nothing the
         text contains can become live markdown), previews off, length-capped.

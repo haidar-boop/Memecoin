@@ -61,6 +61,7 @@ from meme_intelligence.scanners.launch_monitor import (
     collect_launch_candidates,
 )
 from meme_intelligence.workflow.pipeline import PipelineResult, ResearchPipeline
+from meme_intelligence.workflow.watchdog import ScannerWatchdog
 from meme_intelligence.workflow.watchlist_review import (
     TIER_FOR_CLASSIFICATION as _TIER_FOR_CLASSIFICATION,
     stale_watchlist_reason,
@@ -263,6 +264,11 @@ class ContinuousScanner:
         self._started_at: datetime | None = None
         self._cycles_run = 0
         self._last_cycle_stats: CycleStats | None = None
+        # Stall watchdog (operator request, 2026-07-15): stamped after every
+        # SUCCESSFUL cycle only — failing cycles deliberately don't count as
+        # progress. Built in run() once the Telegram listener is known.
+        self._last_cycle_completed_at: datetime | None = None
+        self._watchdog = None
 
         self._discovery = DiscoveryEngine(settings.discovery, now_func=now_func)
         # Pump.fun launch funnel (Part 32.5 Section 3): needs the stream,
@@ -390,6 +396,18 @@ class ContinuousScanner:
         """
         self._telegram = listener
 
+    def seconds_since_last_cycle(self) -> float | None:
+        """Seconds since the last SUCCESSFUL cycle completed (watchdog input).
+
+        Before the first cycle completes, measures from scanner start — so a
+        boot that never manages a single cycle still trips the stall alarm.
+        ``None`` until run() begins. Read-only; called from the watchdog task.
+        """
+        anchor = self._last_cycle_completed_at or self._started_at
+        if anchor is None:
+            return None
+        return max(0.0, (self._now() - anchor).total_seconds())
+
     def status_snapshot(self) -> dict:
         """Cheap health snapshot for the /status Telegram command (Project 2)."""
         uptime = None
@@ -454,6 +472,19 @@ class ContinuousScanner:
             except Exception as exc:  # noqa: BLE001
                 self._logger.error("telegram command listener failed to start "
                                    "(scanning continues): %s", exc)
+        if self._settings.workflow.watchdog_enabled:
+            # Isolated task, same guarantee as the listener (Rule 7): a
+            # watchdog that cannot start must not stop the scanner.
+            try:
+                notify = self._telegram.send_text if self._telegram is not None else None
+                self._watchdog = ScannerWatchdog(
+                    self._settings.workflow, self.seconds_since_last_cycle,
+                    notify, now_func=self._now)
+                await self._watchdog.start()
+            except Exception as exc:  # noqa: BLE001
+                self._watchdog = None
+                self._logger.error("scanner watchdog failed to start "
+                                   "(scanning continues): %s", exc)
         self._logger.info(
             "continuous scanner started: networks=%s interval=%.0fs cycles=%s",
             self._settings.workflow.network_list,
@@ -471,6 +502,7 @@ class ContinuousScanner:
                 history.append(stats)
                 self._cycles_run = cycle
                 self._last_cycle_stats = stats
+                self._last_cycle_completed_at = self._now()  # watchdog heartbeat
                 backoff = _ERROR_BACKOFF_START  # healthy cycle resets the backoff
                 self._logger.info(
                     "cycle %d: %d pools, %d candidates, %d analyzed, "
@@ -496,6 +528,12 @@ class ContinuousScanner:
                 break
             await self._sleep(self._settings.workflow.monitor_interval_seconds)
 
+        if self._watchdog is not None:
+            try:
+                await self._watchdog.stop()
+            except Exception as exc:  # noqa: BLE001 — shutdown must not hang on the watchdog
+                self._logger.warning("scanner watchdog stop failed: %s", exc)
+            self._watchdog = None
         if self._telegram is not None:
             try:
                 await self._telegram.stop()

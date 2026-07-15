@@ -787,6 +787,19 @@ class WorkflowSettings:
     # Telegram, for minutes. Bounded, the backlog drains ~200 per recheck
     # pass (every ~7.5 min at defaults) while the bot stays responsive.
     watchlist_stale_archive_limit: int = 200
+    # Scanner stall watchdog (operator request after the 2026-07-15 OOM
+    # crash loop): an isolated background task that messages the operator on
+    # Telegram when no scan cycle has completed for ``watchdog_stall_seconds``
+    # (checked every ``watchdog_check_seconds``; repeats only after
+    # ``watchdog_realert_seconds``; sends a one-time recovery note when
+    # cycles resume). It only READS the scanner's last-cycle timestamp — it
+    # adds zero work to the scan loop and every failure inside it degrades
+    # to a log line (Rule 7). It cannot report a dead process (it dies with
+    # it — systemd Restart= covers that); it reports the alive-but-stuck case.
+    watchdog_enabled: bool = True
+    watchdog_stall_seconds: float = 900.0    # 15 min without a completed cycle = stalled
+    watchdog_check_seconds: float = 60.0     # how often the watchdog looks
+    watchdog_realert_seconds: float = 3600.0  # min gap between repeat stall alerts
 
     def __post_init__(self) -> None:
         if not self.networks.strip():
@@ -815,6 +828,16 @@ class WorkflowSettings:
             raise ConfigurationError(
                 "workflow setting 'watchlist_stale_archive_limit' must be >= 0, "
                 f"got {self.watchlist_stale_archive_limit}")
+        for name in ("watchdog_stall_seconds", "watchdog_check_seconds",
+                     "watchdog_realert_seconds"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value <= 0:
+                raise ConfigurationError(f"workflow setting '{name}' must be positive")
+        if self.watchdog_stall_seconds < self.watchdog_check_seconds:
+            raise ConfigurationError(
+                "watchdog_stall_seconds must be >= watchdog_check_seconds "
+                "(a stall threshold below the check cadence can never be observed "
+                "accurately)")
 
     @property
     def network_list(self) -> list[str]:

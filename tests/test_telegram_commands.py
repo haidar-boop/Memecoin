@@ -899,3 +899,30 @@ async def test_wallets_sanitizes_malicious_wallet_strings():
     assert "`" not in text                  # backticks neutralized
     assert "aa\n" not in text               # newline dropped from the wallet echo
     assert "aa'@here'" in text              # sanitized form is what renders
+
+
+# ---- send_text (watchdog out-of-band notifications, 2026-07-15) ----
+
+async def test_send_text_delivers_plain_message_to_operator_chat():
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage)
+        delivered = await listener.send_text("watchdog test message")
+    assert delivered is True
+    bodies = sent_messages(calls)
+    assert len(bodies) == 1
+    assert bodies[0]["chat_id"] == CHAT_ID
+    assert bodies[0]["text"] == "watchdog test message"
+
+
+async def test_send_text_reports_failure_without_raising():
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, _ = make_listener(storage)
+
+        async def failing_get_json(path, params=None, *, cache_key=None,
+                                   cache_ttl=None, headers=None, json_body=None,
+                                   error_status_as_json=None):
+            raise CollectorError("telegram unreachable")
+
+        listener._get_json = failing_get_json
+        delivered = await listener.send_text("watchdog test message")
+    assert delivered is False

@@ -413,3 +413,28 @@ def test_peak_decline_and_flat_band_defaults_and_overrides():
     assert s2.momentum.flat_trend_band_percent == 1.5
     with pytest.raises(ConfigurationError):
         Settings.from_env(env={"MEMEINTEL_ALERT_ENGINE_PEAK_DECLINE_SUPPRESSION_POINTS": "0"})
+
+
+def test_workflow_watchdog_settings_default_on_and_validate():
+    """Scanner stall watchdog (operator request, 2026-07-15): on by default,
+    sane cadence, and a stall threshold below the check cadence is rejected
+    (it could never be observed accurately)."""
+    from meme_intelligence.config.settings import WorkflowSettings
+
+    wf = WorkflowSettings()
+    assert wf.watchdog_enabled is True
+    assert wf.watchdog_stall_seconds == 900.0
+    assert wf.watchdog_check_seconds == 60.0
+    assert wf.watchdog_realert_seconds == 3600.0
+    with pytest.raises(ConfigurationError, match="watchdog_stall_seconds"):
+        WorkflowSettings(watchdog_stall_seconds=0)
+    with pytest.raises(ConfigurationError, match="watchdog_check_seconds"):
+        WorkflowSettings(watchdog_check_seconds=-5)
+    with pytest.raises(ConfigurationError, match="watchdog_stall_seconds must be >="):
+        WorkflowSettings(watchdog_stall_seconds=30, watchdog_check_seconds=60)
+    settings = Settings.from_env(env={
+        "MEMEINTEL_WORKFLOW_WATCHDOG_ENABLED": "false",
+        "MEMEINTEL_WORKFLOW_WATCHDOG_STALL_SECONDS": "600",
+    })
+    assert settings.workflow.watchdog_enabled is False
+    assert settings.workflow.watchdog_stall_seconds == 600.0
