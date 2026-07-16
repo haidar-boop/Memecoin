@@ -796,6 +796,20 @@ class TelegramCommandListener(BaseCollector):
         ]
         if metrics.get("brier_score") is not None:
             lines.append(f"brier score: {_opt(metrics.get('brier_score'))}")
+        # Current-regime window (2026-07-16 audit): the lifetime numbers above
+        # mix eras (including the one before the classifier ever trained);
+        # this block grades only predictions made in the last N days.
+        recent = metrics.get("recent")
+        if isinstance(recent, dict):
+            r_rug = recent.get("rug") or {}
+            r_dir = recent.get("directional") or {}
+            days = recent.get("window_days", 0)
+            lines.append(
+                f"last {days:g}d: graded {recent.get('resolved_count', 0)} | "
+                f"hit rate {_opt(r_dir.get('hit_rate'))} (n={r_dir.get('samples', 0)}) | "
+                f"rug P/R {_opt(r_rug.get('precision'))}/{_opt(r_rug.get('recall'))}"
+                + (f" | brier {_opt(recent.get('brier_score'))}"
+                   if recent.get("brier_score") is not None else ""))
         ensemble = metrics.get("ensemble_accuracy") or {}
         weights = [f"{source} {_opt(report.get('accuracy'))} (n={report.get('samples', 0)})"
                    for source, report in ensemble.items()
@@ -814,9 +828,15 @@ class TelegramCommandListener(BaseCollector):
         from meme_intelligence.learning.metrics import veto_gate
 
         ls = self._ctx.settings.learning
-        rug = metrics.get("rug") or {}
+        # Mirror the controller's gate input exactly: lifetime by default,
+        # the current-regime window when the operator opted in — the card
+        # must describe the authority the veto ACTUALLY runs on.
+        gate_input = metrics
+        if ls.veto_use_windowed_metrics and isinstance(metrics.get("recent"), dict):
+            gate_input = metrics["recent"]
+        rug = gate_input.get("rug") or {}
         graded = int(rug.get("true_positives") or 0) + int(rug.get("false_positives") or 0)
-        gate = veto_gate(metrics, min_accuracy=ls.veto_min_accuracy,
+        gate = veto_gate(gate_input, min_accuracy=ls.veto_min_accuracy,
                          min_samples=ls.veto_min_samples)
         if gate is None:
             earned = (f"not earned yet — rug precision {_opt(rug.get('precision'))} "

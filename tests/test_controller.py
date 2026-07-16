@@ -1800,3 +1800,36 @@ async def test_watchdog_start_failure_does_not_stop_the_scanner(monkeypatch):
                                   {pair.base_token.address: clean_profile(pair.base_token)})
         history = await scanner.run(max_cycles=1)   # must not raise
         assert len(history) == 1                    # scanning proceeded normally
+
+
+def test_mind_veto_windowed_authority_opt_in():
+    """The authority gate reads LIFETIME metrics by default; the operator can
+    opt in to the current-regime window (2026-07-16 audit, upgrade #2). Here
+    lifetime is too weak to earn authority but the window is strong — only
+    the opted-in scanner vetoes."""
+    pair = make_pair()
+
+    class WindowedMind(FakeMind):
+        def __init__(self):
+            super().__init__(p_rug=0.99)
+            self._metrics = {
+                "rug": {"precision": 0.4, "true_positives": 4,
+                        "false_positives": 6},              # lifetime: weak
+                "recent": {"window_days": 7.0,
+                           "rug": {"precision": 0.9, "true_positives": 18,
+                                   "false_positives": 2}},  # this week: strong
+            }
+
+    default = make_learning_settings_env(MEMEINTEL_LEARNING_ENABLE_IN_MONITOR="true")
+    opted_in = make_learning_settings_env(
+        MEMEINTEL_LEARNING_ENABLE_IN_MONITOR="true",
+        MEMEINTEL_LEARNING_VETO_USE_WINDOWED_METRICS="true")
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        # Default (lifetime input): precision 0.4 < 0.70 floor -> abstains.
+        scanner = make_veto_scanner(storage, WindowedMind(), default)
+        assert scanner._deterministic_risk_veto(fake_veto_input(pair), [], None) is None
+        # Opted in (windowed input): precision 0.9 over 20 calls -> vetoes.
+        scanner = make_veto_scanner(storage, WindowedMind(), opted_in)
+        reason = scanner._deterministic_risk_veto(fake_veto_input(pair), [], None)
+        assert reason is not None
+        assert "precision 0.90" in reason and "20 graded" in reason

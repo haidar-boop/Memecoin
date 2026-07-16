@@ -547,6 +547,36 @@ class LearningStore:
         return cursor.rowcount > 0
 
     @_locked
+    def graded_predictions(self) -> list[tuple[dict, str, datetime | None]]:
+        """Every resolved coin's stored prediction in ONE locked query.
+
+        Returns ``(payload, final_bucket_value, prediction_created_at)``
+        tuples — exactly the inputs metric grading needs. Replaces the old
+        per-coin walk (resolved_coin_ids + get_prediction + coin_final_bucket
+        per id: ~2 lock acquisitions per coin, >50k per /mind at 25k+ resolved
+        coins, growing with lifetime forever — the same grows-with-history
+        cost shape the training cap fixed for retrains, 2026-07-16 audit).
+        ``created_at`` is the PREDICTION's timestamp (when the verdict was
+        made), the only clean era key: ``learning_coins.updated_at`` is
+        re-bumped by every later label write, so it cannot split eras.
+        """
+        rows = self._conn.execute(
+            """SELECT p.payload AS payload, c.final_bucket AS final_bucket,
+                      p.created_at AS created_at
+               FROM learning_predictions p
+               JOIN learning_coins c ON c.id = p.coin_id
+               WHERE c.final_bucket IS NOT NULL""",
+        ).fetchall()
+        result = []
+        for r in rows:
+            try:
+                created = datetime.fromisoformat(r["created_at"])
+            except (TypeError, ValueError):
+                created = None  # unparseable timestamp: lifetime row only
+            result.append((json.loads(r["payload"]), r["final_bucket"], created))
+        return result
+
+    @_locked
     def get_prediction(self, coin_id: int) -> dict | None:
         row = self._conn.execute(
             "SELECT payload FROM learning_predictions WHERE coin_id = ?", (coin_id,),

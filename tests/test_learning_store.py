@@ -163,3 +163,34 @@ async def test_iter_resolved_records_releases_the_lock_between_coins():
     rest = list(it)
     assert len(rest) == 2                  # walk resumes and completes
     assert len(store.resolved_records()) == 3   # list form still equivalent
+
+
+def test_graded_predictions_single_query_join():
+    """graded_predictions must return (payload, final_bucket, created_at) for
+    resolved coins WITH stored predictions only — unresolved coins and coins
+    without predictions are excluded (2026-07-16 single-query metrics path)."""
+    store = LearningStore(":memory:", now_func=lambda: NOW)
+    resolved = store.record_detection(
+        TokenIdentity(chain="solana", address="Graded1"), detected_at=NOW)
+    store.record_prediction(resolved, {"predicted_label": "rug",
+                                       "distribution": {"rug": 0.9}})
+    store.record_label(resolved, OutcomeLabel(horizon_hours=24.0,
+                                              bucket=OutcomeBucket.RUG,
+                                              forward_return_percent=-95.0,
+                                              resolved_at=NOW))
+    unresolved = store.record_detection(
+        TokenIdentity(chain="solana", address="Pending1"), detected_at=NOW)
+    store.record_prediction(unresolved, {"predicted_label": "pump"})
+    no_prediction = store.record_detection(
+        TokenIdentity(chain="solana", address="Silent1"), detected_at=NOW)
+    store.record_label(no_prediction, OutcomeLabel(horizon_hours=24.0,
+                                                   bucket=OutcomeBucket.PUMP,
+                                                   forward_return_percent=90.0,
+                                                   resolved_at=NOW))
+
+    rows = store.graded_predictions()
+    assert len(rows) == 1
+    payload, bucket_value, created_at = rows[0]
+    assert payload["predicted_label"] == "rug"      # payload JSON round-trips
+    assert bucket_value == "rug"
+    assert created_at == NOW                         # prediction's own clock

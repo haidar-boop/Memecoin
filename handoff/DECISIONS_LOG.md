@@ -2020,6 +2020,43 @@ threshold, the 5000 training cap, and the RUG label definition
 (rugpull-vs-abandonment is a spec question for the operator, Rule 20).
 Suite: **935 passing** (+10).
 
+## 2026-07-16 — Mind upgrade #2: windowed /mind metrics + the single-query grading path
+
+The audit's measurement prerequisite: every /mind headline number was a
+LIFETIME aggregate over all ~25k graded predictions — mixing the era before
+the classifier ever trained (fixed 2026-07-15) and older coin populations
+into one average — so no upgrade's effect could be observed. And computing
+it walked every resolved coin with ~2 locked queries each (>50k lock
+acquisitions per /mind and per veto-authority refresh every 30 min): the
+last cost in the system that grew with lifetime history instead of a cap.
+
+**Built:**
+- `LearningStore.graded_predictions()` — ONE locked join
+  (predictions × coins) returning exactly the grading inputs. The era key
+  is the PREDICTION's own `created_at`: `learning_coins.updated_at` is
+  re-bumped by every later label write (rug upgrades on old coins), so it
+  cannot split eras — the audit verifier's correction, honored.
+- `get_learning_metrics` now also grades only predictions made in the last
+  `metrics_window_days` (default 7, env
+  `MEMEINTEL_LEARNING_METRICS_WINDOW_DAYS`, 0=off) into
+  `metrics["recent"]`, computed in the same single pass. Lifetime numbers
+  keep their exact old meaning — a golden-value test proves the join path
+  reproduces the old per-coin walk bit-for-bit (it feeds the veto gate, a
+  live safety control).
+- /mind renders a `last 7d: graded N | hit rate ... | rug P/R ... | brier`
+  line between the lifetime numbers and the ensemble line.
+- Veto authority still gates on LIFETIME numbers by default (Rule 3 — the
+  input to a live safety control never changes silently);
+  `MEMEINTEL_LEARNING_VETO_USE_WINDOWED_METRICS=true` opts it onto the
+  window (config-validated to require a window > 0), and the /mind
+  authority line mirrors whichever input the veto actually uses.
+
+Interpretive note recorded for the operator: the windowed hit rate will
+still look "low" — the current population's ~93% rug base rate caps the
+achievable directional hit rate near 0.26; the windowed card measures
+progress toward that ceiling, not toward the old 0.54 (different world).
+Suite: **945 passing** (+10).
+
 ## Notable implementation choices (Rule 19)
 
 - **Python 3.11 + asyncio** over Node.js (both allowed by spec): the

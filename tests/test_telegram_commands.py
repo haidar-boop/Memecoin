@@ -926,3 +926,71 @@ async def test_send_text_reports_failure_without_raising():
         listener._get_json = failing_get_json
         delivered = await listener.send_text("watchdog test message")
     assert delivered is False
+
+
+async def test_mind_renders_current_regime_window():
+    """/mind must show the windowed (current-regime) line alongside lifetime
+    numbers when the metrics carry a 'recent' section (2026-07-16 audit)."""
+    class FakeLearning:
+        def get_learning_metrics(self, *, persist=True):
+            return {"analog_memory_size": 12, "resolved_count": 100,
+                    "directional": {"hit_rate": 0.10, "samples": 50},
+                    "rug": {"precision": 0.98, "recall": 0.79},
+                    "brier_score": 0.32,
+                    "recent": {"window_days": 7.0, "resolved_count": 40,
+                               "directional": {"hit_rate": 0.25, "samples": 8},
+                               "rug": {"precision": 0.95, "recall": 0.80},
+                               "brier_score": 0.21},
+                    "classifier_ready": True}
+
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage, learning=FakeLearning())
+        await listener._handle_update(message_update("/mind"))
+    text = sent_messages(calls)[0]["text"]
+    assert "last 7d: graded 40" in text
+    assert "hit rate 0.25 (n=8)" in text
+    assert "rug P/R 0.95/0.80" in text
+    assert "brier 0.21" in text
+
+
+async def test_mind_without_recent_section_renders_lifetime_only():
+    class FakeLearning:
+        def get_learning_metrics(self, *, persist=True):
+            return {"analog_memory_size": 5, "resolved_count": 3,
+                    "directional": {"hit_rate": 0.5, "samples": 2},
+                    "rug": {"precision": 1.0, "recall": 1.0},
+                    "classifier_ready": False}
+
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage, learning=FakeLearning())
+        await listener._handle_update(message_update("/mind"))
+    text = sent_messages(calls)[0]["text"]
+    assert "last 7d" not in text                     # no windowed line
+    assert "memory: 5 coins" in text
+
+
+async def test_veto_status_line_reflects_windowed_opt_in():
+    """When the operator opts the veto's authority onto the windowed numbers,
+    the /mind card must describe THAT input — not the lifetime one."""
+    class FakeLearning:
+        def get_learning_metrics(self, *, persist=True):
+            return {"analog_memory_size": 1, "resolved_count": 30,
+                    "directional": {"hit_rate": 0.1, "samples": 10},
+                    "rug": {"precision": 0.4, "true_positives": 4,
+                            "false_positives": 6, "recall": 0.5},
+                    "recent": {"window_days": 7.0, "resolved_count": 20,
+                               "directional": {"hit_rate": 0.2, "samples": 5},
+                               "rug": {"precision": 0.9, "true_positives": 18,
+                                       "false_positives": 2, "recall": 0.8}},
+                    "classifier_ready": True}
+
+    settings = make_settings(
+        MEMEINTEL_LEARNING_VETO_ENABLED="true",
+        MEMEINTEL_LEARNING_VETO_USE_WINDOWED_METRICS="true")
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage, learning=FakeLearning(),
+                                        settings=settings)
+        await listener._handle_update(message_update("/mind"))
+    text = sent_messages(calls)[0]["text"]
+    # Authority line grades the WINDOWED input: 0.90 over 20, earned.
+    assert "EARNED — rug precision 0.90 over 20 graded rug calls" in text

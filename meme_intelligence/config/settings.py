@@ -1303,6 +1303,22 @@ class LearningSettings:
     min_snapshots_for_confidence: int = 3    # fewer snapshots -> low confidence
     cold_start_samples: int = 100            # resolved coins below this = cold start
 
+    # Windowed self-evaluation (2026-07-16 mind-layer audit): /mind's headline
+    # numbers were LIFETIME aggregates — they mixed the era before the
+    # classifier had ever trained (fixed 2026-07-15) and the pre-ceiling coin
+    # population into one average, so nothing about the CURRENT models could be
+    # read off the card. get_learning_metrics now also grades only the
+    # predictions MADE in the last N days (keyed on the prediction's own
+    # created_at — the coin row's updated_at is re-bumped by later label writes
+    # and cannot split eras) and reports them alongside the lifetime numbers.
+    # 0 disables the windowed section. The window rolls forward, so it always
+    # reflects the models and coin population you are running TODAY.
+    metrics_window_days: float = 7.0
+    # Feed the veto's earned-authority gate from the windowed numbers instead
+    # of lifetime (opt-in, Rule 3: the authority input for a live safety
+    # control must never change silently). Requires metrics_window_days > 0.
+    veto_use_windowed_metrics: bool = False
+
     # Alert veto (Project 3, ROADMAP #3): the mind layer's P(rug) blocks
     # HIGH opportunities ONLY once its measured rug precision has earned it
     # (Rule 8 — authority is proven, never assumed). Off by default; the
@@ -1360,6 +1376,14 @@ class LearningSettings:
             raise ConfigurationError(
                 "learning max_training_records must be >= 0 (0 = unlimited), got "
                 f"{self.max_training_records}")
+        if not math.isfinite(self.metrics_window_days) or self.metrics_window_days < 0:
+            raise ConfigurationError(
+                "learning metrics_window_days must be >= 0 (0 = off), got "
+                f"{self.metrics_window_days}")
+        if self.veto_use_windowed_metrics and self.metrics_window_days <= 0:
+            raise ConfigurationError(
+                "learning veto_use_windowed_metrics requires metrics_window_days > 0 "
+                "(the veto cannot gate on a window that is disabled)")
 
     def horizon_hours(self) -> tuple[float, ...]:
         """Parse ``horizons_hours`` into an ordered tuple of positive floats."""

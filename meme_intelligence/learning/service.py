@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Callable, Sequence
 
 import numpy as np
@@ -617,23 +617,41 @@ class LearningService:
         walk materialized every resolved coin's full record (24,884 coins ×
         dozens of snapshots each) just to read ``final_bucket``, which made
         every /mind command a multi-minute, memory-heavy crawl (2026-07-15
-        incident)."""
+        incident). Now ONE locked join query (``graded_predictions``) instead
+        of ~2 lock acquisitions per resolved coin — the last cost in the
+        system that grew with lifetime history rather than a cap
+        (2026-07-16 audit).
+
+        Alongside the lifetime numbers, ``metrics["recent"]`` grades only the
+        predictions MADE in the last ``metrics_window_days`` (keyed on the
+        prediction's own ``created_at``): lifetime aggregates mix the era
+        before the classifier ever trained and older coin populations into
+        one average, so only the windowed section says anything about the
+        models running today. Both are reported; neither replaces the other
+        (Rule 8 — measure honestly, interpret separately)."""
+        rows = self._store.graded_predictions()
+        window_days = self._ls.metrics_window_days
+        cutoff = (self._now() - timedelta(days=window_days)
+                  if window_days > 0 else None)
+
         records: list[PredictionRecord] = []
-        for coin_id in self._store.resolved_coin_ids():
-            prediction = self._store.get_prediction(coin_id)
-            if not prediction:
-                continue
-            bucket = self._store.coin_final_bucket(coin_id)
-            if bucket is None:
-                continue
-            records.append(PredictionRecord(
+        recent: list[PredictionRecord] = []
+        for prediction, bucket_value, created_at in rows:
+            record = PredictionRecord(
                 predicted_distribution=prediction.get("distribution", {}),
                 predicted_label=prediction.get("predicted_label", ""),
-                actual_label=bucket.value,
+                actual_label=bucket_value,
                 archetype=prediction.get("archetype"),
                 novelty_flagged=prediction.get("novelty_flagged", False),
-            ))
+            )
+            records.append(record)
+            if cutoff is not None and created_at is not None and created_at >= cutoff:
+                recent.append(record)
+
         metrics = compute_metrics(records)
+        if cutoff is not None:
+            metrics["recent"] = compute_metrics(recent)
+            metrics["recent"]["window_days"] = window_days
         metrics["ensemble_accuracy"] = self._ensemble.accuracy_report()
         metrics["analog_memory_size"] = self._analog.size
         metrics["classifier_ready"] = self._classifier.is_ready

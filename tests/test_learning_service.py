@@ -498,3 +498,85 @@ def test_max_training_records_zero_is_unlimited():
     _seed(service, n_each=15)  # 30 resolved
     service.retrain_if_due()
     assert service._analog.size == 30                # nothing dropped
+
+
+# ---- Windowed + single-query metrics (2026-07-16 audit, upgrade #2) ----
+
+def test_metrics_join_matches_the_old_per_coin_walk():
+    """Golden-value guard: the single-join metrics path must reproduce the
+    pre-2026-07-16 per-coin walk (resolved_coin_ids + get_prediction +
+    coin_final_bucket) exactly — this feeds the veto authority gate, a live
+    safety control, so any drift is a bug."""
+    from meme_intelligence.learning.metrics import PredictionRecord, compute_metrics
+
+    service = _service()
+    _seed(service)  # resolved coins WITHOUT predictions: both paths must skip
+    for i in range(6):
+        addr = f"g{i}"
+        rugged = i % 2 == 0
+        service.evaluate_coin(addr, "solana",
+                              _rug_series() if rugged else _pump_series())
+        service.resolve_outcome(addr, "solana", 24.0,
+                                -95.0 if rugged else 80.0, is_rug=rugged)
+    metrics = service.get_learning_metrics(persist=False)
+
+    store = service._store
+    records = []
+    for coin_id in store.resolved_coin_ids():
+        prediction = store.get_prediction(coin_id)
+        if not prediction:
+            continue
+        bucket = store.coin_final_bucket(coin_id)
+        if bucket is None:
+            continue
+        records.append(PredictionRecord(
+            predicted_distribution=prediction.get("distribution", {}),
+            predicted_label=prediction.get("predicted_label", ""),
+            actual_label=bucket.value,
+            archetype=prediction.get("archetype"),
+            novelty_flagged=prediction.get("novelty_flagged", False),
+        ))
+    expected = compute_metrics(records)
+    for key, value in expected.items():
+        assert metrics[key] == value, f"metrics[{key!r}] drifted from the old walk"
+
+
+def test_metrics_recent_window_grades_only_recent_predictions():
+    """The 'recent' section grades only predictions MADE inside the window,
+    keyed on the prediction's own created_at — a coin from an older era must
+    not appear in the current-regime numbers even after later label writes
+    bump its updated_at."""
+    from datetime import timedelta
+
+    env = dict(_ENV, MEMEINTEL_LEARNING_METRICS_WINDOW_DAYS="7")
+    settings = Settings.from_env(env=env)
+    clock = {"now": NOW - timedelta(days=30)}
+    store = LearningStore(":memory:", now_func=lambda: clock["now"])
+    service = LearningService(settings, store=store, now_func=lambda: clock["now"])
+
+    service.evaluate_coin("old1", "solana", _rug_series())      # 30 days ago
+    service.resolve_outcome("old1", "solana", 24.0, -90.0, is_rug=True)
+    clock["now"] = NOW
+    service.evaluate_coin("new1", "solana", _rug_series())      # inside window
+    service.resolve_outcome("new1", "solana", 24.0, -90.0, is_rug=True)
+    # A LATE label write on the old coin bumps its updated_at but must not
+    # drag its old prediction into the window (the era key is created_at).
+    clock["now"] = NOW + timedelta(hours=1)
+    service.resolve_outcome("old1", "solana", 168.0, -99.0, is_rug=True)
+
+    metrics = service.get_learning_metrics(persist=False)
+    assert metrics["resolved_count"] == 2            # lifetime sees both
+    recent = metrics["recent"]
+    assert recent["window_days"] == 7.0
+    assert recent["resolved_count"] == 1             # only the new-era one
+
+
+def test_metrics_window_zero_disables_recent_section():
+    env = dict(_ENV, MEMEINTEL_LEARNING_METRICS_WINDOW_DAYS="0")
+    settings = Settings.from_env(env=env)
+    store = LearningStore(":memory:", now_func=lambda: NOW)
+    service = LearningService(settings, store=store, now_func=lambda: NOW)
+    service.evaluate_coin("w0", "solana", _rug_series())
+    service.resolve_outcome("w0", "solana", 24.0, -90.0, is_rug=True)
+    metrics = service.get_learning_metrics(persist=False)
+    assert "recent" not in metrics

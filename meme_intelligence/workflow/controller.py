@@ -1038,10 +1038,18 @@ class ContinuousScanner:
         from meme_intelligence.learning.metrics import veto_gate
 
         metrics = self._learning.get_learning_metrics(persist=False)
-        gate = veto_gate(metrics, min_accuracy=ls.veto_min_accuracy,
+        # The authority gate reads LIFETIME numbers unless the operator opted
+        # in to the windowed (current-regime) ones — the input to a live
+        # safety control must never change silently (2026-07-16 audit,
+        # Rule 3). Config validation guarantees the window exists when the
+        # opt-in is set; the isinstance check covers a stale artifact only.
+        gate_input = metrics
+        if ls.veto_use_windowed_metrics and isinstance(metrics.get("recent"), dict):
+            gate_input = metrics["recent"]
+        gate = veto_gate(gate_input, min_accuracy=ls.veto_min_accuracy,
                          min_samples=ls.veto_min_samples)
         if gate is None:
-            rug = metrics.get("rug") or {}
+            rug = gate_input.get("rug") or {}
             graded = int(rug.get("true_positives") or 0) + int(rug.get("false_positives") or 0)
             self._logger.info(
                 "mind-layer veto abstains: authority not earned yet "

@@ -93,3 +93,23 @@ def test_horizons_reject_non_numeric():
 def test_rug_weight_negative_rejected():
     with pytest.raises(ConfigurationError):
         RugSignalWeights(unsellable=-5.0)
+
+
+def test_metrics_window_defaults_and_validation():
+    # Windowed self-evaluation (2026-07-16 audit): on by default at 7 days.
+    s = LearningSettings()
+    assert s.metrics_window_days == 7.0
+    assert s.veto_use_windowed_metrics is False      # authority stays lifetime
+    assert LearningSettings(metrics_window_days=0).metrics_window_days == 0
+    with pytest.raises(ConfigurationError, match="metrics_window_days"):
+        LearningSettings(metrics_window_days=-1.0)
+    env = Settings.from_env(env={"MEMEINTEL_LEARNING_METRICS_WINDOW_DAYS": "3"})
+    assert env.learning.metrics_window_days == 3.0
+
+
+def test_veto_windowed_opt_in_requires_a_window():
+    # The veto cannot gate on a window that is disabled (cross-field guard).
+    with pytest.raises(ConfigurationError, match="veto_use_windowed_metrics"):
+        LearningSettings(veto_use_windowed_metrics=True, metrics_window_days=0)
+    ok = LearningSettings(veto_use_windowed_metrics=True, metrics_window_days=7)
+    assert ok.veto_use_windowed_metrics is True
