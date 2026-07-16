@@ -947,7 +947,7 @@ async def test_mind_renders_current_regime_window():
         listener, calls = make_listener(storage, learning=FakeLearning())
         await listener._handle_update(message_update("/mind"))
     text = sent_messages(calls)[0]["text"]
-    assert "last 7d: graded 40" in text
+    assert "last 7d (labels maturing): graded 40" in text
     assert "hit rate 0.25 (n=8)" in text
     assert "rug P/R 0.95/0.80" in text
     assert "brier 0.21" in text
@@ -969,9 +969,10 @@ async def test_mind_without_recent_section_renders_lifetime_only():
     assert "memory: 5 coins" in text
 
 
-async def test_veto_status_line_reflects_windowed_opt_in():
-    """When the operator opts the veto's authority onto the windowed numbers,
-    the /mind card must describe THAT input — not the lifetime one."""
+async def test_veto_status_line_grades_lifetime_never_the_window():
+    """The authority line must describe the input the veto ACTUALLY runs on —
+    lifetime — even when a strong windowed section is present (the windowed
+    opt-in was cut in the 2026-07-16 review)."""
     class FakeLearning:
         def get_learning_metrics(self, *, persist=True):
             return {"analog_memory_size": 1, "resolved_count": 30,
@@ -984,13 +985,11 @@ async def test_veto_status_line_reflects_windowed_opt_in():
                                        "false_positives": 2, "recall": 0.8}},
                     "classifier_ready": True}
 
-    settings = make_settings(
-        MEMEINTEL_LEARNING_VETO_ENABLED="true",
-        MEMEINTEL_LEARNING_VETO_USE_WINDOWED_METRICS="true")
+    settings = make_settings(MEMEINTEL_LEARNING_VETO_ENABLED="true")
     with Storage(":memory:", now_func=lambda: NOW) as storage:
         listener, calls = make_listener(storage, learning=FakeLearning(),
                                         settings=settings)
         await listener._handle_update(message_update("/mind"))
     text = sent_messages(calls)[0]["text"]
-    # Authority line grades the WINDOWED input: 0.90 over 20, earned.
-    assert "EARNED — rug precision 0.90 over 20 graded rug calls" in text
+    # Lifetime precision 0.4 over 10 calls: NOT earned, window ignored.
+    assert "not earned yet — rug precision 0.40 over 10 graded rug calls" in text

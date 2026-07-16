@@ -2057,6 +2057,41 @@ achievable directional hit rate near 0.26; the windowed card measures
 progress toward that ceiling, not toward the old 0.54 (different world).
 Suite: **945 passing** (+10).
 
+### Review pass on upgrade #2 (same day): 7 confirmed findings, all fixed
+
+A 12-agent review (4 angles — correctness, cross-file tracing, concurrency/
+droplet budget, security — each finding adversarially verified) confirmed:
+
+1. **Windowed rug precision is structurally biased LOW** (medium): the 7d
+   window equals the backtest's 168h label horizon, so slow rugs confirm
+   only AFTER their prediction ages out — they enter the window's rug
+   stats solely as false positives, never as the corrected true positives.
+   Consequence: the `veto_use_windowed_metrics` opt-in built with #2 was a
+   footgun (window-scale authority over min 10 samples, on biased-low
+   precision). **Decision: the opt-in was CUT** — never deployed, so
+   removed outright; authority always reads lifetime. The /mind window
+   line now says "(labels maturing)" so the low rug P/R reads honestly
+   (Rule 8). Rebuild the opt-in only if a maturity-aware window design is
+   agreed first (Rule 20).
+2. **Whole-parse lock hold** (low×2): `graded_predictions` held the shared
+   cross-thread RLock for fetchall + 25k json.loads (~0.5-1s contiguous on
+   the droplet vs the old walk's sub-ms interleaving). Fixed: only the SQL
+   fetch holds the lock; JSON parsing runs outside it, rows consumed
+   destructively so raw rows and parsed dicts never fully coexist (also
+   trims the tripled-transient-memory finding).
+3. **Unbounded, attacker-inflatable read** (medium): every analyzed coin
+   stores a prediction row, so the metrics read grew with lifetime forever
+   (same shape as the pre-cap retrain). Fixed:
+   `MEMEINTEL_LEARNING_METRICS_MAX_RECORDS` (default 100k, newest-first,
+   0=unlimited).
+4. **timedelta overflow** (low): `METRICS_WINDOW_DAYS=1e10` passed
+   validation but crashed every /mind at runtime AND silently disarmed the
+   veto (its blanket except abstains). Fixed: window bounded to [0, 3650]
+   at startup (Rule 6 — fail loudly).
+
+One finding rejected on verification (timezone-naive created_at crash —
+not reachable with the code as committed). Suite: **947 passing** (+2).
+
 ## Notable implementation choices (Rule 19)
 
 - **Python 3.11 + asyncio** over Node.js (both allowed by spec): the

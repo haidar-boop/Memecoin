@@ -99,7 +99,7 @@ def test_metrics_window_defaults_and_validation():
     # Windowed self-evaluation (2026-07-16 audit): on by default at 7 days.
     s = LearningSettings()
     assert s.metrics_window_days == 7.0
-    assert s.veto_use_windowed_metrics is False      # authority stays lifetime
+    assert s.metrics_max_records == 100_000
     assert LearningSettings(metrics_window_days=0).metrics_window_days == 0
     with pytest.raises(ConfigurationError, match="metrics_window_days"):
         LearningSettings(metrics_window_days=-1.0)
@@ -107,9 +107,19 @@ def test_metrics_window_defaults_and_validation():
     assert env.learning.metrics_window_days == 3.0
 
 
-def test_veto_windowed_opt_in_requires_a_window():
-    # The veto cannot gate on a window that is disabled (cross-field guard).
-    with pytest.raises(ConfigurationError, match="veto_use_windowed_metrics"):
-        LearningSettings(veto_use_windowed_metrics=True, metrics_window_days=0)
-    ok = LearningSettings(veto_use_windowed_metrics=True, metrics_window_days=7)
-    assert ok.veto_use_windowed_metrics is True
+def test_metrics_window_rejects_overflow_scale_values():
+    """2026-07-16 review finding: past ~740k days the cutoff arithmetic
+    overflows datetime at RUNTIME — crashing every /mind and silently
+    disarming the veto (its blanket except abstains). A typo like 1e10 must
+    fail loudly at startup instead (Rule 6)."""
+    with pytest.raises(ConfigurationError, match="metrics_window_days"):
+        LearningSettings(metrics_window_days=1e10)
+    with pytest.raises(ConfigurationError, match="metrics_window_days"):
+        LearningSettings(metrics_window_days=3651)
+    assert LearningSettings(metrics_window_days=3650).metrics_window_days == 3650
+
+
+def test_metrics_max_records_validation():
+    with pytest.raises(ConfigurationError, match="metrics_max_records"):
+        LearningSettings(metrics_max_records=-1)
+    assert LearningSettings(metrics_max_records=0).metrics_max_records == 0

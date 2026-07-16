@@ -194,3 +194,27 @@ def test_graded_predictions_single_query_join():
     assert payload["predicted_label"] == "rug"      # payload JSON round-trips
     assert bucket_value == "rug"
     assert created_at == NOW                         # prediction's own clock
+
+
+def test_graded_predictions_limit_keeps_newest_first():
+    """The metrics read is bounded newest-first (2026-07-16 review: the row
+    count grows with lifetime and is attacker-inflatable)."""
+    from datetime import timedelta
+
+    clock = {"now": NOW}
+    store = LearningStore(":memory:", now_func=lambda: clock["now"])
+    for i in range(5):
+        clock["now"] = NOW + timedelta(hours=i)
+        cid = store.record_detection(
+            TokenIdentity(chain="solana", address=f"Cap{i}"), detected_at=clock["now"])
+        store.record_prediction(cid, {"predicted_label": f"label{i}"})
+        store.record_label(cid, OutcomeLabel(horizon_hours=24.0,
+                                             bucket=OutcomeBucket.RUG,
+                                             forward_return_percent=-90.0,
+                                             resolved_at=clock["now"]))
+    rows = store.graded_predictions(limit=2)
+    assert len(rows) == 2
+    # Newest two predictions (hours 4 and 3), oldest dropped by the cap.
+    labels = {payload["predicted_label"] for payload, _, _ in rows}
+    assert labels == {"label4", "label3"}
+    assert len(store.graded_predictions()) == 5   # unlimited default unchanged

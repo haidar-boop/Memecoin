@@ -1312,12 +1312,24 @@ class LearningSettings:
     # created_at — the coin row's updated_at is re-bumped by later label writes
     # and cannot split eras) and reports them alongside the lifetime numbers.
     # 0 disables the windowed section. The window rolls forward, so it always
-    # reflects the models and coin population you are running TODAY.
+    # reflects the models and coin population you are running TODAY. Honest
+    # caveat rendered on the card: labels mature for up to the longest
+    # backtest horizon (30d), so a slow rug confirmed after a prediction ages
+    # out of the window never enters its rug stats — windowed rug precision
+    # reads LOW while corrections are in flight (2026-07-16 review finding).
+    # The veto's earned-authority gate therefore always reads LIFETIME
+    # numbers; a windowed-authority opt-in was built and then CUT in review —
+    # window-scale authority (min 10 graded calls) plus the maturity bias is
+    # too thin an evidence base for a live safety control (Rule 8/21).
     metrics_window_days: float = 7.0
-    # Feed the veto's earned-authority gate from the windowed numbers instead
-    # of lifetime (opt-in, Rule 3: the authority input for a live safety
-    # control must never change silently). Requires metrics_window_days > 0.
-    veto_use_windowed_metrics: bool = False
+    # Bound on how many graded predictions one metrics pass reads (newest
+    # first; 0 = unlimited). The grading row count grows with the bot's
+    # lifetime and is attacker-inflatable (every analyzed coin stores one
+    # row), so an uncapped read is the same grows-forever cost shape the
+    # training cap closed (2026-07-15). At the default, months of history fit
+    # comfortably; beyond it "lifetime" numbers become "newest 100k", which
+    # is the honest trade (Rule 12).
+    metrics_max_records: int = 100_000
 
     # Alert veto (Project 3, ROADMAP #3): the mind layer's P(rug) blocks
     # HIGH opportunities ONLY once its measured rug precision has earned it
@@ -1376,14 +1388,20 @@ class LearningSettings:
             raise ConfigurationError(
                 "learning max_training_records must be >= 0 (0 = unlimited), got "
                 f"{self.max_training_records}")
-        if not math.isfinite(self.metrics_window_days) or self.metrics_window_days < 0:
+        # Upper bound: beyond ~740k days the cutoff arithmetic overflows
+        # datetime at RUNTIME, which would crash every /mind AND silently
+        # disarm the veto (its blanket except abstains) — a config typo must
+        # fail loudly at startup instead (Rule 6; 2026-07-16 review finding).
+        # 3650 days (10 years) is far beyond any meaningful window.
+        if (not math.isfinite(self.metrics_window_days)
+                or not 0 <= self.metrics_window_days <= 3650):
             raise ConfigurationError(
-                "learning metrics_window_days must be >= 0 (0 = off), got "
+                "learning metrics_window_days must be in [0, 3650] (0 = off), got "
                 f"{self.metrics_window_days}")
-        if self.veto_use_windowed_metrics and self.metrics_window_days <= 0:
+        if self.metrics_max_records < 0:
             raise ConfigurationError(
-                "learning veto_use_windowed_metrics requires metrics_window_days > 0 "
-                "(the veto cannot gate on a window that is disabled)")
+                "learning metrics_max_records must be >= 0 (0 = unlimited), got "
+                f"{self.metrics_max_records}")
 
     def horizon_hours(self) -> tuple[float, ...]:
         """Parse ``horizons_hours`` into an ordered tuple of positive floats."""

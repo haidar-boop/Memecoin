@@ -1802,11 +1802,12 @@ async def test_watchdog_start_failure_does_not_stop_the_scanner(monkeypatch):
         assert len(history) == 1                    # scanning proceeded normally
 
 
-def test_mind_veto_windowed_authority_opt_in():
-    """The authority gate reads LIFETIME metrics by default; the operator can
-    opt in to the current-regime window (2026-07-16 audit, upgrade #2). Here
-    lifetime is too weak to earn authority but the window is strong — only
-    the opted-in scanner vetoes."""
+def test_mind_veto_authority_ignores_windowed_metrics():
+    """The authority gate reads LIFETIME metrics, always: a strong windowed
+    section must NOT arm a veto whose lifetime record is weak. (A windowed-
+    authority opt-in was built and CUT in the 2026-07-16 review — the window's
+    rug precision is biased low while slow-rug labels mature, and window-scale
+    samples are too thin an evidence base for a live safety control.)"""
     pair = make_pair()
 
     class WindowedMind(FakeMind):
@@ -1820,16 +1821,8 @@ def test_mind_veto_windowed_authority_opt_in():
                                    "false_positives": 2}},  # this week: strong
             }
 
-    default = make_learning_settings_env(MEMEINTEL_LEARNING_ENABLE_IN_MONITOR="true")
-    opted_in = make_learning_settings_env(
-        MEMEINTEL_LEARNING_ENABLE_IN_MONITOR="true",
-        MEMEINTEL_LEARNING_VETO_USE_WINDOWED_METRICS="true")
+    settings = make_learning_settings_env(MEMEINTEL_LEARNING_ENABLE_IN_MONITOR="true")
     with Storage(":memory:", now_func=lambda: NOW) as storage:
-        # Default (lifetime input): precision 0.4 < 0.70 floor -> abstains.
-        scanner = make_veto_scanner(storage, WindowedMind(), default)
+        scanner = make_veto_scanner(storage, WindowedMind(), settings)
+        # Lifetime precision 0.4 < 0.70 floor -> abstains, window ignored.
         assert scanner._deterministic_risk_veto(fake_veto_input(pair), [], None) is None
-        # Opted in (windowed input): precision 0.9 over 20 calls -> vetoes.
-        scanner = make_veto_scanner(storage, WindowedMind(), opted_in)
-        reason = scanner._deterministic_risk_veto(fake_veto_input(pair), [], None)
-        assert reason is not None
-        assert "precision 0.90" in reason and "20 graded" in reason

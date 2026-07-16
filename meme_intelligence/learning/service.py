@@ -617,10 +617,10 @@ class LearningService:
         walk materialized every resolved coin's full record (24,884 coins ×
         dozens of snapshots each) just to read ``final_bucket``, which made
         every /mind command a multi-minute, memory-heavy crawl (2026-07-15
-        incident). Now ONE locked join query (``graded_predictions``) instead
-        of ~2 lock acquisitions per resolved coin — the last cost in the
-        system that grew with lifetime history rather than a cap
-        (2026-07-16 audit).
+        incident). Now ONE join query (``graded_predictions``: short lock for
+        the fetch, JSON parsing outside it) instead of ~2 lock acquisitions
+        per resolved coin, bounded by ``metrics_max_records`` newest-first
+        (2026-07-16 audit + review pass).
 
         Alongside the lifetime numbers, ``metrics["recent"]`` grades only the
         predictions MADE in the last ``metrics_window_days`` (keyed on the
@@ -629,7 +629,8 @@ class LearningService:
         one average, so only the windowed section says anything about the
         models running today. Both are reported; neither replaces the other
         (Rule 8 — measure honestly, interpret separately)."""
-        rows = self._store.graded_predictions()
+        rows = self._store.graded_predictions(
+            limit=self._ls.metrics_max_records or None)
         window_days = self._ls.metrics_window_days
         cutoff = (self._now() - timedelta(days=window_days)
                   if window_days > 0 else None)

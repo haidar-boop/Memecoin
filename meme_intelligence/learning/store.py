@@ -546,29 +546,43 @@ class LearningStore:
         self._conn.commit()
         return cursor.rowcount > 0
 
-    @_locked
-    def graded_predictions(self) -> list[tuple[dict, str, datetime | None]]:
-        """Every resolved coin's stored prediction in ONE locked query.
+    def graded_predictions(
+        self, *, limit: int | None = None,
+    ) -> list[tuple[dict, str, datetime | None]]:
+        """Every resolved coin's stored prediction via ONE join query.
 
         Returns ``(payload, final_bucket_value, prediction_created_at)``
         tuples — exactly the inputs metric grading needs. Replaces the old
         per-coin walk (resolved_coin_ids + get_prediction + coin_final_bucket
         per id: ~2 lock acquisitions per coin, >50k per /mind at 25k+ resolved
-        coins, growing with lifetime forever — the same grows-with-history
-        cost shape the training cap fixed for retrains, 2026-07-16 audit).
-        ``created_at`` is the PREDICTION's timestamp (when the verdict was
-        made), the only clean era key: ``learning_coins.updated_at`` is
-        re-bumped by every later label write, so it cannot split eras.
+        coins — 2026-07-16 audit). ``created_at`` is the PREDICTION's
+        timestamp (when the verdict was made), the only clean era key:
+        ``learning_coins.updated_at`` is re-bumped by every later label
+        write, so it cannot split eras. Newest predictions first; ``limit``
+        bounds the read (review finding: the row count grows with lifetime
+        and is attacker-inflatable — every analyzed coin stores one row).
+
+        Deliberately NOT ``@_locked`` for its whole body: only the SQL fetch
+        holds the shared cross-thread lock (row tuples are cheap C-level
+        objects); the per-row JSON parse — the expensive part — runs outside
+        it so the scanner/Telegram threads interleave instead of stalling
+        behind one contiguous multi-hundred-ms hold (review finding; same
+        lesson as ``iter_resolved_records``). Rows are consumed
+        destructively so raw rows and parsed dicts never fully coexist.
         """
-        rows = self._conn.execute(
-            """SELECT p.payload AS payload, c.final_bucket AS final_bucket,
-                      p.created_at AS created_at
-               FROM learning_predictions p
-               JOIN learning_coins c ON c.id = p.coin_id
-               WHERE c.final_bucket IS NOT NULL""",
-        ).fetchall()
+        query = ("SELECT p.payload AS payload, c.final_bucket AS final_bucket, "
+                 "p.created_at AS created_at "
+                 "FROM learning_predictions p "
+                 "JOIN learning_coins c ON c.id = p.coin_id "
+                 "WHERE c.final_bucket IS NOT NULL "
+                 "ORDER BY p.created_at DESC")
+        if limit is not None and limit > 0:
+            query += f" LIMIT {int(limit)}"
+        with self._lock:
+            rows = self._conn.execute(query).fetchall()
         result = []
-        for r in rows:
+        while rows:
+            r = rows.pop()  # consume destructively: frees each row as parsed
             try:
                 created = datetime.fromisoformat(r["created_at"])
             except (TypeError, ValueError):
