@@ -1966,6 +1966,60 @@ Config: `MEMEINTEL_WORKFLOW_WATCHDOG_{ENABLED,STALL_SECONDS,
 CHECK_SECONDS,REALERT_SECONDS}` (Rule 17), on by default, validated
 (stall >= check). Suite: **925 passing** (+17).
 
+## 2026-07-16 — Mind-layer audit + upgrade #1: stop grading the rug engine on a task it never performs
+
+A 10-agent read-only audit of `meme_intelligence/learning/` (all findings
+re-verified against source) diagnosed why `/mind` hit rate sits at ~0.10.
+Headline: it is mostly a base-rate ceiling, not a skill collapse — the
+graded population is ~93% RUG (and the RUG label itself conflates rugpull
+with ordinary abandonment: `is_rug = measured liquidity < $1000`,
+backtesting.py:116-117), which caps the achievable directional hit rate at
+~0.26 by arithmetic. The prior 0.54 came from a different population AND
+from the era before the classifier had ever trained (the 2026-07-15
+threading fix). Full option menu recorded with the operator; this entry
+covers the first build.
+
+**Upgrade #1 — rug-engine grading fix (the `rug_engine 0.03` mystery).**
+The ensemble's per-source grade for the rug engine came from the argmax of
+`rug_score_to_distribution` (ensemble.py). The engine only has a
+rug-vs-not-rug opinion — it spreads the non-rug mass equally over
+pump/flat/dump — so below a rug score of 25 those three tie and
+`_argmax_label` (max() first-key) tie-broke to a fabricated **'pump'**. At
+first-sighting evaluation most coins score at/below 25 (the 30-pt
+liquidity-removal signal structurally can't fire on a single early
+snapshot), so the hard-signal rug source was graded as a de-facto pump
+predictor, was "wrong" ~97% of the time on a rug-heavy population, and its
+Laplace-smoothed blend weight collapsed to ~1.8% — effectively deleting it
+from the veto's blended P(rug). (Production rug *protection* was never
+affected: the deterministic raw-score screen that suppresses buy-side
+alerts is upstream of and independent from the mind veto.)
+
+**Fix (commit follows):**
+- `ensemble.rug_source_label(score, abstain_at_or_below)` replaces the
+  distribution-argmax for the stored rug source label: RUG above the score,
+  `None` (abstain — the ensemble skips it) at/below. Above 25 the argmax was
+  always RUG anyway, so the engine's *actual* calls are unchanged; only the
+  fabricated ones become honest abstentions (Rule 8).
+- `LearningSettings.rug_engine_abstain_at_or_below_score` (default 25.0,
+  env `MEMEINTEL_LEARNING_RUG_ENGINE_ABSTAIN_AT_OR_BELOW_SCORE`, 0–100).
+- **Grading-version migration** (the part that actually recovers the weight
+  — flagged by the audit's adversarial verifier): abstaining rarely feeds
+  the deque, so the ~194 stale wrong grades would otherwise pin the weight
+  near zero forever. `AdaptiveEnsemble` now stamps `GRADING_VERSION=2` into
+  its artifact and, on loading an older one, drops ONLY the `rug_engine`
+  history (`reset_source_history`) so it re-earns weight from a neutral 0.5
+  prior under the new rule; analog/lightgbm/final grading is untouched.
+- The blend distribution math is unchanged — `rug_dist` still contributes
+  the full P(rug) mass — so the immediate verdict for any coin is identical;
+  only the rug source's *weight* evolves (upward, when it fires) as new
+  correct grades accrue. Net effect on the veto is toward MORE rug-blocking
+  when the engine fires high, the safe direction for a rug-averse operator.
+
+Not touched (audit do-not-do): the deterministic rug screen, the veto
+threshold, the 5000 training cap, and the RUG label definition
+(rugpull-vs-abandonment is a spec question for the operator, Rule 20).
+Suite: **935 passing** (+10).
+
 ## Notable implementation choices (Rule 19)
 
 - **Python 3.11 + asyncio** over Node.js (both allowed by spec): the

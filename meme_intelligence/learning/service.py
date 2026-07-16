@@ -46,6 +46,7 @@ from meme_intelligence.learning.ensemble import (
     SOURCE_RUG,
     AdaptiveEnsemble,
     rug_score_to_distribution,
+    rug_source_label,
 )
 from meme_intelligence.learning.features import (
     FEATURE_VERSION,
@@ -288,13 +289,22 @@ class LearningService:
             sample_size=resolved_count,
         )
 
+        # The rug engine is graded only when it actually calls a rug; below the
+        # abstain score it has no four-class opinion and is skipped, not scored
+        # wrong on a task it never performed (2026-07-16 audit — see
+        # rug_source_label). The blend still receives the full rug_dist above;
+        # only how the source is GRADED changes.
+        rug_label = rug_source_label(
+            rug.score,
+            abstain_at_or_below=self._ls.rug_engine_abstain_at_or_below_score)
+
         self._store_prediction(token_address, chain, snaps, verdict, result,
-                               analog_dist, model_dist, rug_dist, assignment.name,
+                               analog_dist, model_dist, rug_label, assignment.name,
                                novelty_flagged, creator=creator)
         return verdict.to_dict()
 
     def _store_prediction(self, token_address, chain, snaps, verdict, result,
-                          analog_dist, model_dist, rug_dist, archetype, novelty_flagged,
+                          analog_dist, model_dist, rug_label, archetype, novelty_flagged,
                           *, creator: str | None = None) -> None:
         """Persist the coin's first verdict for later grading (Section 8)."""
         token = TokenIdentity(chain=chain, address=token_address)
@@ -317,7 +327,7 @@ class LearningService:
             "source_labels": {
                 SOURCE_ANALOG: _argmax_label(analog_dist),
                 SOURCE_LIGHTGBM: _argmax_label(model_dist),
-                SOURCE_RUG: _argmax_label(rug_dist),
+                SOURCE_RUG: rug_label,
             },
             "archetype": archetype,
             "novelty_flagged": novelty_flagged,

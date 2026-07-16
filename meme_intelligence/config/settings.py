@@ -1260,6 +1260,18 @@ class LearningSettings:
     # Adaptive ensemble — Section 6
     accuracy_window: int = 200               # M: rolling window for source accuracy
     min_ensemble_confidence: float = 0.0     # floor; kept configurable
+    # Rug-engine grading (2026-07-16 mind-layer audit): the rug engine speaks
+    # ONLY to rug-vs-not-rug — it has no pump/flat/dump opinion. Its stored
+    # per-source label used to come from the argmax of its distribution, which
+    # ties three ways below a rug score of 25 and (by dict order) tie-broke to
+    # a fabricated 'pump'. The ensemble then graded the hard-signal rug source
+    # as a de-facto pump predictor, so it was "wrong" ~97% of the time on a
+    # rug-heavy population and its adaptive blend weight collapsed to ~2% —
+    # effectively deleting it from the veto's P(rug). It now abstains (None,
+    # skipped by the ensemble) at or below this score and is graded as a RUG
+    # call only above it. Deployer-independent production rug protection is the
+    # separate deterministic screen and is unaffected.
+    rug_engine_abstain_at_or_below_score: float = 25.0
 
     # Continuous learning / drift — Section 7
     drift_accuracy_floor: float = 0.40       # ensemble accuracy below -> full retrain
@@ -1331,6 +1343,8 @@ class LearningSettings:
         _check_range("learning drift_accuracy_floor", self.drift_accuracy_floor, 0.0, 1.0)
         _check_range("learning novelty_percentile", self.novelty_percentile, 0.0, 100.0)
         _check_range("learning min_ensemble_confidence", self.min_ensemble_confidence, 0.0, 1.0)
+        _check_range("learning rug_engine_abstain_at_or_below_score",
+                     self.rug_engine_abstain_at_or_below_score, 0.0, 100.0)
         _check_range("learning veto_min_p_rug", self.veto_min_p_rug, 0.0, 1.0)
         _check_range("learning veto_min_accuracy", self.veto_min_accuracy, 0.0, 1.0)
         if self.veto_min_samples <= 0:

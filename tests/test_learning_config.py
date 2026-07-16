@@ -59,6 +59,20 @@ def test_drift_floor_range_validated():
         LearningSettings(drift_accuracy_floor=1.5)
 
 
+def test_rug_engine_abstain_score_default_and_range():
+    # Default matches the distribution's rug-argmax boundary (2026-07-16 audit).
+    assert LearningSettings().rug_engine_abstain_at_or_below_score == 25.0
+    s = Settings.from_env(
+        env={"MEMEINTEL_LEARNING_RUG_ENGINE_ABSTAIN_AT_OR_BELOW_SCORE": "40"})
+    assert s.learning.rug_engine_abstain_at_or_below_score == 40.0
+    with pytest.raises(ConfigurationError,
+                       match="rug_engine_abstain_at_or_below_score"):
+        LearningSettings(rug_engine_abstain_at_or_below_score=-1.0)
+    with pytest.raises(ConfigurationError,
+                       match="rug_engine_abstain_at_or_below_score"):
+        LearningSettings(rug_engine_abstain_at_or_below_score=101.0)
+
+
 def test_archetype_min_cluster_size_must_be_at_least_two():
     # HDBSCAN invariant: 1 is positive but not a valid cluster size.
     with pytest.raises(ConfigurationError):

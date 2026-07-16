@@ -151,6 +151,47 @@ def test_metrics_structure_after_predictions_resolve():
     assert metrics["classifier_ready"] is True
 
 
+def test_rug_source_label_wiring_abstain_and_call():
+    """The stored rug_engine source label must abstain (None) when the engine
+    is not calling a rug and be 'rug' when it is — never a fabricated 'pump'
+    (2026-07-16 audit fix). Verified end-to-end through evaluate_coin."""
+    service = _service()
+    threshold = service._ls.rug_engine_abstain_at_or_below_score
+
+    # _pump_series fires no rug signals (score 0 -> abstain); _rug_series fires
+    # liquidity-removal + dev-dumping (score > threshold -> graded as a rug).
+    clean = service.evaluate_coin("clean1", "solana", _pump_series())
+    dirty = service.evaluate_coin("dirty1", "solana", _rug_series())
+    assert clean["rug_risk_score"] <= threshold        # abstain branch reached
+    assert dirty["rug_risk_score"] > threshold          # rug-call branch reached
+
+    def stored_rug_label(addr: str):
+        coin_id = service._store.coin_id(TokenIdentity(chain="solana", address=addr))
+        return service._store.get_prediction(coin_id)["source_labels"]["rug_engine"]
+
+    assert stored_rug_label("clean1") is None            # not the old 'pump'
+    assert stored_rug_label("dirty1") == "rug"
+    # Invariant, regardless of exact scoring: None iff at/below the threshold.
+    for addr in ("clean1", "dirty1"):
+        verdict_score = (clean if addr == "clean1" else dirty)["rug_risk_score"]
+        assert (stored_rug_label(addr) is None) == (verdict_score <= threshold)
+
+
+def test_abstaining_rug_source_not_graded_wrong_end_to_end():
+    """A clean coin that later rugs must not punish the abstaining rug engine:
+    its source label was None, so grading skips it (it keeps a neutral weight
+    instead of being scored wrong on a call it never made)."""
+    from meme_intelligence.learning.ensemble import SOURCE_RUG
+
+    service = _service()
+    # Clean at first sighting (rug engine abstains) but it rugs later.
+    service.evaluate_coin("late_rug", "solana", _pump_series())
+    service.resolve_outcome("late_rug", "solana", 24.0, -95.0, is_rug=True)
+    # The rug engine received no grade -> unmeasured -> neutral 0.5 basis.
+    assert service._ensemble.raw_accuracy(SOURCE_RUG) is None
+    assert service._ensemble.source_accuracy(SOURCE_RUG) == 0.5
+
+
 def test_evaluate_only_coin_resolves_into_real_analog_entry():
     """A coin evaluated without capture_snapshot must still yield a real
     fingerprint in the analog index once it resolves (not a zero vector)."""
