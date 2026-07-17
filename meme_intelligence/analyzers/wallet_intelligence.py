@@ -64,11 +64,6 @@ _TIMING_ACCUMULATION_SIGNAL = 80.0  # buys concentrated in the lower half
 _TIMING_MIXED_SIGNAL = 60.0
 _TIMING_CHASING_SIGNAL = 40.0       # buys concentrated after the run-up
 _TIMING_FLAT_RANGE_FRACTION = 0.02  # <2% price spread = consolidation
-# A flat price range only reads as "buying during consolidation" when there
-# is real buying: a stale coin nobody trades is ALSO flat, and a handful of
-# stray buys used to earn it the full accumulation signal days after launch
-# (operator complaint 2026-07-14 — old coins re-pitched as fresh entries).
-_TIMING_MIN_FLAT_BUYS = 5
 
 # Promotion-and-exit pattern (Part 18, Section 9): price extended while the
 # largest holders distribute into the attention.
@@ -315,14 +310,7 @@ class WalletIntelligenceAnalyzer:
 
         low, high = min(prices), max(prices)
         if high <= 0 or (high - low) / high < _TIMING_FLAT_RANGE_FRACTION:
-            # Consolidation is only ACCUMULATION with real buying behind it —
-            # a dead-quiet coin is flat too, and must not score as if smart
-            # money were quietly loading up (Rule 8: flatness alone is not
-            # evidence of demand).
-            if len(priced_buys) >= _TIMING_MIN_FLAT_BUYS:
-                s.signal(_TIMING_ACCUMULATION_SIGNAL)  # buying during consolidation
-            else:
-                s.signal(_TIMING_MIXED_SIGNAL)
+            s.signal(_TIMING_ACCUMULATION_SIGNAL)  # buying during consolidation
             return s
 
         midpoint = (low + high) / 2.0

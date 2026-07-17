@@ -172,6 +172,30 @@ class DexScreenerClient(BaseCollector):
                 return boost
         return None
 
+    async def get_boosts(self) -> "list[TokenBoost]":
+        """Every currently-boosted token across the top- and latest-boosted
+        lists, unioned and deduped by address (top wins on collision — it
+        carries the authoritative cumulative total). Free/keyless, cached 60s
+        per list. Feeds the boost watcher (Project 5). A boost is PAID
+        promotion, not organic traction."""
+        seen: set[tuple[str, str]] = set()
+        out: list[TokenBoost] = []
+        for path in ("token-boosts/top/v1", "token-boosts/latest/v1"):
+            payload = await self._get_json(
+                path, cache_key=f"dexscreener:{path}", cache_ttl=60.0)
+            if not isinstance(payload, list):
+                continue
+            for raw in payload:
+                boost = self._parse_boost(raw)
+                if boost is None:
+                    continue
+                key = (boost.chain, boost.token_address.lower())
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(boost)
+        return out
+
     @staticmethod
     def _parse_boost(raw: Any) -> "TokenBoost | None":
         """One raw DexScreener boost entry -> ``TokenBoost`` (``None`` if malformed)."""

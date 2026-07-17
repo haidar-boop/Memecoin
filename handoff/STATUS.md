@@ -1,6 +1,6 @@
 # Build Status — Parts 1 through 33 (built or verified-satisfied)
 
-**947 tests passing** (as of 2026-07-16, all optional deps installed). ~14,000+ lines of source,
+**788 tests passing** (as of 2026-07-12). ~14,000+ lines of source,
 ~8,000+ lines of tests. Parts 20-33 completed a verification pass (see
 `next_steps/INDEX.md`); the only unbuilt items are the web dashboard
 (**discarded by the operator 2026-07-10 — do not build**) and
@@ -215,20 +215,6 @@ The classification/scoring framework, config system, and logging.
   addresses excluded — + parsed token transfers), `BirdeyeClient` (token
   overview + recent trades, USD computed from trade legs),
   `WalletDataService` (combines both, degrades per-source on failure)
-- `workflow/smart_wallets.py` — **smart-wallet data clock (2026-07-14,
-  off by default)**: records each analyzed token's earliest top-holder
-  wallets (from the GoPlus response the scan already fetches — free,
-  zero new API calls) into `wallet_sightings` tagged
-  `goplus_holders`/`hold_top10`. See DECISIONS_LOG 2026-07-14
-  (PumpPortal trade streams turned out to be metered, operator chose
-  the free pivot).
-- `analytics/wallet_reputation.py` — **reputation connector (2026-07-14,
-  same day, operator-requested)**: joins the clock's sightings against
-  Part 24's measured outcomes and scores wallets with the Part 17
-  formula (`reputation` CLI, `/wallets` Telegram section; min 3 resolved
-  tokens per wallet, unmeasured dimensions honestly None). Scores stay
-  empty until clock + outcome data overlap. Still unbuilt: score
-  persistence, live-scan wiring, the smart-money alert.
 - `analyzers/wallet_intelligence.py` — `WalletIntelligenceAnalyzer`:
   Smart Money Confidence Score (5 lenses × 20%; `historical_success`
   honestly reports "no data" until Part 24 builds real track records —

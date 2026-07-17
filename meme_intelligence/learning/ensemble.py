@@ -44,16 +44,6 @@ SOURCE_LIGHTGBM = "lightgbm"
 SOURCE_RUG = "rug_engine"
 SOURCES = (SOURCE_ANALOG, SOURCE_LIGHTGBM, SOURCE_RUG)
 
-# How the rug engine's per-source grade is derived. Bumped when that logic
-# changes so a persisted history graded under the old rule is dropped on load
-# rather than pinning the source's blend weight forever (see load()).
-#   v1 — the argmax of the rug distribution (tie-broke to a fabricated 'pump'
-#        below score 25, so the rug source was graded on a task it never
-#        performed and its weight collapsed).
-#   v2 — the rug engine abstains below its configured score and is graded as a
-#        RUG call only above it (2026-07-16 mind-layer audit fix).
-GRADING_VERSION = 2
-
 
 @dataclass(frozen=True)
 class EnsembleResult:
@@ -82,29 +72,6 @@ def rug_score_to_distribution(rug_score: float) -> dict[str, float]:
         OutcomeBucket.DUMP.value: others,
         OutcomeBucket.RUG.value: r,
     }
-
-
-def rug_source_label(rug_score: float, *, abstain_at_or_below: float) -> str | None:
-    """The rug engine's graded opinion as a single training label, or ``None``.
-
-    The engine speaks only to *rug vs not-rug*; it has no pump/flat/dump view.
-    Above ``abstain_at_or_below`` it is calling a RUG and is graded as such.
-    At or below it, the engine is *not* calling a rug and has no four-class
-    opinion to grade, so it abstains (``None``) — the ensemble skips abstaining
-    sources rather than scoring them wrong (Rule 8).
-
-    This replaces ``_argmax_label(rug_distribution)``: above a rug score of 25
-    the argmax was always RUG anyway (``P(rug) = score/100 > 0.25`` beats each
-    ``(1-P)/3`` sibling), but at or below 25 the three non-rug labels tie and
-    the argmax tie-broke to a fabricated 'pump', which graded the hard-signal
-    rug source as a de-facto pump predictor and collapsed its blend weight
-    (2026-07-16 audit finding). Keeping the default threshold at 25 preserves
-    the identical "call a rug" behavior while turning the fabricated calls into
-    honest abstentions.
-    """
-    if rug_score > abstain_at_or_below:
-        return OutcomeBucket.RUG.value
-    return None
 
 
 class AdaptiveEnsemble:
@@ -222,19 +189,6 @@ class AdaptiveEnsemble:
         """
         self._final_history.clear()
 
-    def reset_source_history(self, source: str) -> None:
-        """Drop one source's rolling grades when its grading rule changes.
-
-        With an empty window the Laplace prior gives the source a neutral 0.5
-        accuracy (a ~1/3 blend voice) until it is re-measured under the new
-        rule, instead of a weight pinned by grades that scored a behavior it no
-        longer has. Unknown source names are ignored (Rule 18 — old artifacts
-        may predate a source). Used by the grading-version migration in load().
-        """
-        hist = self._history.get(source)
-        if hist is not None:
-            hist.clear()
-
     def accuracy_report(self) -> dict[str, dict]:
         """Per-source accuracy + sample size, for the metrics dashboard."""
         report: dict[str, dict] = {}
@@ -258,7 +212,6 @@ class AdaptiveEnsemble:
 
         joblib.dump(
             {"window": self._window,
-             "grading_version": GRADING_VERSION,
              "history": {s: list(h) for s, h in self._history.items()},
              "final_history": list(self._final_history)},
             path,
@@ -276,17 +229,4 @@ class AdaptiveEnsemble:
         # Absent in pre-drift-monitor artifacts (Rule 18 — old files still load).
         ensemble._final_history = deque(payload.get("final_history", ()),
                                         maxlen=payload["window"])
-        # Grading-version migration: a history graded under an older rule for a
-        # source whose grading has since changed is meaningless and would pin
-        # that source's blend weight until the whole window rolled over — which,
-        # for a source that now abstains most of the time, is effectively never.
-        # Drop just that source's grades so it re-earns weight under the new
-        # rule (analog/lightgbm/final grading is unchanged, so those stay).
-        stored_version = int(payload.get("grading_version", 1))
-        if stored_version < GRADING_VERSION:
-            ensemble.reset_source_history(SOURCE_RUG)
-            _logger.info(
-                "ensemble grading upgraded v%d->v%d: rug_engine accuracy history "
-                "reset so it re-earns blend weight under abstain semantics",
-                stored_version, GRADING_VERSION)
         return ensemble

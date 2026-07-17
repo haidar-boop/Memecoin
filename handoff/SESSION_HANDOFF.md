@@ -1,4 +1,4 @@
-# Session Handoff — Current State as of 2026-07-14 (evening refresh)
+# Session Handoff — Current State as of 2026-07-12
 
 > **What this is:** the "you just woke up in this project — here's where
 > things stand" briefing. The durable knowledge lives in the sibling docs
@@ -16,23 +16,13 @@
   Telegram control + copy-address button), **Project 3** (mind-layer P(rug)
   veto — built, veto flag off until authority is earned), and **Project 6**
   (live buy/dump from Telegram — see below).
-- **947 tests passing** (`python -m pytest tests/ -q`, all optional deps installed).
+- **788 tests passing** (`python -m pytest tests/ -q`).
 - **Live in production**: 24/7 on the operator's $6/mo DigitalOcean droplet
   (systemd service `meme-intelligence`, repo at `~/meme-intelligence`),
   Telegram alerts arriving on his phone.
-- **Branch that matters**: `claude/bot-owners-manual-0a16e5` — the newest
-  tip (based on `claude/ceiling-and-boost`, which the droplet pulled until
-  2026-07-14). It adds the 2026-07-14 evening change: buy-side ceilings ON
-  by default ($100k mcap / $50k liquidity) + the 24h freshness gate + the
-  "Pool age" checklist line (operator: "make the market cap below 100k...
-  make sure it's not older than 1 day"). `claude/ceiling-and-boost` was
-  the authoritative tip before this; the operator switched the droplet to
-  it on 2026-07-12/13 and pulls to deploy. (Supersedes `claude/memecoin-onboarding-yrvjbg`, which
-  supersedes `claude/session-rules-preferences-kc71bf`.) It adds, on top
-  of yrvjbg: the buy-side size ceiling, `/boost` command, decline
-  re-pitch suppression, the DexScreener boost radar (own `boosts` alert
-  channel), and the smart-wallet data clock — see DECISIONS_LOG
-  2026-07-11 → 2026-07-14.
+- **Branch that matters**: `claude/memecoin-onboarding-yrvjbg` — the
+  authoritative tip; the droplet pulls it. (Supersedes
+  `claude/session-rules-preferences-kc71bf` from the 2026-07-10 handoff.)
 - **LIVE TRADING IS ARMED AND FULLY VALIDATED.** Project 6 is real money
   now: on 2026-07-11 the operator executed a live `/buy` AND a live
   `/dump` (full round trip — buy and sell both confirmed) from a DEDICATED
@@ -49,38 +39,7 @@
   free deterministic screens still run FIRST (credit gate); watch the spend
   with him for a few days. He may toggle it either way — follow his lead.
 - **Learning layer is live and accumulating**; report card via `/mind` or
-  `mind metrics`. As of 2026-07-13 the operator's card shows the rug veto
-  EARNED (precision 0.97 over 11k+ graded calls) and a thin directional
-  edge (hit rate 0.54, n=555) — the honest read is "excellent seatbelt,
-  modest crystal ball."
-- **Smart-wallet data clock added 2026-07-14 (OFF by default)** — enable
-  with `MEMEINTEL_SMART_WALLET_ENABLED=true` to start recording each
-  analyzed token's earliest top-holder wallets ($0, reuses GoPlus data).
-  DECISIONS_LOG 2026-07-14 has the full plan and the PumpPortal cost
-  discovery that shaped it. **The reputation CONNECTOR is now built too**
-  (operator asked same day): `reputation` CLI + a section on `/wallets`
-  join sightings against measured outcomes and score wallets with the
-  Part 17 formula (min 3 resolved tokens each). Scores stay empty until
-  the clock + the 6-hourly `backtest --refresh` cron have overlapping
-  data — expect weeks, not hours. STILL not built (needs operator
-  go-ahead + accumulated data): persisting scores, wiring reputations
-  into the live scan, the smart-money alert.
-- **DexScreener boost radar REMOVED 2026-07-14 (operator decision).** It
-  ran for a day and flooded the phone with paid-promo pings on day-old /
-  dying coins (boosts are how dying coins buy exit liquidity — the radar
-  had zero quality screening by design). The operator ordered it removed
-  completely. The on-demand `/boost <address>` Telegram command remains
-  (pull-based, can't flood). A stale
-  `MEMEINTEL_BOOST_WATCHER_ENABLED=true` line may linger in the droplet
-  `.env` — harmless, the code is gone. Do NOT rebuild without an explicit
-  operator request.
-- **Stale-coin re-pitch, round two (2026-07-14)** — peak-decline
-  suppression (weak-tier buy alerts stay quiet while a coin sits ≥15 pts
-  below its own all-time peak), flat-drift no longer scores as momentum
-  or accumulation, and every re-alert now carries a "Seen before: N prior
-  alert(s) — first alerted Xd ago" line. See DECISIONS_LOG 2026-07-14
-  (second entry). `/wallets` Telegram command shows the smart-wallet data
-  clock's progress.
+  `mind metrics`.
 - **Alert quality overhaul, 2026-07-11** (operator moved his phone from
   HIGH to MEDIUM to see opportunities again, then back to HIGH once he saw
   the junk it let through — walk through DECISIONS_LOG 2026-07-11 in
@@ -194,14 +153,6 @@ sudo systemctl restart meme-intelligence
 
 ## Update log for this file
 
-- 2026-07-15 — scanner stall watchdog built (operator request after the
-  OOM crash-loop recovery): `workflow/watchdog.py`, an isolated task that
-  Telegram-messages the operator when no scan cycle completes for 15 min
-  (re-alert 1h, "resumed" note on recovery, log-only if Telegram is
-  down). Zero work added to the scan loop; on by default
-  (`MEMEINTEL_WORKFLOW_WATCHDOG_*`). It cannot report a dead process
-  (systemd handles restarts) — it reports alive-but-stuck. See
-  DECISIONS_LOG 2026-07-15 (after recovery). 908 → 925 tests.
 - 2026-07-12 — safety checklist on buy-side alerts: only a rug (the rug
   engine's combined `deterministic_risk_veto`) OR an untradeable coin (0/missing
   liquidity or market cap, `_untradeable`) suppresses; every OTHER soft signal

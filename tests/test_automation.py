@@ -25,9 +25,7 @@ SETTINGS = Settings.from_env(env={})
 def make_pair(**overrides) -> DexPair:
     defaults = dict(
         chain="solana", pair_address="Pool1", base_token=TOKEN,
-        # Under the (now default-ON) buy-side ceilings: mcap <= $100k,
-        # liquidity <= $50k — the exact coin profile the operator wants pitched.
-        market_cap=80_000.0, fdv=84_000.0, liquidity_usd=45_000.0,
+        market_cap=400_000.0, fdv=420_000.0, liquidity_usd=90_000.0,
         volume_24h=120_000.0, volume_1h=8_000.0,
         buys_24h=400, sells_24h=250, buys_1h=40, sells_1h=15,
         buyers_24h=300, sellers_24h=180,
@@ -97,8 +95,8 @@ async def test_shallow_liquidity_vetoes_strong_candidate():
     lock safety, not depth, so this veto is what keeps $16k pools off a
     HIGH-filtered phone."""
     rules = AutomationRules(
-        AlertThresholds(strong_candidate_min_liquidity_usd=100_000.0),  # fixture has 45k
-        AlertEngineSettings(), now_func=lambda: NOW)
+        AlertThresholds(strong_candidate_min_liquidity_usd=100_000.0),  # fixture has 90k
+        AlertEngineSettings())
     result = await pipeline_result()
     assert result.master.final_score >= 88.0  # would otherwise be a strong candidate
     events = rules.evaluate(result)
@@ -178,7 +176,7 @@ async def test_good_but_not_strong_token_stays_medium_provisional():
     provisional tier."""
     from meme_intelligence.config.settings import AlertThresholds
     rules = AutomationRules(AlertThresholds(strong_candidate_overall=99.0),
-                            AlertEngineSettings(), now_func=lambda: NOW)
+                            AlertEngineSettings())
     result = await pipeline_result()
     events = rules.evaluate(result)
     types = {e.alert_type: e for e in events}
@@ -217,13 +215,10 @@ async def test_momentum_alert_fires_through_gate():
 
 
 async def test_no_momentum_alert_in_late_zone():
-    """Accelerating into a blow-off is not an opportunity signal. The pair is
-    kept INSIDE the 24h freshness window so this exercises the LATE
-    entry-zone rule itself, not the age gate (which would mask a regression
-    here by suppressing the alert for a different reason)."""
+    """Accelerating into a blow-off is not an opportunity signal."""
     extended = make_pair(price_change_24h=250.0, volume_1h=20_000.0,
                          buys_1h=60, sells_1h=10,
-                         pair_created_at=NOW - timedelta(hours=20))
+                         pair_created_at=NOW - timedelta(days=3))
     result = await pipeline_result(pair=extended)
     events = make_rules().evaluate(result)
     assert not any(e.alert_type == "momentum" for e in events)
@@ -249,10 +244,10 @@ async def test_declining_score_suppresses_the_weak_opportunity_tier():
     score_drop_review flagged it as declining."""
     rules = AutomationRules(
         # Forces the WEAK "early_opportunity" fallback instead of the strict
-        # strong_candidate tier (fixture liquidity is 45k) — matching the
+        # strong_candidate tier (fixture liquidity is 90k) — matching the
         # real coin, which never cleared the strict bar either.
         AlertThresholds(strong_candidate_min_liquidity_usd=100_000.0),
-        AlertEngineSettings(), now_func=lambda: NOW)
+        AlertEngineSettings())
     result = await pipeline_result()
     events = rules.evaluate(result, previous_score=result.master.final_score + 25)
     types = {e.alert_type for e in events}
@@ -299,54 +294,6 @@ async def test_score_drop_review_unaffected_by_its_own_suppression():
     events = make_rules().evaluate(result, previous_score=result.master.final_score + 25)
     drop = [e for e in events if e.alert_type == "score_drop_review"]
     assert drop and drop[0].priority is AlertPriority.HIGH
-
-
-# ---- Peak-decline suppression (operator complaint 2026-07-14) ----
-
-async def test_slow_creep_below_peak_suppresses_weak_tier():
-    """The escape the one-step check missed: a collapsed coin creeping back
-    +2-3 points per recheck reads as 'improving' on every single look, yet
-    is still far below its own peak days later — it must not re-pitch as a
-    fresh opportunity. previous_score is BELOW current here (the creep-up
-    step), so only the peak comparison can catch it."""
-    rules = AutomationRules(
-        AlertThresholds(strong_candidate_min_liquidity_usd=100_000.0),  # force weak tier
-        AlertEngineSettings(), now_func=lambda: NOW)
-    result = await pipeline_result()
-    events = rules.evaluate(result,
-                            previous_score=result.master.final_score - 3,  # creeping up
-                            peak_score=result.master.final_score + 25)     # far below peak
-    types = {e.alert_type for e in events}
-    assert "early_opportunity" not in types
-    assert "score_drop_review" not in types   # no one-step drop -> no drop alert
-
-
-async def test_below_peak_does_not_hide_a_genuinely_strong_candidate():
-    """Same exemption as the decline check: a coin that STILL clears the
-    strict strong-candidate bar while below its peak reaches the operator."""
-    result = await pipeline_result()
-    events = make_rules().evaluate(result,
-                                   previous_score=result.master.final_score - 3,
-                                   peak_score=result.master.final_score + 25)
-    assert "strong_candidate" in {e.alert_type for e in events}
-
-
-async def test_near_peak_recovery_is_not_suppressed():
-    """A coin back within the threshold of its own best self is a genuinely
-    renewed signal, not a stale re-pitch."""
-    result = await pipeline_result()
-    events = make_rules().evaluate(result,
-                                   previous_score=result.master.final_score - 3,
-                                   peak_score=result.master.final_score + 10)  # within 15
-    assert {e.alert_type for e in events} & _BUY_SIDE_ALERT_TYPES
-
-
-async def test_no_peak_history_keeps_previous_behavior():
-    """peak_score=None (first look, or a caller that doesn't track history)
-    must never suppress — exact pre-fix behavior (Rule 18)."""
-    result = await pipeline_result()
-    events = make_rules().evaluate(result, previous_score=None, peak_score=None)
-    assert {e.alert_type for e in events} & _BUY_SIDE_ALERT_TYPES
 
 
 # ---- Dead-token post-mortem (Part 29 Section 1) ----
@@ -477,7 +424,7 @@ async def test_interest_gate_configurable_off():
     """Rule 17: the gate is a setting, not a hardcode — disabling it restores
     full-priority protective alerts on every token."""
     rules = AutomationRules(AlertThresholds(),
-                            AlertEngineSettings(risk_alerts_require_interest=False), now_func=lambda: NOW)
+                            AlertEngineSettings(risk_alerts_require_interest=False))
     result = await pipeline_result(pair=make_pair(liquidity_usd=3_000.0))
     events = rules.evaluate(result, operator_interest=False)
     warnings = [e for e in events if e.alert_type == "risk_warning"]
@@ -551,8 +498,8 @@ async def test_liquidity_floor_annotates_but_no_longer_suppresses():
     the operator sees the shortfall and decides ("if just one thing misses the
     checklist, send it through and let me know")."""
     rules = AutomationRules(
-        AlertThresholds(opportunity_min_liquidity_usd=48_000.0),  # fixture has 45k
-        AlertEngineSettings(), now_func=lambda: NOW)
+        AlertThresholds(opportunity_min_liquidity_usd=200_000.0),  # fixture has 90k
+        AlertEngineSettings())
     result = await pipeline_result()
     assert result.master.final_score >= 88.0   # a strong candidate
     events = rules.evaluate(result)
@@ -560,13 +507,13 @@ async def test_liquidity_floor_annotates_but_no_longer_suppresses():
     assert buy_side                                      # NOT suppressed anymore
     checklist = "\n".join(buy_side[0].checklist)
     assert "⚠️" in checklist and "comfort floor" in checklist  # the miss is shown
-    assert "Liquidity $45,000" in checklist
+    assert "Liquidity $90,000" in checklist
 
 
 async def test_market_cap_floor_annotates_but_no_longer_suppresses():
     rules = AutomationRules(
-        AlertThresholds(opportunity_min_market_cap_usd=90_000.0),  # fixture has 80k
-        AlertEngineSettings(), now_func=lambda: NOW)
+        AlertThresholds(opportunity_min_market_cap_usd=5_000_000.0),  # fixture has 400k
+        AlertEngineSettings())
     result = await pipeline_result()
     buy_side = [e for e in rules.evaluate(result) if e.alert_type in _BUY_SIDE_ALERT_TYPES]
     assert buy_side
@@ -577,180 +524,49 @@ async def test_market_cap_floor_annotates_but_no_longer_suppresses():
 # ---- Operator liquidity / market-cap CEILING for buy-side alerts ----
 
 async def test_liquidity_ceiling_suppresses_buy_side():
-    """A coin whose pool has already grown past the DEFAULT $50k ceiling is no
-    longer an early opportunity — its buy-side alert is suppressed. This is
-    the '$2.8M coin dressed as early opportunity' fix."""
-    result = await pipeline_result(pair=make_pair(liquidity_usd=90_000.0))
-    types = {e.alert_type for e in make_rules().evaluate(result)}
+    """A coin whose pool has already grown past the ceiling is no longer an
+    early opportunity — its buy-side alert is suppressed (fixture's $90k pool
+    is above a $50k ceiling). This is the '$2.8M coin dressed as early
+    opportunity' fix."""
+    rules = AutomationRules(
+        AlertThresholds(opportunity_max_liquidity_usd=50_000.0),  # fixture has 90k
+        AlertEngineSettings())
+    result = await pipeline_result()
+    types = {e.alert_type for e in rules.evaluate(result)}
     assert not (types & _BUY_SIDE_ALERT_TYPES)
 
 
 async def test_market_cap_ceiling_suppresses_buy_side():
-    """A $400k-mcap coin is over the DEFAULT $100k ceiling (operator
-    2026-07-14: 'it sends me coins with around 100 million to 1 billion
-    market cap... make the market cap below 100k')."""
-    result = await pipeline_result(pair=make_pair(market_cap=400_000.0))
-    types = {e.alert_type for e in make_rules().evaluate(result)}
+    rules = AutomationRules(
+        AlertThresholds(opportunity_max_market_cap_usd=100_000.0),  # fixture has 400k
+        AlertEngineSettings())
+    result = await pipeline_result()
+    types = {e.alert_type for e in rules.evaluate(result)}
     assert not (types & _BUY_SIDE_ALERT_TYPES)
 
 
-async def test_ceilings_on_by_default_and_zero_turns_them_off():
-    """The ceilings are now ON out of the box (mcap $100k / liquidity $50k) —
-    a git pull alone must stop the 100M+-mcap alerts, no .env edit needed.
-    Setting a ceiling to 0 still turns it off (Rule 18: the old escape
-    hatch keeps working)."""
-    thresholds = AlertThresholds()
-    assert thresholds.opportunity_max_market_cap_usd == 100_000.0
-    assert thresholds.opportunity_max_liquidity_usd == 50_000.0
-    assert thresholds.opportunity_max_age_hours == 24.0  # "not older than 1 day"
-    big = await pipeline_result(pair=make_pair(market_cap=250_000_000.0,
-                                               liquidity_usd=4_000_000.0))
-    on = {e.alert_type for e in make_rules().evaluate(big)}
-    assert not (on & _BUY_SIDE_ALERT_TYPES)      # default: suppressed
-    off = {e.alert_type for e in AutomationRules(
-        AlertThresholds(opportunity_max_liquidity_usd=0.0,
-                        opportunity_max_market_cap_usd=0.0),
-        AlertEngineSettings(), now_func=lambda: NOW).evaluate(big)}
-    assert off & _BUY_SIDE_ALERT_TYPES           # 0 = OFF still honored
+async def test_ceiling_off_by_default_lets_large_coin_through():
+    """Rule 18: with the ceiling unset (0), a large coin still alerts. Turning
+    the ceiling on for the same coin suppresses it — proving the ceiling, not
+    the fixture, is what changed."""
+    result = await pipeline_result()
+    off = {e.alert_type for e in make_rules().evaluate(result)}  # both ceilings 0
+    assert off & _BUY_SIDE_ALERT_TYPES                           # baseline: it alerts
+    on = {e.alert_type for e in AutomationRules(
+        AlertThresholds(opportunity_max_liquidity_usd=50_000.0),
+        AlertEngineSettings()).evaluate(result)}
+    assert not (on & _BUY_SIDE_ALERT_TYPES)
 
 
 async def test_coin_under_ceiling_still_sends():
-    """A coin below both DEFAULT ceilings is unaffected (no over-suppression):
-    the fixture's $80k mcap / $45k pool is exactly the profile the operator
-    wants pitched."""
-    result = await pipeline_result()
-    types = {e.alert_type for e in make_rules().evaluate(result)}
-    assert types & _BUY_SIDE_ALERT_TYPES
-
-
-# ---- Operator freshness gate for buy-side alerts (2026-07-14) ----------------
-# "Before it sends me anything on the telegram I want it to make sure it's not
-# older than 1 day."
-
-async def test_old_pool_never_fires_buy_side():
-    """A pool past the default 24h window fires no buy-side alert, whatever
-    its numbers do — the watchlist-recheck re-pitch path is closed."""
-    result = await pipeline_result(
-        pair=make_pair(pair_created_at=NOW - timedelta(hours=30)))
-    types = {e.alert_type for e in make_rules().evaluate(result)}
-    assert not (types & _BUY_SIDE_ALERT_TYPES)
-
-
-async def test_fresh_pool_passes_age_gate_with_checklist_line():
-    """A 3h-old pool sends normally and its checklist names the age, so the
-    operator can see the freshness claim was actually verified."""
-    result = await pipeline_result()   # fixture is 3h old
-    events = make_rules().evaluate(result)
-    buy_side = [e for e in events if e.alert_type in _BUY_SIDE_ALERT_TYPES]
-    assert buy_side
-    assert any("Pool age 3h" in line for line in buy_side[0].checklist)
-
-
-async def test_unknown_age_does_not_suppress_but_is_surfaced():
-    """Rule 8: a missing creation time is not evidence of age — the alert
-    still sends, and the checklist shows the gap instead of hiding it."""
-    result = await pipeline_result(pair=make_pair(pair_created_at=None))
-    events = make_rules().evaluate(result)
-    buy_side = [e for e in events if e.alert_type in _BUY_SIDE_ALERT_TYPES]
-    assert buy_side
-    assert any("Pool age: not verified" in line for line in buy_side[0].checklist)
-
-
-async def test_future_creation_time_never_counts_as_age():
-    """Clock skew (creation time in the future) must not suppress or crash —
-    it reads as unverified age, same as missing."""
-    result = await pipeline_result(
-        pair=make_pair(pair_created_at=NOW + timedelta(hours=2)))
-    events = make_rules().evaluate(result)
-    buy_side = [e for e in events if e.alert_type in _BUY_SIDE_ALERT_TYPES]
-    assert buy_side
-    assert any("Pool age: not verified" in line for line in buy_side[0].checklist)
-
-
-async def test_age_gate_zero_turns_it_off():
-    """0 = OFF: with the gate disabled an old pool sends again, and the
-    checklist shows the age as an ℹ️ note — never a green ✅ pass, which
-    would falsely endorse exactly the staleness the operator cares about."""
+    """A coin below both ceilings is unaffected (no over-suppression)."""
     rules = AutomationRules(
-        AlertThresholds(opportunity_max_age_hours=0.0),
-        AlertEngineSettings(), now_func=lambda: NOW)
-    result = await pipeline_result(
-        pair=make_pair(pair_created_at=NOW - timedelta(hours=30)))
-    events = rules.evaluate(result)
-    buy_side = [e for e in events if e.alert_type in _BUY_SIDE_ALERT_TYPES]
-    assert buy_side
-    checklist = buy_side[0].checklist
-    assert any("Pool age 30h — freshness gate off" in line for line in checklist)
-    assert not any("✅ Pool age" in line for line in checklist)
-
-
-async def test_old_pool_still_gets_protective_alerts():
-    """Age never hides a warning: an old honeypot still fires its protective
-    emergency alert — only the buy-side pitch is gated."""
-    result = await pipeline_result(
-        honeypot=True,
-        pair=make_pair(pair_created_at=NOW - timedelta(days=4)))
-    types = {e.alert_type for e in make_rules().evaluate(result)}
-    assert types & _PROTECTIVE_ALERT_TYPES
-    assert not (types & _BUY_SIDE_ALERT_TYPES)
-
-
-async def test_old_token_with_fresh_pool_still_suppressed():
-    """The gate uses the LARGER of pool age and tracked age: a coin the bot
-    first saw 3 days ago that migrates to a brand-new pool is NOT a fresh
-    find, even though its deepest pair is 2 hours old (review finding)."""
-    result = await pipeline_result(
-        pair=make_pair(pair_created_at=NOW - timedelta(hours=2)))
-    types = {e.alert_type for e in make_rules().evaluate(
-        result, token_first_seen=NOW - timedelta(days=3))}
-    assert not (types & _BUY_SIDE_ALERT_TYPES)
-    # A first look (no first_seen) with the same fresh pool sends normally.
-    types = {e.alert_type for e in make_rules().evaluate(result)}
+        AlertThresholds(opportunity_max_liquidity_usd=500_000.0,
+                        opportunity_max_market_cap_usd=1_000_000.0),
+        AlertEngineSettings())
+    result = await pipeline_result()   # fixture 90k liq / 400k mcap — under both
+    types = {e.alert_type for e in rules.evaluate(result)}
     assert types & _BUY_SIDE_ALERT_TYPES
-
-
-async def test_suppression_is_logged_once_and_quiet_pass_is_silent(caplog):
-    """Rule 13: a suppressed pitch leaves one log trace naming the gate and
-    values — but the scanner's provisional probe (quiet=True) logs nothing,
-    or every suppressed coin would log identical lines twice per cycle."""
-    import logging as _logging
-    result = await pipeline_result(pair=make_pair(market_cap=400_000.0))
-    with caplog.at_level(_logging.INFO, logger="meme_intelligence.alerts.rules"):
-        make_rules().evaluate(result, quiet=True)
-        assert not caplog.records                      # provisional pass: silent
-        make_rules().evaluate(result)
-    messages = [r.getMessage() for r in caplog.records]
-    assert len(messages) == 1                          # real pass: exactly one line
-    # The reason names ONLY the ceiling that tripped, with real values —
-    # never a disabled "max 0" ceiling (review finding).
-    assert "market cap $400,000 vs max $100,000" in messages[0]
-    assert "liquidity" not in messages[0]
-
-
-def test_format_age_boundaries():
-    """Ages are floored to display precision: never '60m' (that is '1h'-land),
-    never a green 'Pool age 24h' on a pool that passed the 24h gate by two
-    minutes, and the h->d switch is consistent at exactly 48h."""
-    from meme_intelligence.alerts.notification_engine import _format_age
-    assert _format_age(59.9 / 60.0) == "59m"     # not "60m"
-    assert _format_age(0.5) == "30m"
-    assert _format_age(1.0) == "1h"
-    assert _format_age(3.55) == "3.5h"
-    assert _format_age(23.96) == "23.9h"         # not "24h" under a 24h gate
-    assert _format_age(47.99) == "47.9h"
-    assert _format_age(48.0) == "2d"
-    assert _format_age(60.0) == "2.5d"
-
-
-def test_negative_age_gate_rejected():
-    with pytest.raises(ConfigurationError, match="opportunity_max_age_hours"):
-        AlertThresholds(opportunity_max_age_hours=-1.0)
-
-
-def test_age_gate_loads_from_env():
-    settings = Settings.from_env(
-        env={"MEMEINTEL_ALERTS_OPPORTUNITY_MAX_AGE_HOURS": "12"})
-    assert settings.alerts.opportunity_max_age_hours == 12.0
 
 
 def test_negative_ceiling_rejected():
@@ -758,42 +574,10 @@ def test_negative_ceiling_rejected():
         AlertThresholds(opportunity_max_liquidity_usd=-1.0)
 
 
-def test_floor_above_ceiling_yields_to_the_ceiling(caplog):
-    """A floor above the ceiling used to raise at startup — but with the
-    ceilings now ON by default, a stale .env floor line above $50k/$100k
-    would have crash-looped the droplet on a plain `git pull` deploy and
-    killed the protective alerts too. The conflicting FLOOR is disabled
-    with a logged warning (asserted — the 'loud' half of the contract is
-    part of the design) and the note is kept on ``config_notes`` so
-    __main__ can re-emit it once real log handlers exist."""
-    import logging as _logging
-    with caplog.at_level(_logging.WARNING, logger="meme_intelligence.config.settings"):
-        thresholds = AlertThresholds(opportunity_min_liquidity_usd=200_000.0,
-                                     opportunity_max_liquidity_usd=100_000.0)
-    assert thresholds.opportunity_min_liquidity_usd == 0.0   # floor yielded
-    assert thresholds.opportunity_max_liquidity_usd == 100_000.0
-    assert any("floor is DISABLED" in r.message for r in caplog.records)
-    assert any("floor is DISABLED" in note for note in thresholds.config_notes)
-    # Same rule for the market-cap pair, and EQUALITY counts as a conflict
-    # (floor == ceiling would mean "only coins at exactly $X").
-    thresholds = AlertThresholds(opportunity_min_market_cap_usd=100_000.0)
-    assert thresholds.opportunity_min_market_cap_usd == 0.0  # default cap is 100k
-    # A coherent floor-under-ceiling pair is untouched and produces no notes.
-    ok = AlertThresholds(opportunity_min_liquidity_usd=10_000.0)
-    assert ok.opportunity_min_liquidity_usd == 10_000.0
-    assert ok.config_notes == ()
-
-
-def test_ceiling_below_strong_candidate_floor_warns_but_boots(caplog):
-    """A liquidity ceiling at or under the strong-candidate depth floor makes
-    HIGH buy-side tiers unreachable — that mistake must be loudly visible at
-    startup, but never a crash (the seatbelt keeps running). Equality is
-    included: ceiling == floor leaves only coins at exactly $X eligible."""
-    import logging as _logging
-    with caplog.at_level(_logging.WARNING, logger="meme_intelligence.config.settings"):
-        AlertThresholds(opportunity_max_liquidity_usd=20_000.0)
-        AlertThresholds(opportunity_max_liquidity_usd=25_000.0)  # == default floor
-    assert sum("HIGH buy-side alert" in r.message for r in caplog.records) == 2
+def test_ceiling_below_floor_rejected():
+    with pytest.raises(ConfigurationError, match="must be >="):
+        AlertThresholds(opportunity_min_liquidity_usd=200_000.0,
+                        opportunity_max_liquidity_usd=100_000.0)
 
 
 async def test_unknown_liquidity_is_blocked_as_untradeable():
@@ -802,7 +586,7 @@ async def test_unknown_liquidity_is_blocked_as_untradeable():
     superseding the earlier annotate-thin-pools behavior for the 0/None case)."""
     rules = AutomationRules(
         AlertThresholds(opportunity_min_liquidity_usd=10_000.0),
-        AlertEngineSettings(), now_func=lambda: NOW)
+        AlertEngineSettings())
     result = await pipeline_result(pair=make_pair(liquidity_usd=None))
     types = {e.alert_type for e in rules.evaluate(result)}
     assert not (types & _BUY_SIDE_ALERT_TYPES)
@@ -813,8 +597,8 @@ async def test_floor_no_longer_touches_protective_alerts():
     buy-side alert — that path is governed by the destructive/rug logic, not
     the (now advisory) liquidity floor."""
     rules = AutomationRules(
-        AlertThresholds(opportunity_min_liquidity_usd=10_000.0),
-        AlertEngineSettings(), now_func=lambda: NOW)
+        AlertThresholds(opportunity_min_liquidity_usd=1_000_000.0),
+        AlertEngineSettings())
     # honeypot at $800 liquidity: destructive -> protective emergency, no buy-side.
     result = await pipeline_result(honeypot=True, pair=make_pair(liquidity_usd=800.0))
     types = {e.alert_type for e in rules.evaluate(result)}

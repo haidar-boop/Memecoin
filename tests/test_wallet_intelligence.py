@@ -212,24 +212,3 @@ def test_summary_renders():
     text = make_analyzer().assess(healthy_data(), make_pair()).summary()
     assert "Smart money assessment" in text
     assert "accumulation=" in text
-
-
-# ---- Flat range needs real buying to read as accumulation (2026-07-14) ----
-
-def test_flat_range_with_thin_buying_is_not_accumulation():
-    """A dead-quiet coin is flat too: two stray buys on a flat price used to
-    earn the full 'buying during consolidation' signal, re-pitching stale
-    coins as smart-money entries. Below the minimum buy count the timing
-    lens now reads MIXED (60), not ACCUMULATION (80)."""
-    trades = (trade("BuyerA", "buy", 120.0), trade("BuyerB", "buy", 80.0),
-              trade("SellerA", "sell", 60.0),
-              trade("W1", "sell", 10.0), trade("W2", "sell", 15.0))  # 5 priced trades
-    assessment = make_analyzer().assess(healthy_data(recent_trades=trades), make_pair())
-    assert assessment.sub_scores["entry_timing"] == 60.0
-
-
-def test_flat_range_with_real_buying_still_reads_accumulation():
-    """healthy_data() has ten same-price buys — genuine consolidation buying
-    keeps the full accumulation signal (Rule 18: existing behavior kept)."""
-    assessment = make_analyzer().assess(healthy_data(), make_pair())
-    assert assessment.sub_scores["entry_timing"] == 80.0

@@ -116,20 +116,6 @@ class _SafetyCheck:
     detail: str
 
 
-def _format_age(hours: float) -> str:
-    """Render an age in hours the way the operator reads it on a phone:
-    minutes under an hour ("45m"), hours under two days ("3.5h", "23.9h"),
-    days beyond ("2.5d"). Values are FLOORED to the displayed precision so
-    the string never overshoots a unit boundary (59.9 minutes must read
-    "59m", not "60m") and never displays as exactly the freshness limit a
-    pool just passed under (23.96h reads "23.9h", not a confusing "24h")."""
-    if hours < 1.0:
-        return f"{math.floor(hours * 60):.0f}m"
-    if hours < 48.0:
-        return f"{math.floor(hours * 10) / 10:g}h"
-    return f"{math.floor(hours / 24.0 * 10) / 10:g}d"
-
-
 def _render_checklist(checks: list[_SafetyCheck]) -> tuple[str, ...]:
     """Render checks into display lines led by a "passed X/Y" header. Only
     definitively-evaluated lines (pass/warn) count toward the denominator;
@@ -192,18 +178,11 @@ class AlertEvent:
     # missed soft check annotates rather than suppresses (operator rule
     # 2026-07-12). Empty for protective/informational alerts.
     checklist: tuple[str, ...] = ()
-    # Pre-rendered "seen before" line (e.g. "3 prior alerts — first 2d 4h
-    # ago"), stamped by the scanner when the token has alert history. A
-    # re-alert days after the first must never read like a brand-new
-    # discovery (operator complaint 2026-07-14); empty for first-ever alerts.
-    history_note: str = ""
 
     def render(self) -> str:
         symbol = self.token.symbol or self.token.address[:8]
         lines = [f"[{self.priority.value.upper()}] {self.alert_type}: {symbol} ({self.token.chain})",
                  f"  {self.title}"]
-        if self.history_note:
-            lines.append(f"  seen before: {self.history_note}")
         if self.why_it_matters:
             lines.append(f"  why it matters: {self.why_it_matters}")
         for reason in self.reasons:
@@ -228,19 +207,15 @@ class AutomationRules:
         self._t = thresholds
         self._s = settings
         self._now = now_func
-        self._logger = get_logger("alerts.rules")
 
     def evaluate(
         self,
         result: PipelineResult,
         *,
         previous_score: float | None = None,
-        peak_score: float | None = None,
         ai_verification_inconclusive: bool = False,
         deterministic_risk_veto: str | None = None,
         operator_interest: bool = True,
-        token_first_seen: datetime | None = None,
-        quiet: bool = False,
     ) -> list[AlertEvent]:
         """``ai_verification_inconclusive`` — the caller ran AI verification
         but no usable judgment came back (discarded below the confidence
@@ -259,25 +234,7 @@ class AutomationRules:
         token (a HIGH opportunity alert was delivered for it). When False,
         protective alerts demote to LOW via the interest gate (see
         :func:`gate_events_by_interest`); the default True preserves full
-        priority for every caller that does not track alert history.
-
-        ``peak_score`` — the token's all-time-high final score (the scanner
-        reads it from snapshot history). Weak-tier buy-side alerts are
-        suppressed while the current score sits well below it — see
-        ``_below_peak``; ``None`` (no history / caller doesn't track) keeps
-        the previous behavior.
-
-        ``token_first_seen`` — when the BOT first recorded this token
-        (``tokens.first_seen``). A known lower bound on the coin's age: a
-        week-old token that migrates to a freshly created pool must not read
-        as a fresh find just because its deepest pair is hours old — the
-        freshness gate uses whichever of pool age / tracked age is larger.
-        ``None`` (first look / caller doesn't track) falls back to pool age.
-
-        ``quiet`` — skip the suppression log line. The scanner calls evaluate
-        twice per token (a provisional probe to decide whether the free rug
-        screens are worth running, then the real pass); only the real pass
-        should log, or every suppressed coin logs identical lines twice."""
+        priority for every caller that does not track alert history."""
         # A dead token is a closed case (Part 29 Section 1 — alerts protect
         # decisions, and no entry/exit decision remains once liquidity has
         # collapsed): one MEDIUM post-mortem replaces the warning/drop pair,
@@ -324,17 +281,15 @@ class AutomationRules:
         #    might still want (that sends with a ⚠ checklist note); it is a
         #    non-opportunity you could not buy, size, or value at all — noise,
         #    not a lead. See ``_untradeable``.
-        # 3) ALREADY TOO BIG — the liquidity/market-cap CEILING, ON by
-        #    default since 2026-07-14 (mcap $100k / liquidity $50k). See
-        #    ``_oversized`` for the full rationale.
-        # 4) ALREADY TOO OLD — older than ``opportunity_max_age_hours``
-        #    (default 24h), measured as the LARGER of pool age and how long
-        #    the bot has tracked the token. See ``_too_old``.
+        # 3) ALREADY TOO BIG — an operator-set liquidity/market-cap CEILING. A
+        #    coin whose pool or market cap has grown past the ceiling is no
+        #    longer an early opportunity (the move already happened), so its
+        #    buy-side alert is suppressed. OFF by default. See ``_oversized``.
         #
-        # A fifth condition suppresses only the WEAK/provisional tiers
+        # A fourth condition suppresses only the WEAK/provisional tiers
         # (``_DECLINE_SUPPRESSED_TYPES``):
         #
-        # 5) ACTIVELY DECLINING — the score fell at least ``score_drop_review_
+        # 4) ACTIVELY DECLINING — the score fell at least ``score_drop_review_
         #    points`` since the last look, the same signal ``score_drop_rule``
         #    already reports. Bug found in the field: a previously-alerted,
         #    now-thinning coin (liquidity cut roughly in half, score 90 -> 65
@@ -352,58 +307,28 @@ class AutomationRules:
         #    first-ever look has no ``previous_score`` and is never penalized
         #    for being new. See ``_score_declining``.
         #
-        #    Second field bug (2026-07-14): the one-step comparison alone let
-        #    a collapsed coin creep back +2-3 points per recheck for DAYS —
-        #    every step reads as "improving," so day-old coins re-pitched as
-        #    fresh finds while still far below their own peak. ``_below_peak``
-        #    closes that: weak tiers stay suppressed until the score returns
-        #    to within ``peak_decline_suppression_points`` of the token's
-        #    all-time high. Same strong-tier exemption, same first-look
-        #    immunity (a first look IS its own peak).
-        #
         # Everything else soft (thin-but-real liquidity, mint/freeze authority,
         # sell tax, deployer history) only ANNOTATES via the checklist. Protective
         # alerts always pass — a flagged/dying coin's holder still needs the
         # warning.
-        # Nothing below touches non-buy-side events, so when no buy-side rule
-        # fired there is nothing to suppress or annotate — skip the whole
-        # classification (and its clock reads) instead of no-op filtering.
-        if any(e.alert_type in _BUY_SIDE_ALERT_TYPES for e in events):
-            suppress_reason: str | None = None
-            if deterministic_risk_veto is not None:
-                suppress_reason = f"risk veto ({deterministic_risk_veto})"
-            elif self._untradeable(result):
-                suppress_reason = "untradeable: missing/zero liquidity or market cap"
-            else:
-                suppress_reason = (self._oversized(result)
-                                   or self._too_old(result, token_first_seen))
-            if suppress_reason is not None:
-                dropped = sorted(e.alert_type for e in events
-                                 if e.alert_type in _BUY_SIDE_ALERT_TYPES)
-                events = [e for e in events if e.alert_type not in _BUY_SIDE_ALERT_TYPES]
-                if not quiet:
-                    # Rule 13: a suppressed pitch must leave a trace, or a
-                    # stray .env override / mis-set ceiling is undiagnosable.
-                    self._logger.info("buy-side alert(s) %s suppressed for %s: %s",
-                                      ", ".join(dropped),
-                                      result.pair.base_token.address, suppress_reason)
-            else:
-                if (self._score_declining(result, previous_score)
-                        or self._below_peak(result, peak_score)):
-                    events = [e for e in events
-                              if e.alert_type not in _DECLINE_SUPPRESSED_TYPES]
-                # NOT a hard veto: individual soft checks (liquidity/market-cap
-                # floor, mint/freeze authority, sell tax, deployer history) no
-                # longer SUPPRESS — that used to drop the whole alert on a single
-                # thin-pool miss. Instead the safety checklist rides ON each
-                # surviving buy-side alert so the operator sees what passed and
-                # what fell short and decides ("if just one thing misses the
-                # checklist, send it through and let me know").
-                checklist = _render_checklist(self._safety_checklist(result))
-                if checklist:
-                    events = [dataclasses.replace(e, checklist=checklist)
-                              if e.alert_type in _BUY_SIDE_ALERT_TYPES else e
-                              for e in events]
+        if (deterministic_risk_veto is not None
+                or self._untradeable(result) or self._oversized(result)):
+            events = [e for e in events if e.alert_type not in _BUY_SIDE_ALERT_TYPES]
+        else:
+            if self._score_declining(result, previous_score):
+                events = [e for e in events if e.alert_type not in _DECLINE_SUPPRESSED_TYPES]
+            # NOT a hard veto: individual soft checks (liquidity/market-cap
+            # floor, mint/freeze authority, sell tax, deployer history) no
+            # longer SUPPRESS — that used to drop the whole alert on a single
+            # thin-pool miss. Instead the safety checklist rides ON each
+            # surviving buy-side alert so the operator sees what passed and
+            # what fell short and decides ("if just one thing misses the
+            # checklist, send it through and let me know").
+            checklist = _render_checklist(self._safety_checklist(result))
+            if checklist:
+                events = [dataclasses.replace(e, checklist=checklist)
+                          if e.alert_type in _BUY_SIDE_ALERT_TYPES else e
+                          for e in events]
         return gate_events_by_interest(
             events, operator_interest=operator_interest,
             enabled=self._s.risk_alerts_require_interest)
@@ -424,71 +349,25 @@ class AutomationRules:
             return True
         return False
 
-    def _oversized(self, result: PipelineResult) -> str | None:
-        """Suppression reason when the coin has grown past a buy-side ceiling
-        (liquidity or market cap above a SET maximum), else ``None``. A coin
-        this large is no longer an early opportunity — the move the operator
-        wants to catch already happened. Distinct from ``_untradeable``: an
-        unknown liquidity/mcap NEVER trips a ceiling (Rule 8 — absent data is
-        not evidence a coin is too big), and protective alerts still fire (a
-        large coin can still rug). ON by default since 2026-07-14; a ceiling
-        set to 0.0 is OFF. The reason names only the ceiling(s) that actually
-        tripped — logging a disabled ceiling as "max 0" misleads."""
+    def _oversized(self, result: PipelineResult) -> bool:
+        """True when the coin has already grown past the operator's buy-side
+        ceiling — liquidity or market cap above a SET maximum. A coin this large
+        is no longer an early opportunity (the move the operator wants to catch
+        already happened — e.g. a multi-million-dollar pool firing an "early
+        opportunity"), so its opportunity/momentum/smart-money alerts are
+        suppressed. Distinct from ``_untradeable``: here unknown liquidity/mcap
+        NEVER trips the ceiling (Rule 8 — absent data is not evidence a coin is
+        too big), and protective alerts still fire (a large coin can still rug).
+        Both ceilings default 0.0 = OFF, so behavior is unchanged until set."""
         max_liq = self._t.opportunity_max_liquidity_usd
         liq = result.pair.liquidity_usd
         if max_liq > 0.0 and liq is not None and math.isfinite(liq) and liq > max_liq:
-            return (f"over the size ceiling (liquidity ${liq:,.0f} "
-                    f"vs max ${max_liq:,.0f})")
+            return True
         max_mcap = self._t.opportunity_max_market_cap_usd
         mcap = result.pair.market_cap
         if max_mcap > 0.0 and mcap is not None and math.isfinite(mcap) and mcap > max_mcap:
-            return (f"over the size ceiling (market cap ${mcap:,.0f} "
-                    f"vs max ${max_mcap:,.0f})")
-        return None
-
-    def _too_old(self, result: PipelineResult,
-                 token_first_seen: datetime | None = None) -> str | None:
-        """Suppression reason when the coin is older than the freshness window
-        (``opportunity_max_age_hours``, default 24h), else ``None`` — a day-old
-        coin is never a fresh find, whatever its numbers do (operator
-        2026-07-14: "make sure it's not older than 1 day"). Age is the LARGER
-        of the pool's age and how long the bot has tracked the token
-        (``token_first_seen``) — a week-old coin migrating to a freshly created
-        pool must not read as fresh. Both unknown → the gate never trips
-        (Rule 8 — absent data is not evidence of age; the checklist surfaces
-        "Pool age: not verified" instead). Protective alerts are never
-        age-gated. 0.0 = OFF."""
-        max_age_hours = self._t.opportunity_max_age_hours
-        if max_age_hours <= 0.0:
-            return None
-        pool_age = self._pool_age_hours(result)
-        tracked_age = self._hours_since(token_first_seen)
-        known = [a for a in (pool_age, tracked_age) if a is not None]
-        if not known:
-            return None
-        age_hours = max(known)
-        if age_hours <= max_age_hours:
-            return None
-        basis = "pool age" if age_hours == pool_age else "tracked for"
-        return (f"{basis} {_format_age(age_hours)} exceeds the "
-                f"{self._t.opportunity_max_age_hours:g}h freshness window")
-
-    def _pool_age_hours(self, result: PipelineResult) -> float | None:
-        """Pool age in hours, or ``None`` when the creation time is missing,
-        malformed, or in the future (clock skew must never count as age)."""
-        return self._hours_since(result.pair.pair_created_at)
-
-    def _hours_since(self, moment: datetime | None) -> float | None:
-        """Hours elapsed since ``moment``, or ``None`` when it is missing,
-        malformed (naive/aware mismatch), or in the future — an age that
-        cannot be verified is unknown, never zero (Rule 8)."""
-        if moment is None:
-            return None
-        try:
-            age_hours = (self._now() - moment).total_seconds() / 3600.0
-        except Exception:  # noqa: BLE001 — a bad timestamp must never break alerting
-            return None
-        return age_hours if age_hours >= 0.0 else None
+            return True
+        return False
 
     def _safety_checklist(self, result: PipelineResult) -> list[_SafetyCheck]:
         """Build the per-alert safety checklist (operator rule 2026-07-12).
@@ -557,12 +436,6 @@ class AutomationRules:
         if mcap_check is not None:
             checks.append(mcap_check)
 
-        # 8) Pool age — the freshness gate upstream (``_too_old``) already
-        # suppressed anything past the window, so on a surviving alert this
-        # line either confirms the age or surfaces that it could NOT be
-        # verified (Rule 8 — the one case the gate lets through unverified).
-        checks.append(self._age_check(result))
-
         # Informational: top-wallet concentration — NEVER a fail (a new launch is
         # naturally concentrated). Shown with youth context when the pool is young.
         top = p.top_holder_percent if p else None
@@ -614,29 +487,18 @@ class AutomationRules:
                 "warn", f"Market cap ${mcap:,.0f} — below your ${floor:,.0f} floor")
         return _SafetyCheck("pass", f"Market cap ${mcap:,.0f}")
 
-    def _age_check(self, result: PipelineResult) -> _SafetyCheck:
-        """Pool-age line. With the freshness gate ON, any alert that reaches
-        the checklist already passed it (``_too_old`` suppressed the rest), so
-        a known age renders ✅ with the verified age. With the gate OFF (0.0)
-        the age is shown as an ℹ️ note, never a green pass — the operator
-        disabled the window, so there is no freshness bar to "pass"; a ✅ on a
-        30h-old pool would falsely endorse exactly the staleness he cares
-        about. Unknown age is surfaced as ❔ (the gate cannot verify what the
-        source never reported — Rule 8)."""
-        age_hours = self._pool_age_hours(result)
-        if age_hours is None:
-            return _SafetyCheck("unknown", "Pool age: not verified")
-        if self._t.opportunity_max_age_hours <= 0.0:
-            return _SafetyCheck(
-                "note", f"Pool age {_format_age(age_hours)} — freshness gate off")
-        return _SafetyCheck("pass", f"Pool age {_format_age(age_hours)}")
-
     def _is_new_launch(self, result: PipelineResult) -> bool:
         """True when the pool is younger than the checklist's new-launch window —
         used only to phrase the concentration note, never to gate anything."""
-        age_hours = self._pool_age_hours(result)
-        return (age_hours is not None
-                and age_hours * 60.0 <= self._t.checklist_new_launch_minutes)
+        created = result.pair.pair_created_at
+        if created is None:
+            return False
+        window = self._t.checklist_new_launch_minutes
+        try:
+            age_minutes = (self._now() - created).total_seconds() / 60.0
+        except Exception:  # noqa: BLE001 — a bad timestamp must never break alerting
+            return False
+        return 0.0 <= age_minutes <= window
 
     # IF liquidity has collapsed below the dead floor THEN the failure is a
     # completed event, not a warning — emit one post-mortem (Part 29 S1).
@@ -978,21 +840,6 @@ class AutomationRules:
         if previous_score is None:
             return False
         return (previous_score - result.master.final_score) >= self._s.score_drop_review_points
-
-    def _below_peak(self, result: PipelineResult, peak_score: float | None) -> bool:
-        """True while the score sits well below the token's own all-time high.
-
-        Complements ``_score_declining``: that one-step check misses a coin
-        that collapsed and then creeps back a few points per recheck — each
-        step reads as improving, so a day-old coin re-pitched as a fresh
-        opportunity for days (operator complaint 2026-07-14). Used ONLY by
-        the weak-tier suppression, never by ``_score_drop_rule`` (whose
-        "dropped X points" copy is about the last look, not the peak).
-        ``None`` = caller has no history — never suppress; a first-ever look
-        is its own peak, so it is never penalized for being new."""
-        if peak_score is None:
-            return False
-        return (peak_score - result.master.final_score) >= self._s.peak_decline_suppression_points
 
 
 def events_from_security_changes(

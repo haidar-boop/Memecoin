@@ -13,9 +13,9 @@ Python 3.11 async, SQLite, free/low-cost APIs. A 24/7 scanner
 tokens, screens them for security risk, scores them across weighted
 categories, tracks a tiered watchlist, learns from outcomes, and delivers
 prioritized alerts to Telegram. **It never trades and never holds funds.**
-17 CLI commands share the same engine (`search token discover security scan
-plan report quick compare watchlist alerts backtest wallets reputation daily
-monitor mind`).
+16 CLI commands share the same engine (`search token discover security scan
+plan report quick compare watchlist alerts backtest wallets daily monitor
+mind`).
 
 ## Package map (`meme_intelligence/`)
 

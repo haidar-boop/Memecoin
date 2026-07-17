@@ -57,16 +57,6 @@ CREATE TABLE IF NOT EXISTS tokens (
     UNIQUE (chain, address)
 );
 
--- Expression index for the EVM case-variant lookups (token_first_seen /
--- _token_id_variants): WHERE chain = ? AND lower(address) = lower(?) would
--- otherwise full-scan a table that grows one row per token ever seen — a
--- measured ~7000x slowdown at realistic size, blocking the event loop the
--- scanner AND the trade buttons share. Original (non-migrated) columns, so
--- the schema script is the right home (the post-migration list is only for
--- indexes touching migrated columns).
-CREATE INDEX IF NOT EXISTS idx_tokens_chain_lower_addr
-    ON tokens(chain, lower(address));
-
 CREATE TABLE IF NOT EXISTS snapshots (
     id INTEGER PRIMARY KEY,
     token_id INTEGER NOT NULL REFERENCES tokens(id),
@@ -114,11 +104,9 @@ CREATE TABLE IF NOT EXISTS wallet_sightings (
     wallet TEXT NOT NULL,
     chain TEXT NOT NULL,
     token_id INTEGER NOT NULL REFERENCES tokens(id),
-    side TEXT NOT NULL,          -- buy / sell / hold_whale / hold_top10
+    side TEXT NOT NULL,          -- buy / sell / hold_whale
     usd_value REAL,
-    seen_at TEXT NOT NULL,
-    source TEXT,                 -- which collector observed it (e.g. goplus_holders)
-    percent REAL                 -- share of supply held at sighting time, 0-100
+    seen_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_sightings_wallet ON wallet_sightings(wallet, seen_at);
 CREATE INDEX IF NOT EXISTS idx_sightings_token ON wallet_sightings(token_id);
@@ -205,23 +193,7 @@ _MIGRATIONS = {
         ("regime", "TEXT"),          # market condition bucketing (Part 24 S9)
         ("opportunity_rank", "REAL"),  # Part 28 S5 watchlist opportunity ranking
     ),
-    "wallet_sightings": (
-        ("source", "TEXT"),   # which collector observed it (Part 17 provenance)
-        ("percent", "REAL"),  # share of supply held at sighting time, 0-100
-    ),
 }
-
-# Indexes on MIGRATED columns must be created AFTER _migrate() runs — putting
-# them in _SCHEMA crashed startup on any pre-migration database ("no such
-# column: source"), because executescript runs before the ALTER TABLEs (the
-# old-database migration test caught this before it reached the droplet).
-_POST_MIGRATION_INDEXES = (
-    # Covers the reputation rollup's source-filtered (wallet, token) grouping,
-    # with seen_at included so MIN(seen_at) never touches the base table —
-    # keeps the join an index scan as the clock's table grows for months.
-    """CREATE INDEX IF NOT EXISTS idx_sightings_source_pair
-       ON wallet_sightings(source, wallet, token_id, seen_at)""",
-)
 
 
 @dataclass(frozen=True)
@@ -272,8 +244,6 @@ class Storage:
         self._conn.execute("PRAGMA busy_timeout=30000")
         self._conn.executescript(_SCHEMA)
         self._migrate()
-        for index_sql in _POST_MIGRATION_INDEXES:
-            self._conn.execute(index_sql)
         self._conn.commit()
 
     def _migrate(self) -> None:
@@ -357,41 +327,6 @@ class Storage:
         return TokenIdentity(chain=row["chain"], address=row["address"],
                              symbol=row["symbol"], name=row["name"])
 
-    def token_first_seen(self, token: TokenIdentity) -> datetime | None:
-        """When the bot FIRST recorded this token — a known lower bound on the
-        coin's age (a token tracked for 3 days is at least 3 days old, whatever
-        its current deepest pool's creation time says). ``None`` for a token
-        never seen before or an unparseable timestamp (Rule 8: an unknown age
-        stays unknown, it never becomes zero)."""
-        where, params = self._address_match_sql(token)
-        row = self._conn.execute(
-            f"SELECT MIN(first_seen) AS first_seen FROM tokens t WHERE {where}",
-            params,
-        ).fetchone()
-        if row is None or not row["first_seen"]:
-            return None
-        try:
-            return datetime.fromisoformat(row["first_seen"])
-        except ValueError:
-            return None
-
-    @staticmethod
-    def _address_match_sql(token: TokenIdentity) -> tuple[str, tuple]:
-        """WHERE fragment (against alias ``t``) matching EVERY tokens row for
-        this token. EVM addresses arrive checksummed from some providers and
-        lowercased from others, and each variant gets its OWN row
-        (``UNIQUE(chain, address)`` is case-sensitive) — history queries
-        (first_seen, peak score, score history) must aggregate across the
-        variants or a checksummed re-analysis silently loses the token's past
-        (re-review finding: the freshness gate's tracked age collapsed from
-        30 days to hours, and peak-decline suppression read ``None``). Solana
-        base58 stays exact-match (case-sensitive by design). Backed by the
-        ``idx_tokens_chain_lower_addr`` expression index."""
-        if token.address.lower().startswith("0x"):
-            return ("t.chain = ? AND lower(t.address) = lower(?)",
-                    (token.chain, token.address))
-        return "t.chain = ? AND t.address = ?", (token.chain, token.address)
-
     def table_counts(self) -> dict:
         """Cheap DB totals for the /status command (Project 2)."""
         def count(sql: str) -> int:
@@ -442,30 +377,14 @@ class Storage:
         self._conn.commit()
         return int(cursor.lastrowid)
 
-    def peak_score(self, token: TokenIdentity) -> float | None:
-        """Highest final score EVER recorded for a token, or ``None`` before
-        its first snapshot. Feeds decline suppression: comparing only against
-        the immediately-preceding snapshot let a collapsed coin creep back up
-        a few points per recheck for days without ever reading as "declining"
-        (operator complaint 2026-07-14 — old coins re-pitched as fresh)."""
-        where, params = self._address_match_sql(token)
-        row = self._conn.execute(
-            f"""SELECT MAX(s.final_score) AS peak
-                FROM snapshots s JOIN tokens t ON t.id = s.token_id
-                WHERE {where}""",
-            params,
-        ).fetchone()
-        return row["peak"] if row and row["peak"] is not None else None
-
     def score_history(self, token: TokenIdentity, limit: int = 30) -> list[dict]:
         """Recent snapshots for one token, newest first (Part 28 score tracking)."""
-        where, params = self._address_match_sql(token)
         rows = self._conn.execute(
-            f"""SELECT s.created_at, s.final_score, s.classification, s.coverage, s.source
-                FROM snapshots s JOIN tokens t ON t.id = s.token_id
-                WHERE {where}
-                ORDER BY s.created_at DESC LIMIT ?""",
-            (*params, limit),
+            """SELECT s.created_at, s.final_score, s.classification, s.coverage, s.source
+               FROM snapshots s JOIN tokens t ON t.id = s.token_id
+               WHERE t.chain = ? AND t.address = ?
+               ORDER BY s.created_at DESC LIMIT ?""",
+            (token.chain, token.address, limit),
         ).fetchall()
         return [dict(row) for row in rows]
 
@@ -558,14 +477,6 @@ class Storage:
                ON CONFLICT(token_id) DO UPDATE SET
                    tier = excluded.tier,
                    thesis = COALESCE(excluded.thesis, watchlist.thesis),
-                   -- Resurrection from 'archived' restarts the tracking clock:
-                   -- keeping the original added_at let the staleness door
-                   -- instantly re-archive a genuinely revived coin forever
-                   -- (re-review finding 2026-07-14) — re-entry must be a
-                   -- fresh 3-day window, exactly like a brand-new add.
-                   added_at = CASE WHEN watchlist.tier = 'archived'
-                                   THEN excluded.added_at
-                                   ELSE watchlist.added_at END,
                    updated_at = excluded.updated_at,
                    last_score = COALESCE(excluded.last_score, watchlist.last_score),
                    last_classification =
@@ -596,21 +507,11 @@ class Storage:
     # ---- Security facts baseline (Part 18, Section 10) ----
 
     def latest_security_facts(self, token: TokenIdentity) -> dict | None:
-        """The last-known security facts for a token, or None on first sighting.
-
-        Variant-aware (see ``_address_match_sql``), newest baseline wins: a
-        contract change straddling an EVM casing flip previously diffed
-        against ``None`` — the honeypot flip fired no security-change alert
-        and the new baseline buried it permanently (re-review finding
-        2026-07-14). Writes still key on the current casing's row; this read
-        picking the most recent row across variants keeps the diff chain
-        intact."""
-        where, params = self._address_match_sql(token)
+        """The last-known security facts for a token, or None on first sighting."""
         row = self._conn.execute(
-            f"""SELECT f.facts FROM security_facts f JOIN tokens t ON t.id = f.token_id
-               WHERE {where}
-               ORDER BY f.updated_at DESC, f.token_id DESC LIMIT 1""",
-            params,
+            """SELECT f.facts FROM security_facts f JOIN tokens t ON t.id = f.token_id
+               WHERE t.chain = ? AND t.address = ?""",
+            (token.chain, token.address),
         ).fetchone()
         return json.loads(row["facts"]) if row else None
 
@@ -629,32 +530,21 @@ class Storage:
     # ---- Wallet sightings (Part 17, Sections 2-3) ----
 
     def record_wallet_sightings(
-        self, token: TokenIdentity, sightings: list[tuple],
-        *, source: str | None = None,
+        self, token: TokenIdentity, sightings: list[tuple[str, str, float | None]],
     ) -> int:
-        """Record observed wallet actions: (wallet, side, usd_value[, percent]) tuples.
+        """Record observed wallet actions: (wallet, side, usd_value) tuples.
 
         This is the raw feed for wallet reputation: once Part 24's outcome
         tracking labels tokens as winners/losers, each wallet's recorded
         entries become a measurable track record.
-
-        This table is APPEND-ONLY with no dedup — the same wallet sighted
-        twice is two rows (each carries its own ``seen_at``). Callers that
-        observe the same fact repeatedly (e.g. a holder recorded on every
-        recheck) must dedup upstream; reputation queries must aggregate
-        with DISTINCT. ``source`` tags provenance so feeds from different
-        collectors stay distinguishable (Rule 9); the optional 4th tuple
-        element is the held share of supply (0-100) for holder sightings.
         """
         token_id = self.upsert_token(token)
         now = self._now().isoformat()
         self._conn.executemany(
-            """INSERT INTO wallet_sightings
-               (wallet, chain, token_id, side, usd_value, seen_at, source, percent)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            [(entry[0], token.chain, token_id, entry[1], entry[2], now, source,
-              entry[3] if len(entry) > 3 else None)
-             for entry in sightings],
+            """INSERT INTO wallet_sightings (wallet, chain, token_id, side, usd_value, seen_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            [(wallet, token.chain, token_id, side, usd, now)
+             for wallet, side, usd in sightings],
         )
         self._conn.commit()
         return len(sightings)
@@ -662,8 +552,7 @@ class Storage:
     def wallet_history(self, wallet: str, limit: int = 100) -> list[dict]:
         """A wallet's recorded sightings across tokens, newest first."""
         rows = self._conn.execute(
-            """SELECT t.chain, t.address, t.symbol, s.side, s.usd_value, s.seen_at,
-                      s.source, s.percent
+            """SELECT t.chain, t.address, t.symbol, s.side, s.usd_value, s.seen_at
                FROM wallet_sightings s JOIN tokens t ON t.id = s.token_id
                WHERE s.wallet = ? ORDER BY s.seen_at DESC LIMIT ?""",
             (wallet, limit),
@@ -678,136 +567,6 @@ class Storage:
             (token.chain, token.address),
         ).fetchall()
         return [row["wallet"] for row in rows]
-
-    # Shared CTEs for the wallet-reputation join (Part 17 × Part 24).
-    #
-    # ``pair``: one row per (wallet, token) from one sighting source —
-    # duplicate append-only rows (restart re-records) collapse to the
-    # EARLIEST seen_at. ``agg``: per-token best/worst measured price change,
-    # whether liquidity ever died (NULL survived is unknown, never a rug —
-    # Rule 8), and when its FIRST outcome was measured. ``labeled`` buckets
-    # each pair:
-    #   hindsight — the wallet's first sighting POSTdates the token's first
-    #     measured outcome, so "early on a winner" cannot be claimed; the
-    #     pair earns no credit (adversarial-review finding 2026-07-14:
-    #     post-pump top-holder snapshots re-recorded after a restart were
-    #     collecting full win credit). Timestamps are aware-UTC isoformat
-    #     everywhere, so lexical comparison is chronological; an unparseable
-    #     seen_at fails the comparison and lands in hindsight — no proof of
-    #     being early means no credit (Rule 8).
-    #   resolved — measured and hit the success threshold, the failure
-    #     threshold, or died (same thresholds evaluate_predictions grades
-    #     with; passed in as parameters so the definition lives in one
-    #     place, BacktestSettings).
-    #   pending — no outcomes yet, or measured but undetermined.
-    # Aggregation happens IN SQL so memory stays O(reported wallets), not
-    # O(sighting rows) — the Python-side join materialized hundreds of MB
-    # at realistic table sizes on the 1GB droplet (review finding).
-    _REPUTATION_CTES = """
-        WITH pair AS (
-            SELECT wallet, token_id, MIN(seen_at) AS first_seen_at
-            FROM wallet_sightings WHERE source = :source
-            GROUP BY wallet, token_id
-        ),
-        agg AS (
-            SELECT token_id,
-                   MAX(price_change_percent) AS best_change,
-                   MIN(price_change_percent) AS worst_change,
-                   MAX(CASE WHEN survived = 0 THEN 1 ELSE 0 END) AS died,
-                   MIN(measured_at) AS first_measured_at
-            FROM outcomes GROUP BY token_id
-        ),
-        labeled AS (
-            SELECT p.wallet, p.token_id, p.first_seen_at,
-                   CASE
-                     WHEN a.token_id IS NULL THEN 'pending'
-                     WHEN p.first_seen_at > a.first_measured_at THEN 'hindsight'
-                     WHEN (a.best_change IS NOT NULL AND a.best_change >= :success)
-                       OR a.died = 1
-                       OR (a.worst_change IS NOT NULL AND a.worst_change <= :failure)
-                       THEN 'resolved'
-                     ELSE 'pending'
-                   END AS bucket,
-                   CASE WHEN a.best_change IS NOT NULL
-                             AND a.best_change >= :success THEN 1 ELSE 0 END AS won,
-                   COALESCE(a.died, 0) AS death
-            FROM pair p LEFT JOIN agg a ON a.token_id = p.token_id
-        )
-    """
-
-    def wallet_reputation_rollup(
-        self, *, source: str, success_change_percent: float,
-        failure_change_percent: float, min_resolved: int,
-    ) -> list[dict]:
-        """Per-wallet reputation raw material: resolved/wins/deaths/pending/
-        hindsight counts and the sighting window, ONLY for wallets clearing
-        ``min_resolved`` — the gate runs in SQL so thin wallets never
-        materialize in Python."""
-        rows = self._conn.execute(
-            self._REPUTATION_CTES + """
-            SELECT wallet,
-                   SUM(bucket = 'resolved') AS resolved,
-                   SUM(CASE WHEN bucket = 'resolved' AND won = 1 THEN 1 ELSE 0 END) AS wins,
-                   SUM(CASE WHEN bucket = 'resolved' AND death = 1 THEN 1 ELSE 0 END) AS deaths,
-                   SUM(bucket = 'pending') AS pending,
-                   SUM(bucket = 'hindsight') AS hindsight,
-                   MIN(first_seen_at) AS first_seen_at,
-                   MAX(first_seen_at) AS last_seen_at
-            FROM labeled GROUP BY wallet
-            HAVING SUM(bucket = 'resolved') >= :min_resolved""",
-            {"source": source, "success": success_change_percent,
-             "failure": failure_change_percent, "min_resolved": min_resolved},
-        ).fetchall()
-        return [dict(row) for row in rows]
-
-    def wallet_reputation_totals(
-        self, *, source: str, success_change_percent: float,
-        failure_change_percent: float,
-    ) -> dict:
-        """Honest denominators for the reputation report: distinct wallets and
-        tokens sighted, how many sighted tokens have a resolved label (token-
-        level — independent of which wallet saw them when), and how many
-        (wallet, token) pairs were excluded as hindsight."""
-        row = self._conn.execute(
-            self._REPUTATION_CTES + """
-            SELECT COUNT(DISTINCT wallet) AS wallets_seen,
-                   COUNT(DISTINCT token_id) AS tokens_sighted,
-                   SUM(bucket = 'hindsight') AS pairs_hindsight,
-                   COUNT(DISTINCT CASE WHEN token_id IN (
-                       SELECT a2.token_id FROM agg a2
-                       WHERE (a2.best_change IS NOT NULL AND a2.best_change >= :success)
-                          OR a2.died = 1
-                          OR (a2.worst_change IS NOT NULL AND a2.worst_change <= :failure)
-                   ) THEN token_id END) AS tokens_resolved
-            FROM labeled""",
-            {"source": source, "success": success_change_percent,
-             "failure": failure_change_percent},
-        ).fetchone()
-        return {
-            "wallets_seen": row["wallets_seen"] or 0,
-            "tokens_sighted": row["tokens_sighted"] or 0,
-            "tokens_resolved": row["tokens_resolved"] or 0,
-            "pairs_hindsight": row["pairs_hindsight"] or 0,
-        }
-
-    def wallet_sighting_stats(self) -> list[dict]:
-        """Per-source progress summary over ``wallet_sightings`` (Part 17):
-        how many sightings/wallets/tokens each source has contributed and
-        the recording window, newest-active source first. Powers
-        /wallets — the data-clock's own progress readout, honest about
-        having nothing yet rather than guessing (Rule 8)."""
-        rows = self._conn.execute(
-            """SELECT COALESCE(source, 'unlabeled') AS source,
-                      COUNT(*) AS sightings,
-                      COUNT(DISTINCT wallet) AS wallets,
-                      COUNT(DISTINCT token_id) AS tokens,
-                      MIN(seen_at) AS earliest,
-                      MAX(seen_at) AS latest
-               FROM wallet_sightings
-               GROUP BY COALESCE(source, 'unlabeled')
-               ORDER BY MAX(seen_at) DESC"""
-        ).fetchall()
-        return [dict(row) for row in rows]
 
     # ---- Research journal (Part 11, Section 8) ----
 
@@ -894,20 +653,14 @@ class Storage:
                 (limit,),
             ).fetchall()
         else:
-            # Variant-aware (see _address_match_sql): the interest gate reads
-            # this history — an EVM casing flip must not hide the HIGH alert
-            # that granted interest, or every later protective alert on the
-            # coin demotes to LOW and never reaches the phone (re-review
-            # finding 2026-07-14).
-            where, params = self._address_match_sql(token)
             rows = self._conn.execute(
-                f"""SELECT a.id, a.created_at, a.priority, a.alert_type, a.title,
+                """SELECT a.id, a.created_at, a.priority, a.alert_type, a.title,
                           a.reasons, a.score_at_alert, a.outcome,
                           t.chain, t.address, t.symbol
                    FROM alerts a JOIN tokens t ON t.id = a.token_id
-                   WHERE {where}
+                   WHERE t.chain = ? AND t.address = ?
                    ORDER BY a.id DESC LIMIT ?""",
-                (*params, limit),
+                (token.chain, token.address, limit),
             ).fetchall()
         history = []
         for row in rows:

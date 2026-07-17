@@ -96,7 +96,6 @@ _HELP_TEXT = "\n".join([
     "/watchlist - top tracked coins by tier",
     "/boost <address> [chain] - DexScreener paid-boost amount for a coin",
     "/mind - learning-layer report card + feedback tallies",
-    "/wallets - smart-wallet data clock progress (Part 17 groundwork)",
     "/mute <address> - silence ALL alerts for a token",
     "/unmute <address> - restore alerts for a token",
     "/buy <address> <sol> - buy that many SOL of a token (live if enabled)",
@@ -228,7 +227,6 @@ class TelegramCommandListener(BaseCollector):
             "/watchlist": self._cmd_watchlist,
             "/boost": self._cmd_boost,
             "/mind": self._cmd_mind,
-            "/wallets": self._cmd_wallets,
             "/mute": self._cmd_mute,
             "/unmute": self._cmd_unmute,
             "/buy": self._cmd_buy,
@@ -435,15 +433,6 @@ class TelegramCommandListener(BaseCollector):
             reply, markup = reply
         if reply:
             await self._reply(reply, reply_markup=markup)
-
-    async def send_text(self, text: str) -> bool:
-        """Unprompted plain-text message to the operator chat.
-
-        Public entry point for out-of-band notifications (the scanner
-        watchdog). Same delivery path as command replies: never raises,
-        returns False on failure so the caller can log-and-move-on.
-        """
-        return await self._reply(text)
 
     async def _reply(self, text: str, *, reply_markup: dict | None = None) -> bool:
         """Plain-text reply to the operator chat. No parse_mode (nothing the
@@ -776,13 +765,7 @@ class TelegramCommandListener(BaseCollector):
             return ("Mind layer is off (MEMEINTEL_LEARNING_ENABLE_IN_MONITOR).\n"
                     f"Operator feedback: {feedback['up']} up / {feedback['down']} down "
                     "(advisory only)")
-        # The metrics walk visits every resolved coin — run it in a worker
-        # thread (the learning store is thread-safe with per-coin locking)
-        # or it blocks the event loop, and with it every other Telegram
-        # command and the scan itself (2026-07-15 incident: a /mind against
-        # 24,884 resolved coins froze the bot for minutes; the operator's
-        # report was "worked once then stopped").
-        metrics = await asyncio.to_thread(service.get_learning_metrics, persist=False)
+        metrics = service.get_learning_metrics(persist=False)
         rug = metrics.get("rug") or {}
         directional = metrics.get("directional") or {}
         lines = [
@@ -796,26 +779,6 @@ class TelegramCommandListener(BaseCollector):
         ]
         if metrics.get("brier_score") is not None:
             lines.append(f"brier score: {_opt(metrics.get('brier_score'))}")
-        # Current-regime window (2026-07-16 audit): the lifetime numbers above
-        # mix eras (including the one before the classifier ever trained);
-        # this block grades only predictions made in the last N days.
-        recent = metrics.get("recent")
-        if isinstance(recent, dict):
-            r_rug = recent.get("rug") or {}
-            r_dir = recent.get("directional") or {}
-            days = recent.get("window_days", 0)
-            # "labels maturing": outcomes refine for up to 30d, so a slow rug
-            # confirmed after its prediction leaves the window never enters
-            # these rug stats — windowed rug P/R reads LOW while corrections
-            # are in flight (2026-07-16 review). Advisory only; the veto's
-            # authority always comes from the lifetime numbers above.
-            lines.append(
-                f"last {days:g}d (labels maturing): "
-                f"graded {recent.get('resolved_count', 0)} | "
-                f"hit rate {_opt(r_dir.get('hit_rate'))} (n={r_dir.get('samples', 0)}) | "
-                f"rug P/R {_opt(r_rug.get('precision'))}/{_opt(r_rug.get('recall'))}"
-                + (f" | brier {_opt(recent.get('brier_score'))}"
-                   if recent.get("brier_score") is not None else ""))
         ensemble = metrics.get("ensemble_accuracy") or {}
         weights = [f"{source} {_opt(report.get('accuracy'))} (n={report.get('samples', 0)})"
                    for source, report in ensemble.items()
@@ -834,9 +797,6 @@ class TelegramCommandListener(BaseCollector):
         from meme_intelligence.learning.metrics import veto_gate
 
         ls = self._ctx.settings.learning
-        # Mirrors the controller exactly: authority always comes from the
-        # LIFETIME numbers (the windowed opt-in was cut in review — see
-        # _mind_veto_authority).
         rug = metrics.get("rug") or {}
         graded = int(rug.get("true_positives") or 0) + int(rug.get("false_positives") or 0)
         gate = veto_gate(metrics, min_accuracy=ls.veto_min_accuracy,
@@ -849,86 +809,6 @@ class TelegramCommandListener(BaseCollector):
             earned = f"EARNED — rug precision {gate[0]:.2f} over {gate[1]} graded rug calls"
         state = "ON" if ls.veto_enabled else "off (MEMEINTEL_LEARNING_VETO_ENABLED)"
         return f"p(rug) veto: {state} | authority: {earned}"
-
-    async def _cmd_wallets(self, args: list[str]) -> str:
-        """Smart-wallet progress on the phone (Part 17, 2026-07-14): the
-        data clock's recording stats plus the reputation section — wallets
-        scored from sightings joined against measured outcomes, with honest
-        denominators, and nothing invented while the sample is thin."""
-        from meme_intelligence.analytics.wallet_reputation import DEFAULT_SIGHTING_SOURCE
-        sw = self._ctx.settings.smart_wallet
-        try:
-            stats = self._ctx.storage.wallet_sighting_stats()
-        except Exception as exc:  # noqa: BLE001 — advisory command, never crash the poll loop
-            self._logger.warning("wallet sighting stats unavailable: %s", exc)
-            return "Couldn't read wallet-sighting stats right now — try again shortly."
-
-        lines = ["SMART-WALLET DATA CLOCK"]
-        lines.append(f"clock: {'ON' if sw.enabled else 'off (MEMEINTEL_SMART_WALLET_ENABLED)'}")
-        clock = next((s for s in stats if s["source"] == DEFAULT_SIGHTING_SOURCE), None)
-        if clock is None:
-            lines.append("no sightings recorded yet" if sw.enabled else
-                         "nothing recorded — enable the clock to start it")
-        else:
-            lines.append(f"{clock['sightings']} sightings | {clock['wallets']} distinct "
-                         f"wallets | {clock['tokens']} tokens covered")
-            running_for = self._parse_seen_at(clock["earliest"])
-            latest = self._parse_seen_at(clock["latest"])
-            if running_for is not None:
-                lines.append(f"running for: {_fmt_duration((self._now() - running_for).total_seconds())}")
-            if latest is not None:
-                lines.append(f"last recorded: {_fmt_duration((self._now() - latest).total_seconds())} ago")
-            lines.extend(self._reputation_lines())
-        others = [s for s in stats if s["source"] != DEFAULT_SIGHTING_SOURCE]
-        if others:
-            other_total = sum(s["sightings"] for s in others)
-            lines.append(f"({other_total} additional sighting(s) from manual /check or "
-                         "`wallets` CLI lookups, other sources)")
-        return "\n".join(lines)
-
-    def _reputation_lines(self) -> list[str]:
-        """Reputation section for /wallets: the data-clock join against
-        measured outcomes (Part 17 × Part 24). Honest denominators always;
-        top wallets only once any wallet clears the resolved-token minimum."""
-        from meme_intelligence.analytics.wallet_reputation import (
-            compute_wallet_reputations,
-        )
-        try:
-            report = compute_wallet_reputations(
-                self._ctx.storage, self._ctx.settings.backtest,
-                min_resolved=self._ctx.settings.smart_wallet.min_resolved_for_reputation)
-        except Exception as exc:  # noqa: BLE001 — advisory section, never crash the poll loop
-            self._logger.warning("wallet reputation computation failed: %s", exc)
-            return ["reputation: unavailable right now — try again shortly"]
-        if not report.entries:
-            return [
-                f"reputation: no wallet has ≥{report.min_resolved} resolved tokens yet "
-                f"({report.tokens_resolved} of {report.tokens_sighted} sighted tokens "
-                "resolved so far) — keep the clock running",
-            ]
-        lines = [f"reputation: {report.wallets_scored} of {report.wallets_seen} "
-                 f"sighted wallet(s) scored (≥{report.min_resolved} resolved each):"]
-        for entry in report.entries[:3]:
-            # Wallet strings originate in GoPlus API responses (untrusted);
-            # sanitize like every other externally-sourced identity here —
-            # truncation alone lets a short malicious string through verbatim.
-            short = _sanitize_identity(
-                entry.wallet[:4] + "…" + entry.wallet[-4:]
-                if len(entry.wallet) > 12 else entry.wallet)
-            lines.append(f"  {short}  {entry.score:.0f}/100 — "
-                         f"{entry.resolved_tokens} resolved: {entry.wins} win(s), "
-                         f"{entry.deaths} death(s)")
-        lines.append("a track record, not a guarantee — verify before acting.")
-        return lines
-
-    def _parse_seen_at(self, value: str | None) -> datetime | None:
-        if not value:
-            return None
-        try:
-            parsed = datetime.fromisoformat(value)
-        except ValueError:
-            return None
-        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
 
     async def _cmd_mute(self, args: list[str]) -> str:
         address, error = self._validated_address(args, "/mute <address>")

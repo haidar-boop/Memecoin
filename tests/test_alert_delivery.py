@@ -84,6 +84,21 @@ def test_channel_categories():
     assert channel_for(make_event(alert_type="something_future")) == "reports"
 
 
+def test_boost_channel_is_isolated_from_discoveries():
+    """A boost is unscreened paid promotion; it must never share a channel
+    with vetted opportunity alerts (early_opportunity, strong_candidate,
+    high_priority_opportunity, new_token_discovery) or its higher volume
+    drowns out the alerts that actually matter — regression guard for the
+    bug where boost briefly rode in on "discoveries"."""
+    boost_channel = channel_for(make_event(alert_type="boost"))
+    assert boost_channel != "discoveries"
+    for opportunity_type in (
+        "early_opportunity", "strong_candidate",
+        "high_priority_opportunity", "new_token_discovery",
+    ):
+        assert channel_for(make_event(alert_type=opportunity_type)) == "discoveries"
+
+
 def test_parse_routes_validates_categories():
     routes = parse_routes("security=-100123, momentum=-100456")
     assert routes == {"security": "-100123", "momentum": "-100456"}
@@ -524,22 +539,3 @@ async def test_telegram_alert_shows_trade_buttons_with_presets(monkeypatch):
     await sink.send(make_event())
     data = str(calls[0]["reply_markup"])
     assert "buy:" in data and "dump:" in data
-
-
-# ---- "Seen before" framing on re-alerts (operator complaint 2026-07-14) ----
-
-def test_format_alert_shows_history_note_on_realerts():
-    """A re-alert days after the first must never read like a brand-new
-    discovery: the history line rides right under the header."""
-    text = format_alert(make_event(
-        history_note="3 prior alert(s) for this coin — first alerted 2d 4h ago"))
-    assert "Seen before: 3 prior alert(s) for this coin — first alerted 2d 4h ago" in text
-
-
-def test_format_alert_omits_history_line_on_first_alert():
-    assert "Seen before" not in format_alert(make_event())  # default: no history
-
-
-def test_console_render_shows_history_note():
-    event = make_event(history_note="1 prior alert(s) for this coin — first alerted 6h 2m ago")
-    assert "seen before: 1 prior alert(s)" in event.render()

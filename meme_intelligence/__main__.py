@@ -47,7 +47,7 @@ from meme_intelligence.collectors.wallet_data import (
 from meme_intelligence.core.enums import AlertPriority, MarketRegime, ResearchMode
 from meme_intelligence.database.storage import Storage
 from meme_intelligence.trading.trade_planner import TradePlanner
-from meme_intelligence.workflow.smart_wallets import SmartWalletRecorder
+from meme_intelligence.workflow.boost_watcher import BoostWatcher
 from meme_intelligence.workflow.controller import ContinuousScanner
 from meme_intelligence.workflow.daily_routine import DailyRoutine
 from meme_intelligence.workflow.pipeline import ResearchPipeline
@@ -58,7 +58,7 @@ from meme_intelligence.collectors.security_data import GoPlusClient
 from meme_intelligence.config.settings import Settings, get_settings
 from meme_intelligence.core.cache import TTLCache
 from meme_intelligence.core.errors import CollectorError, InsufficientDataError
-from meme_intelligence.core.logging_setup import get_logger, setup_logging
+from meme_intelligence.core.logging_setup import setup_logging
 from meme_intelligence.core.models import DexPair
 from meme_intelligence.core.rate_limiter import RateLimiter
 from meme_intelligence.scanners.discovery import DiscoveryEngine, scan_new_pools
@@ -764,7 +764,6 @@ async def _cmd_watchlist(args, settings) -> int:
                     changes = await review_entries(
                         storage, service, pipeline,
                         limit=settings.workflow.watchlist_review_limit,
-                        max_age_days=settings.workflow.watchlist_max_age_days,
                     )
             finally:
                 if jupiter_client is not None:
@@ -804,36 +803,6 @@ async def _cmd_watchlist(args, settings) -> int:
                   f"updated={entry.updated_at.strftime('%m-%d %H:%M')}")
             if entry.thesis:
                 print(f"{'':>26}thesis: {entry.thesis}")
-    return 0
-
-
-async def _cmd_reputation(args, settings) -> int:
-    """Wallet reputation from the data clock × measured outcomes (Part 17 S2).
-
-    Pure local read over the SQLite database — no API keys, no network.
-    """
-    from meme_intelligence.analytics.wallet_reputation import (
-        compute_wallet_reputations,
-        render_reputation_report,
-    )
-    # CLI overrides bypass SmartWalletSettings' own validation, so they are
-    # checked here — --min-resolved 0 reached a zero-resolved wallet's
-    # win-rate division and crashed with a raw traceback (adversarial-review
-    # finding; Rule 6: a bad flag earns a clear message, not a stack dump).
-    if args.min_resolved is not None and args.min_resolved < 1:
-        print("--min-resolved must be at least 1 (a wallet with no resolved "
-              "tokens has no track record to score).")
-        return 2
-    if args.top < 1:
-        print("--top must be at least 1.")
-        return 2
-    with Storage(settings.database.path) as storage:
-        report = compute_wallet_reputations(
-            storage, settings.backtest,
-            min_resolved=(args.min_resolved
-                          if args.min_resolved is not None
-                          else settings.smart_wallet.min_resolved_for_reputation))
-    print(render_reputation_report(report, top=args.top))
     return 0
 
 
@@ -979,9 +948,9 @@ async def _cmd_monitor(args, settings) -> int:
     if args.pumpfun:
         settings = _dc.replace(
             settings, pumpfun=_dc.replace(settings.pumpfun, enable_in_monitor=True))
-    if getattr(args, "smart_wallets", False):
+    if getattr(args, "boosts", False):
         settings = _dc.replace(
-            settings, smart_wallet=_dc.replace(settings.smart_wallet, enabled=True))
+            settings, boost_watcher=_dc.replace(settings.boost_watcher, enabled=True))
     if args.learn:
         settings = _dc.replace(
             settings, learning=_dc.replace(settings.learning, enable_in_monitor=True))
@@ -1058,12 +1027,6 @@ async def _cmd_monitor(args, settings) -> int:
 
         with Storage(settings.database.path) as storage:
             notifier = NotificationEngine(alert_sinks, settings.alert_engine)
-            # Smart-wallet data clock (Part 17): passive top-holder recording
-            # from data the scan already fetches. Free, off by default; the
-            # recorder's enabled flag is authoritative and it never raises.
-            smart_wallet_recorder = (
-                SmartWalletRecorder(storage, settings.smart_wallet)
-                if settings.smart_wallet.enabled else None)
             scanner = ContinuousScanner(
                 settings, storage, notifier,
                 gecko_client=gecko, goplus_client=goplus,
@@ -1075,7 +1038,6 @@ async def _cmd_monitor(args, settings) -> int:
                 wallet_service=wallet_service,
                 ai_service=ai_service,
                 learning_service=learning_service,
-                smart_wallet_recorder=smart_wallet_recorder,
                 regime=MarketRegime(args.regime),
             )
             # Two-way Telegram control (Project 2): opt-in via
@@ -1115,6 +1077,15 @@ async def _cmd_monitor(args, settings) -> int:
                           "MEMEINTEL_TELEGRAM_BOT_TOKEN / MEMEINTEL_TELEGRAM_CHAT_ID "
                           "is not set — Telegram commands stay off.")
 
+            # Boost radar (Project 5): opt-in standalone watcher that alerts the
+            # operator when any token crosses a DexScreener boost threshold. Off
+            # by default; runs its own poll loop, independent of the scan cycle,
+            # and reuses the shared dex client + notifier (no new HTTP client).
+            if settings.boost_watcher.enabled:
+                boost_watcher = BoostWatcher(dex, notifier, settings.boost_watcher)
+                await boost_watcher.start()
+                stack.push_async_callback(boost_watcher.close)
+
             try:
                 history = await scanner.run(max_cycles=args.cycles)
             except KeyboardInterrupt:
@@ -1131,11 +1102,6 @@ async def _cmd_monitor(args, settings) -> int:
 async def _run(args: argparse.Namespace) -> int:
     settings = get_settings()
     setup_logging(settings.log_level, settings.log_dir)
-    # Config warnings (e.g. a stale .env floor self-disabled against the
-    # ceiling) fired during get_settings(), BEFORE handlers existed — re-emit
-    # them now so they reach the rotating log file, not just bare stderr.
-    for note in getattr(settings.alerts, "config_notes", ()):
-        get_logger("config").warning(note)
     handler = {
         "search": _cmd_search,
         "token": _cmd_token,
@@ -1150,7 +1116,6 @@ async def _run(args: argparse.Namespace) -> int:
         "alerts": _cmd_alerts,
         "backtest": _cmd_backtest,
         "wallets": _cmd_wallets,
-        "reputation": _cmd_reputation,
         "daily": _cmd_daily,
         "monitor": _cmd_monitor,
         "mind": _cmd_mind,
@@ -1245,15 +1210,6 @@ def main(argv: list[str] | None = None) -> int:
     wallets.add_argument("--chain", default="solana",
                          help="chain id (wallet intelligence is Solana-first)")
 
-    reputation = sub.add_parser(
-        "reputation",
-        help="wallet reputation: data-clock sightings × measured outcomes (Part 17)")
-    reputation.add_argument("--min-resolved", type=int, default=None, dest="min_resolved",
-                            help="resolved-token minimum before a wallet is scored "
-                                 "(default from MEMEINTEL_SMART_WALLET_MIN_RESOLVED_FOR_REPUTATION)")
-    reputation.add_argument("--top", type=int, default=20,
-                            help="how many scored wallets to list")
-
     daily = sub.add_parser("daily", help="run the full daily research routine (Part 11)")
     daily.add_argument("--network", action="append", default=None,
                        help="network id (repeatable); default from settings")
@@ -1273,9 +1229,9 @@ def main(argv: list[str] | None = None) -> int:
     monitor.add_argument("--learn", action="store_true",
                          help="feed analyzed coins into the self-learning mind "
                               "layer as the scanner runs")
-    monitor.add_argument("--smart-wallets", action="store_true", dest="smart_wallets",
-                         help="record top-holder wallets of every analyzed token "
-                              "(Part 17 data clock; free, uses already-fetched data)")
+    monitor.add_argument("--boosts", action="store_true",
+                         help="also run the DexScreener boost radar: alert when "
+                              "any token crosses the boost threshold (Project 5)")
 
     # Self-learning mind layer: analog + model + rug reasoning (Section 10).
     mind = sub.add_parser("mind", help="self-learning mind layer (evaluate / metrics)")

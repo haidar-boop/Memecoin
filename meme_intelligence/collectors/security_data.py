@@ -16,12 +16,11 @@ GoPlus quirks handled here:
 
 from __future__ import annotations
 
-import math
 from typing import Any
 
 from meme_intelligence.collectors.base import BaseCollector
 from meme_intelligence.core.errors import CollectorError
-from meme_intelligence.core.models import SecurityProfile, TokenIdentity, TopHolder
+from meme_intelligence.core.models import SecurityProfile, TokenIdentity
 
 # Chain-name aliases (DexScreener and GeckoTerminal ids) -> GoPlus numeric chain id.
 CHAIN_TO_GOPLUS_ID: dict[str, str] = {
@@ -56,19 +55,13 @@ def _flag(value: Any) -> bool | None:
 
 
 def _fraction_to_percent(value: Any) -> float | None:
-    """Parse a GoPlus fraction-of-1 string into a 0-100 percentage.
-
-    Non-finite values ("nan"/"inf" pass ``float()`` without raising) are
-    unknowns, not numbers (Rule 8): NaN silently poisons sums and makes
-    sort ordering undefined, and neither is ever a real percentage.
-    """
+    """Parse a GoPlus fraction-of-1 string into a 0-100 percentage."""
     if value is None or value == "":
         return None
     try:
-        percent = float(value) * 100.0
+        return float(value) * 100.0
     except (TypeError, ValueError):
         return None
-    return percent if math.isfinite(percent) else None
 
 
 def _to_int(value: Any) -> int | None:
@@ -102,33 +95,6 @@ def _holder_percents(holders: Any) -> list[float]:
         if percent is not None:
             percents.append(percent)
     return sorted(percents, reverse=True)
-
-
-def _top_holders(holders: Any) -> tuple[TopHolder, ...]:
-    """Extract circulating top-holder wallets, largest first (Part 17).
-
-    Same exclusion rules as :func:`_holder_percents` (locked holdings and
-    burn addresses are not circulating wallets), but entries without an
-    address are useless as sightings and are dropped even when they carry
-    a percent. Kept separate from ``_holder_percents`` on purpose: the
-    concentration math counts address-less entries, and changing that
-    behavior here would silently shift existing security scores (Rule 3).
-    """
-    if not isinstance(holders, list):
-        return ()
-    out: list[TopHolder] = []
-    for holder in holders:
-        if not isinstance(holder, dict):
-            continue
-        if _flag(holder.get("is_locked")):
-            continue
-        address = str(holder.get("address") or "")
-        if not address or _is_burn_address(address):
-            continue
-        out.append(TopHolder(address=address,
-                             percent=_fraction_to_percent(holder.get("percent"))))
-    out.sort(key=lambda h: h.percent if h.percent is not None else -1.0, reverse=True)
-    return tuple(out)
 
 
 def _lp_locked_percent(lp_holders: Any) -> float | None:
@@ -252,7 +218,6 @@ class GoPlusClient(BaseCollector):
             holder_count=_to_int(raw.get("holder_count")),
             top_holder_percent=holder_percents[0] if holder_percents else None,
             top10_holder_percent=sum(holder_percents[:10]) if holder_percents else None,
-            top_holders=_top_holders(raw.get("holders")),
             creator_percent=_fraction_to_percent(raw.get("creator_percent")),
             owner_percent=_fraction_to_percent(raw.get("owner_percent")),
             creator_address=raw.get("creator_address") or None,
@@ -294,7 +259,6 @@ class GoPlusClient(BaseCollector):
             holder_count=_to_int(raw.get("holder_count")),
             top_holder_percent=holder_percents[0] if holder_percents else None,
             top10_holder_percent=sum(holder_percents[:10]) if holder_percents else None,
-            top_holders=_top_holders(raw.get("holders")),
             creator_percent=creator_percent,
             creator_address=creator_address,
             lp_locked_percent=_lp_locked_percent(raw.get("lp_holders")),

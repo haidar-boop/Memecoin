@@ -59,20 +59,6 @@ def test_drift_floor_range_validated():
         LearningSettings(drift_accuracy_floor=1.5)
 
 
-def test_rug_engine_abstain_score_default_and_range():
-    # Default matches the distribution's rug-argmax boundary (2026-07-16 audit).
-    assert LearningSettings().rug_engine_abstain_at_or_below_score == 25.0
-    s = Settings.from_env(
-        env={"MEMEINTEL_LEARNING_RUG_ENGINE_ABSTAIN_AT_OR_BELOW_SCORE": "40"})
-    assert s.learning.rug_engine_abstain_at_or_below_score == 40.0
-    with pytest.raises(ConfigurationError,
-                       match="rug_engine_abstain_at_or_below_score"):
-        LearningSettings(rug_engine_abstain_at_or_below_score=-1.0)
-    with pytest.raises(ConfigurationError,
-                       match="rug_engine_abstain_at_or_below_score"):
-        LearningSettings(rug_engine_abstain_at_or_below_score=101.0)
-
-
 def test_archetype_min_cluster_size_must_be_at_least_two():
     # HDBSCAN invariant: 1 is positive but not a valid cluster size.
     with pytest.raises(ConfigurationError):
@@ -93,33 +79,3 @@ def test_horizons_reject_non_numeric():
 def test_rug_weight_negative_rejected():
     with pytest.raises(ConfigurationError):
         RugSignalWeights(unsellable=-5.0)
-
-
-def test_metrics_window_defaults_and_validation():
-    # Windowed self-evaluation (2026-07-16 audit): on by default at 7 days.
-    s = LearningSettings()
-    assert s.metrics_window_days == 7.0
-    assert s.metrics_max_records == 100_000
-    assert LearningSettings(metrics_window_days=0).metrics_window_days == 0
-    with pytest.raises(ConfigurationError, match="metrics_window_days"):
-        LearningSettings(metrics_window_days=-1.0)
-    env = Settings.from_env(env={"MEMEINTEL_LEARNING_METRICS_WINDOW_DAYS": "3"})
-    assert env.learning.metrics_window_days == 3.0
-
-
-def test_metrics_window_rejects_overflow_scale_values():
-    """2026-07-16 review finding: past ~740k days the cutoff arithmetic
-    overflows datetime at RUNTIME — crashing every /mind and silently
-    disarming the veto (its blanket except abstains). A typo like 1e10 must
-    fail loudly at startup instead (Rule 6)."""
-    with pytest.raises(ConfigurationError, match="metrics_window_days"):
-        LearningSettings(metrics_window_days=1e10)
-    with pytest.raises(ConfigurationError, match="metrics_window_days"):
-        LearningSettings(metrics_window_days=3651)
-    assert LearningSettings(metrics_window_days=3650).metrics_window_days == 3650
-
-
-def test_metrics_max_records_validation():
-    with pytest.raises(ConfigurationError, match="metrics_max_records"):
-        LearningSettings(metrics_max_records=-1)
-    assert LearningSettings(metrics_max_records=0).metrics_max_records == 0

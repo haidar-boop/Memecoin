@@ -107,33 +107,3 @@ def test_no_data_raises():
 def test_summary_renders():
     text = make_analyzer().assess(make_pair()).summary()
     assert "Momentum assessment" in text and "zone=" in text
-
-
-# ---- Flat drift is not a trend (operator complaint 2026-07-14) ----
-
-def test_flat_drift_scores_low_not_consistent():
-    """All three windows inside the flat band used to earn the full
-    'consistent trend' 90 — a stale coin drifting sideways for days scored
-    identically to a genuinely climbing one and kept re-alerting as a
-    fresh entry."""
-    flat = make_pair(change_24h=1.0, change_6h=0.5, change_1h=0.2)
-    trending = make_pair()   # +15/+8/+2: a real move
-    analyzer = make_analyzer()
-    assert analyzer._trend_consistency(flat) == 40.0
-    assert analyzer._trend_consistency(trending) == 90.0
-    assert (analyzer.assess(flat).overall_score
-            < analyzer.assess(trending).overall_score)
-
-
-def test_tiny_negative_drift_is_flat_not_mixed():
-    """The band is symmetric: -0.3% noise is still flat, not a 'mixed trend'."""
-    pair = make_pair(change_24h=1.2, change_6h=-0.3, change_1h=0.1)
-    assert make_analyzer()._trend_consistency(pair) == 40.0
-
-
-def test_real_trend_at_band_edge_still_scores_consistent():
-    """A change exactly AT the band edge is real movement, not flatness —
-    the default fixture's +2.0% 1h sits on the 2.0 band and must keep its
-    pre-fix 'consistent' score (Rule 18)."""
-    pair = make_pair(change_24h=15.0, change_6h=8.0, change_1h=2.0)
-    assert make_analyzer()._trend_consistency(pair) == 90.0

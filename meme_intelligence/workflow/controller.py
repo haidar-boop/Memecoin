@@ -61,10 +61,8 @@ from meme_intelligence.scanners.launch_monitor import (
     collect_launch_candidates,
 )
 from meme_intelligence.workflow.pipeline import PipelineResult, ResearchPipeline
-from meme_intelligence.workflow.watchdog import ScannerWatchdog
 from meme_intelligence.workflow.watchlist_review import (
     TIER_FOR_CLASSIFICATION as _TIER_FOR_CLASSIFICATION,
-    stale_watchlist_reason,
 )
 
 # Alert types whose evidence rests on market data and therefore get
@@ -194,19 +192,6 @@ class _BoundedKeySet:
         return len(self._data)
 
 
-def _age_text(seconds: float) -> str:
-    """Compact human age ("2d 4h", "6h 12m", "9m") for alert history notes."""
-    seconds = int(max(0, seconds))
-    days, rem = divmod(seconds, 86400)
-    hours, rem = divmod(rem, 3600)
-    minutes = rem // 60
-    if days:
-        return f"{days}d {hours}h"
-    if hours:
-        return f"{hours}h {minutes}m"
-    return f"{minutes}m"
-
-
 @dataclass
 class CycleStats:
     """What one scan cycle did (logged and aggregated)."""
@@ -239,7 +224,6 @@ class ContinuousScanner:
         wallet_service=None,     # WalletDataService (Part 17); metered credits
         ai_service=None,         # AIJudgmentService (Part 23); costs API tokens
         learning_service=None,   # LearningService (mind layer, Section 10); off by default
-        smart_wallet_recorder=None,  # SmartWalletRecorder (Part 17 data clock); free, off by default
         regime: MarketRegime = MarketRegime.UNKNOWN,
         now_func: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         sleep_func: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -249,10 +233,6 @@ class ContinuousScanner:
         self._notifier = notifier
         self._gecko = gecko_client
         self._market = market_service
-        # Passive top-holder recorder (Part 17 data clock): wired from
-        # __main__ like the other optional services; its own enabled flag
-        # is authoritative, and record() never raises into the scan.
-        self._smart_wallets = smart_wallet_recorder
         self._regime = regime
         self._now = now_func
         self._sleep = sleep_func
@@ -264,11 +244,6 @@ class ContinuousScanner:
         self._started_at: datetime | None = None
         self._cycles_run = 0
         self._last_cycle_stats: CycleStats | None = None
-        # Stall watchdog (operator request, 2026-07-15): stamped after every
-        # SUCCESSFUL cycle only — failing cycles deliberately don't count as
-        # progress. Built in run() once the Telegram listener is known.
-        self._last_cycle_completed_at: datetime | None = None
-        self._watchdog = None
 
         self._discovery = DiscoveryEngine(settings.discovery, now_func=now_func)
         # Pump.fun launch funnel (Part 32.5 Section 3): needs the stream,
@@ -396,18 +371,6 @@ class ContinuousScanner:
         """
         self._telegram = listener
 
-    def seconds_since_last_cycle(self) -> float | None:
-        """Seconds since the last SUCCESSFUL cycle completed (watchdog input).
-
-        Before the first cycle completes, measures from scanner start — so a
-        boot that never manages a single cycle still trips the stall alarm.
-        ``None`` until run() begins. Read-only; called from the watchdog task.
-        """
-        anchor = self._last_cycle_completed_at or self._started_at
-        if anchor is None:
-            return None
-        return max(0.0, (self._now() - anchor).total_seconds())
-
     def status_snapshot(self) -> dict:
         """Cheap health snapshot for the /status Telegram command (Project 2)."""
         uptime = None
@@ -451,11 +414,7 @@ class ContinuousScanner:
         pair = await self._market.get_best_pair(address, chain=chain)
         if pair is None:
             return None
-        # A manual, operator-initiated lookup (rate-limited to one at a time
-        # plus a 60s result cache) is exactly the deliberate, rare spend the
-        # credit gate is not meant to block — always check wallets here.
-        return await self._pipeline.analyze_pair(
-            pair, regime=self._regime, force_wallet_check=True)
+        return await self._pipeline.analyze_pair(pair, regime=self._regime)
 
     async def run(self, max_cycles: int | None = None) -> list[CycleStats]:
         """Run scan cycles until stopped or ``max_cycles`` is reached."""
@@ -471,19 +430,6 @@ class ContinuousScanner:
                 await self._telegram.start()
             except Exception as exc:  # noqa: BLE001
                 self._logger.error("telegram command listener failed to start "
-                                   "(scanning continues): %s", exc)
-        if self._settings.workflow.watchdog_enabled:
-            # Isolated task, same guarantee as the listener (Rule 7): a
-            # watchdog that cannot start must not stop the scanner.
-            try:
-                notify = self._telegram.send_text if self._telegram is not None else None
-                self._watchdog = ScannerWatchdog(
-                    self._settings.workflow, self.seconds_since_last_cycle,
-                    notify, now_func=self._now)
-                await self._watchdog.start()
-            except Exception as exc:  # noqa: BLE001
-                self._watchdog = None
-                self._logger.error("scanner watchdog failed to start "
                                    "(scanning continues): %s", exc)
         self._logger.info(
             "continuous scanner started: networks=%s interval=%.0fs cycles=%s",
@@ -502,7 +448,6 @@ class ContinuousScanner:
                 history.append(stats)
                 self._cycles_run = cycle
                 self._last_cycle_stats = stats
-                self._last_cycle_completed_at = self._now()  # watchdog heartbeat
                 backoff = _ERROR_BACKOFF_START  # healthy cycle resets the backoff
                 self._logger.info(
                     "cycle %d: %d pools, %d candidates, %d analyzed, "
@@ -528,12 +473,6 @@ class ContinuousScanner:
                 break
             await self._sleep(self._settings.workflow.monitor_interval_seconds)
 
-        if self._watchdog is not None:
-            try:
-                await self._watchdog.stop()
-            except Exception as exc:  # noqa: BLE001 — shutdown must not hang on the watchdog
-                self._logger.warning("scanner watchdog stop failed: %s", exc)
-            self._watchdog = None
         if self._telegram is not None:
             try:
                 await self._telegram.stop()
@@ -571,9 +510,7 @@ class ContinuousScanner:
             if key in self._seen or key in self._retry_pending:
                 continue
 
-            result = await self._pipeline.analyze_pair(
-                candidate.pair, regime=self._regime,
-                force_wallet_check=self._storage.is_holding(token))
+            result = await self._pipeline.analyze_pair(candidate.pair, regime=self._regime)
             if result is None:
                 # Security data not indexed yet — do NOT mark as seen: a
                 # never-actually-analyzed token must stay a live candidate
@@ -660,8 +597,7 @@ class ContinuousScanner:
                 continue
 
             stats.candidates += 1
-            result = await self._pipeline.analyze_pair(
-                pair, regime=self._regime, force_wallet_check=self._storage.is_holding(token))
+            result = await self._pipeline.analyze_pair(pair, regime=self._regime)
             if result is None:
                 # Security data not indexed yet — retry rather than losing
                 # the candidate (fresh launches lag the security providers).
@@ -688,18 +624,6 @@ class ContinuousScanner:
         token = result.pair.base_token
         previous = self._storage.score_history(token, limit=1)
         previous_score = previous[0]["final_score"] if previous else None
-        # All-time-high score, for peak-decline suppression: the one-step
-        # previous_score check misses a collapsed coin creeping back a few
-        # points per recheck (operator complaint 2026-07-14). None on a
-        # token's first-ever look. Read BEFORE this run's snapshot is
-        # recorded below, so a first look can never read as "below peak."
-        peak_score = self._storage.peak_score(token)
-        # When the bot FIRST saw this token — a lower bound on the coin's age
-        # for the freshness gate (a tracked-for-3-days coin migrating to a
-        # brand-new pool is not a fresh find). Read BEFORE this run's
-        # snapshot/upsert so a genuine first look stays None (review finding:
-        # pool age alone let old coins with new pools through the 24h gate).
-        first_seen = self._storage.token_first_seen(token)
 
         # Free deterministic screens + AI verification of gate-passing
         # opportunities (Part 32.5 Section 8: deep analysis only after
@@ -723,8 +647,7 @@ class ContinuousScanner:
         ai_inconclusive = self._ai_verified.get(verify_key, False)
         deterministic_veto: str | None = None
         if not result.security.is_destructive:
-            provisional = self._rules.evaluate(result, previous_score=previous_score,
-                                               token_first_seen=first_seen, quiet=True)
+            provisional = self._rules.evaluate(result, previous_score=previous_score)
             fires_buy_side = any(e.alert_type in _BUY_SIDE_ALERT_TYPES for e in provisional)
             fires_high_tier = any(
                 e.alert_type in ("high_priority_opportunity", "strong_candidate")
@@ -782,11 +705,6 @@ class ContinuousScanner:
         current_facts = extract_facts(result.security_profile)
         self._storage.record_security_facts(token, merge_facts(previous_facts, current_facts))
 
-        # Smart-wallet data clock (Part 17): keep the top-holder wallets this
-        # analysis already fetched. Passive, deduped per token, never raises.
-        if self._smart_wallets is not None:
-            self._smart_wallets.record(result.security_profile)
-
         # A dead token never (re-)enters the watchlist regardless of its
         # score — the master number still reflects pump-window data, but a
         # collapsed pool is a completed failure, and re-tiering it would
@@ -815,11 +733,9 @@ class ContinuousScanner:
 
         interest = self._operator_interest(token)
         events = self._rules.evaluate(result, previous_score=previous_score,
-                                      peak_score=peak_score,
                                       ai_verification_inconclusive=ai_inconclusive,
                                       deterministic_risk_veto=deterministic_veto,
-                                      operator_interest=interest,
-                                      token_first_seen=first_seen)
+                                      operator_interest=interest)
         if result.ai_judgment is not None:
             events = [self._annotate_with_ai(event, result.ai_judgment)
                       for event in events]
@@ -851,19 +767,6 @@ class ContinuousScanner:
                 self._logger.info("suppressing %d alert(s) for muted token %s",
                                   len(events), token.address)
                 events = []
-        # "Seen before" framing (operator complaint 2026-07-14): a re-alert
-        # days after the first must never read like a brand-new discovery.
-        # Runs BEFORE this batch is recorded, so only PRIOR alerts count.
-        # Best-effort annotation — a history failure never blocks delivery.
-        if events:
-            try:
-                note = self._history_note(token)
-            except Exception as exc:  # noqa: BLE001
-                self._logger.warning("alert-history note failed for %s: %s",
-                                     token.address, exc)
-                note = ""
-            if note:
-                events = [dataclasses.replace(e, history_note=note) for e in events]
         delivered = await self._notifier.dispatch(events)
         stats.alerts.extend(delivered)
         for event in delivered:
@@ -899,29 +802,6 @@ class ContinuousScanner:
                                  "full priority): %s", token.address, exc)
             return True
         return any(row["alert_type"] in INTEREST_ALERT_TYPES for row in history)
-
-    def _history_note(self, token) -> str:
-        """One honest line of alert history for re-alerts, or "" on a token's
-        first-ever alert (operator complaint 2026-07-14: a recheck alert days
-        after the first read exactly like a brand-new discovery)."""
-        rows = self._storage.alert_history(token, limit=100)
-        if not rows:
-            return ""
-        count = f"{len(rows)}+" if len(rows) >= 100 else str(len(rows))
-        first_seen = self._parse_history_stamp(rows[-1].get("created_at"))
-        if first_seen is None:
-            return f"{count} prior alert(s) for this coin"
-        age = _age_text((self._now() - first_seen).total_seconds())
-        return f"{count} prior alert(s) for this coin — first alerted {age} ago"
-
-    def _parse_history_stamp(self, value) -> datetime | None:
-        if not value:
-            return None
-        try:
-            stamp = datetime.fromisoformat(str(value))
-        except ValueError:
-            return None
-        return stamp if stamp.tzinfo is not None else stamp.replace(tzinfo=timezone.utc)
 
     # Alert types that mean "this token is already flagged risky" — a paid AI
     # opinion on it is wasted money, not information.
@@ -1038,12 +918,6 @@ class ContinuousScanner:
         from meme_intelligence.learning.metrics import veto_gate
 
         metrics = self._learning.get_learning_metrics(persist=False)
-        # The authority gate reads LIFETIME numbers, always. A windowed-
-        # authority opt-in was built and then CUT in the 2026-07-16 review:
-        # the window's rug precision is structurally biased LOW while slow-rug
-        # label corrections are still maturing (they confirm after predictions
-        # age out of the window), and window-scale sample sizes are too thin
-        # an evidence base for a live safety control (Rule 8/21).
         gate = veto_gate(metrics, min_accuracy=ls.veto_min_accuracy,
                          min_samples=ls.veto_min_samples)
         if gate is None:
@@ -1177,50 +1051,12 @@ class ContinuousScanner:
         """
         entries = sorted(self._storage.get_watchlist(), key=lambda e: e.updated_at)
         limit = self._settings.workflow.watchlist_review_limit
-        stale_limit = self._settings.workflow.watchlist_stale_archive_limit
         rechecked = 0
-        archived = 0
-        for walked, entry in enumerate(entries):
+        for entry in entries:
             if rechecked >= limit:
                 break
-            if walked % 50 == 49:
-                # The stale drain is pure synchronous SQLite with no awaits —
-                # without an explicit yield, a large backlog freezes the event
-                # loop (and Telegram with it) for the whole walk (2026-07-15).
-                await asyncio.sleep(0)
             if entry.token.address.lower() in skip:
                 continue  # analyzed moments ago this cycle; nothing new to learn
-            # Staleness door (handoff Part 14): a coin that has sat on the
-            # watchlist past the age cap without graduating is archived
-            # BEFORE any provider call is spent on it — the freshness gate
-            # already guarantees its buy-side alerts could never send, so
-            # rechecking it is pure API burn. Holdings are exempt. Checked
-            # BEFORE the tier-3 skip: the agreed design archives ANY coin
-            # past the cap, and tier-3 is where undead coins accumulate —
-            # skipping them first left thousands of zombies only the
-            # once-a-day routine could ever drain (2026-07-15 finding).
-            stale = stale_watchlist_reason(
-                entry,
-                max_age_days=self._settings.workflow.watchlist_max_age_days,
-                now=self._now(), holding=self._storage.is_holding(entry.token))
-            if stale is not None:
-                self._storage.archive(entry.token, stale)
-                self._logger.info("watchlist entry %s archived: %s",
-                                  entry.token.address, stale)
-                archived += 1
-                if stale_limit > 0 and archived >= stale_limit:
-                    # A pre-door backlog (8,690 entries at first encounter)
-                    # must drain across passes, not in one loop-freezing
-                    # sweep — the next pass (every recheck cadence) picks up
-                    # where this one stopped. Rechecks of live entries pause
-                    # until the backlog clears; log it so the pause is
-                    # diagnosable rather than mysterious (Rule 13).
-                    self._logger.info(
-                        "watchlist stale-archive limit reached (%d this pass); "
-                        "%d entries still queued for the next pass",
-                        archived, max(0, len(entries) - walked - 1))
-                    break
-                continue
             if entry.tier is WatchlistTier.TIER_3_RESEARCH_ONLY:
                 continue  # research-only entries wait for the daily routine
             # Fetch via get_token_pairs, which RAISES on a provider outage,
@@ -1243,9 +1079,7 @@ class ContinuousScanner:
                 self._storage.archive(entry.token, "no active trading pairs remain")
                 continue
             pair = max(pairs, key=lambda p: p.liquidity_usd or 0.0)
-            result = await self._pipeline.analyze_pair(
-                pair, regime=self._regime,
-                force_wallet_check=self._storage.is_holding(entry.token))
+            result = await self._pipeline.analyze_pair(pair, regime=self._regime)
             if result is None:
                 continue
             rechecked += 1
@@ -1344,9 +1178,7 @@ class ContinuousScanner:
                 self._seen.add(key)  # pool is gone — nothing left to wait for
                 continue
             pair = max(pairs, key=lambda p: p.liquidity_usd or 0.0)
-            result = await self._pipeline.analyze_pair(
-                pair, regime=self._regime,
-                force_wallet_check=self._storage.is_holding(pair.base_token))
+            result = await self._pipeline.analyze_pair(pair, regime=self._regime)
             if result is None:
                 # Security data still not indexed — re-pace (do NOT leave it
                 # due, which re-hammered the failing provider every cycle).

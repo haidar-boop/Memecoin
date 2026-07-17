@@ -28,8 +28,7 @@ decoupled and testable (Rule 4).
 from __future__ import annotations
 
 import os
-import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Callable, Sequence
 
 import numpy as np
@@ -46,7 +45,6 @@ from meme_intelligence.learning.ensemble import (
     SOURCE_RUG,
     AdaptiveEnsemble,
     rug_score_to_distribution,
-    rug_source_label,
 )
 from meme_intelligence.learning.features import (
     FEATURE_VERSION,
@@ -289,22 +287,13 @@ class LearningService:
             sample_size=resolved_count,
         )
 
-        # The rug engine is graded only when it actually calls a rug; below the
-        # abstain score it has no four-class opinion and is skipped, not scored
-        # wrong on a task it never performed (2026-07-16 audit — see
-        # rug_source_label). The blend still receives the full rug_dist above;
-        # only how the source is GRADED changes.
-        rug_label = rug_source_label(
-            rug.score,
-            abstain_at_or_below=self._ls.rug_engine_abstain_at_or_below_score)
-
         self._store_prediction(token_address, chain, snaps, verdict, result,
-                               analog_dist, model_dist, rug_label, assignment.name,
+                               analog_dist, model_dist, rug_dist, assignment.name,
                                novelty_flagged, creator=creator)
         return verdict.to_dict()
 
     def _store_prediction(self, token_address, chain, snaps, verdict, result,
-                          analog_dist, model_dist, rug_label, archetype, novelty_flagged,
+                          analog_dist, model_dist, rug_dist, archetype, novelty_flagged,
                           *, creator: str | None = None) -> None:
         """Persist the coin's first verdict for later grading (Section 8)."""
         token = TokenIdentity(chain=chain, address=token_address)
@@ -327,7 +316,7 @@ class LearningService:
             "source_labels": {
                 SOURCE_ANALOG: _argmax_label(analog_dist),
                 SOURCE_LIGHTGBM: _argmax_label(model_dist),
-                SOURCE_RUG: rug_label,
+                SOURCE_RUG: _argmax_label(rug_dist),
             },
             "archetype": archetype,
             "novelty_flagged": novelty_flagged,
@@ -524,84 +513,35 @@ class LearningService:
         return accuracy < self._ls.drift_accuracy_floor
 
     def _rebuild(self, *, full: bool) -> None:
-        # STREAM the training set instead of materializing every CoinRecord
-        # (with its full snapshot series) at once. On the first real retrain
-        # in production (24,884 coins, 2026-07-15) the all-at-once list drove
-        # a transient memory peak that outlived the rebuild (Python keeps the
-        # high-water arenas) and the service was memory-killed minutes after
-        # a clean-looking "rebuild complete" — the operator's first symptom
-        # was Telegram going quiet. Only the small per-coin artifacts
-        # (fingerprint vector, bucket, time, analog entry) are kept; each
-        # record is dropped as soon as its fingerprint is extracted, and the
-        # extraction pass yields the GIL every few hundred coins so the
-        # event-loop thread (Telegram, trade buttons, scanning) stays
-        # responsive while this runs in the retrain worker.
-        #
-        # Streaming alone was not enough: even one-at-a-time, a rebuild over
-        # ALL resolved coins still trains a 480-tree classifier and
-        # re-clusters (HDBSCAN) the ENTIRE history every time it fires — at
-        # 24,884 coins that alone ran the droplet at ~100% CPU for 2.5+
-        # minutes and crossed the memory cap regardless of the streaming fix
-        # (same incident). ``max_training_records`` (0 = unlimited) bounds
-        # the pull to the newest N resolved coins, capping the cost of every
-        # rebuild permanently rather than letting it grow with the bot's
-        # lifetime history.
-        limit = self._ls.max_training_records or None
-        vectors: list[np.ndarray] = []
-        buckets: list = []
-        times: list = []
-        entries: list[AnalogEntry] = []
-        for i, record in enumerate(self._store.iter_resolved_records(limit=limit)):
-            if not record.final_bucket.is_resolved:
-                continue
-            vectors.append(self._extractor.extract(record.snapshots).vector)
-            buckets.append(record.final_bucket)
-            times.append(_resolution_time(record))
-            entries.append(AnalogEntry(
-                address=record.token.address, chain=record.token.chain,
-                bucket=record.final_bucket, resolved_at=_resolution_time(record)))
-            if i % 250 == 249:
-                time.sleep(0)  # cooperative GIL handoff on the 1-vCPU droplet
-        if not vectors:
+        records = self._store.resolved_records()
+        if not records:
             return
-        raw = np.vstack(vectors)
+        raw = np.vstack([self._extractor.extract(r.snapshots).vector for r in records])
+        buckets = [r.final_bucket for r in records]
+        times = [_resolution_time(r) for r in records]
 
         if full or not self._scaler.is_fitted:
             self._scaler.fit(raw)
             # Rebuild the analog index in the freshly-scaled space so instant-
-            # learning inserts and bulk data stay consistent. Vectors were
-            # extracted once above — scale and bulk-insert them rather than
-            # re-extracting every record a second time (the old
-            # build_from_records path doubled the heaviest CPU work).
+            # learning inserts and bulk data stay consistent.
             self._analog = AnalogMemory(now_func=self._now)
-            self._analog.add_many(entries, self._scaler.transform_many(raw))
+            self._analog.build_from_records(records, self._extractor, self._scaler)
 
         scaled = self._scaler.transform_many(raw)
         self._classifier.fit(scaled, buckets, times, warm_start=not full)
         self._archetypes.fit(scaled, buckets,
                              min_cluster_size=self._ls.archetype_min_cluster_size)
         self._logger.info("rebuild complete (%s) on %d resolved coins",
-                          "full" if full else "warm-start", len(vectors))
+                          "full" if full else "warm-start", len(records))
 
     def refresh_archetypes(self) -> int:
         """Re-cluster the fingerprint set so new coin types get named (Section 7)."""
-        if not self._scaler.is_fitted:
+        records = self._store.resolved_records()
+        if not records or not self._scaler.is_fitted:
             return 0
-        # Same streaming discipline AND the same training-set cap as
-        # _rebuild (see its docstring) — HDBSCAN over the full history is
-        # exactly the kind of unbounded-with-lifetime-growth cost that
-        # caused the 2026-07-15 crash loop.
-        limit = self._ls.max_training_records or None
-        vectors: list[np.ndarray] = []
-        buckets: list = []
-        for i, record in enumerate(self._store.iter_resolved_records(limit=limit)):
-            vectors.append(self._extractor.extract(record.snapshots).vector)
-            buckets.append(record.final_bucket)
-            if i % 250 == 249:
-                time.sleep(0)
-        if not vectors:
-            return 0
-        scaled = self._scaler.transform_many(np.vstack(vectors))
+        raw = np.vstack([self._extractor.extract(r.snapshots).vector for r in records])
+        scaled = self._scaler.transform_many(raw)
+        buckets = [r.final_bucket for r in records]
         n = self._archetypes.fit(scaled, buckets,
                                  min_cluster_size=self._ls.archetype_min_cluster_size)
         self.persist()
@@ -610,49 +550,21 @@ class LearningService:
     # ---- Self-evaluation (Section 8) ----
 
     def get_learning_metrics(self, *, persist: bool = True) -> dict:
-        """Compute the self-evaluation metrics over resolved predictions.
-
-        Deliberately LEAN: grading needs only each coin's final bucket and
-        its stored prediction payload — never the snapshot series. The old
-        walk materialized every resolved coin's full record (24,884 coins ×
-        dozens of snapshots each) just to read ``final_bucket``, which made
-        every /mind command a multi-minute, memory-heavy crawl (2026-07-15
-        incident). Now ONE join query (``graded_predictions``: short lock for
-        the fetch, JSON parsing outside it) instead of ~2 lock acquisitions
-        per resolved coin, bounded by ``metrics_max_records`` newest-first
-        (2026-07-16 audit + review pass).
-
-        Alongside the lifetime numbers, ``metrics["recent"]`` grades only the
-        predictions MADE in the last ``metrics_window_days`` (keyed on the
-        prediction's own ``created_at``): lifetime aggregates mix the era
-        before the classifier ever trained and older coin populations into
-        one average, so only the windowed section says anything about the
-        models running today. Both are reported; neither replaces the other
-        (Rule 8 — measure honestly, interpret separately)."""
-        rows = self._store.graded_predictions(
-            limit=self._ls.metrics_max_records or None)
-        window_days = self._ls.metrics_window_days
-        cutoff = (self._now() - timedelta(days=window_days)
-                  if window_days > 0 else None)
-
+        """Compute the self-evaluation metrics over resolved predictions."""
         records: list[PredictionRecord] = []
-        recent: list[PredictionRecord] = []
-        for prediction, bucket_value, created_at in rows:
-            record = PredictionRecord(
+        for record in self._store.resolved_records():
+            coin_id = self._store.coin_id(record.token)
+            prediction = self._store.get_prediction(coin_id) if coin_id else None
+            if not prediction:
+                continue
+            records.append(PredictionRecord(
                 predicted_distribution=prediction.get("distribution", {}),
                 predicted_label=prediction.get("predicted_label", ""),
-                actual_label=bucket_value,
+                actual_label=record.final_bucket.value,
                 archetype=prediction.get("archetype"),
                 novelty_flagged=prediction.get("novelty_flagged", False),
-            )
-            records.append(record)
-            if cutoff is not None and created_at is not None and created_at >= cutoff:
-                recent.append(record)
-
+            ))
         metrics = compute_metrics(records)
-        if cutoff is not None:
-            metrics["recent"] = compute_metrics(recent)
-            metrics["recent"]["window_days"] = window_days
         metrics["ensemble_accuracy"] = self._ensemble.accuracy_report()
         metrics["analog_memory_size"] = self._analog.size
         metrics["classifier_ready"] = self._classifier.is_ready

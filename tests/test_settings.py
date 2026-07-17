@@ -192,18 +192,6 @@ def test_wallet_dominance_usd_now_validated():
         WalletIntelSettings(min_buy_volume_for_dominance_usd=-1.0)
 
 
-def test_wallet_credit_gate_min_security_score_default_and_range():
-    from meme_intelligence.config.settings import Settings, WalletIntelSettings
-    assert WalletIntelSettings().credit_gate_min_security_score == 50.0
-    with pytest.raises(ConfigurationError):
-        WalletIntelSettings(credit_gate_min_security_score=-1.0)
-    with pytest.raises(ConfigurationError):
-        WalletIntelSettings(credit_gate_min_security_score=101.0)
-    settings = Settings.from_env(
-        env={"MEMEINTEL_WALLET_CREDIT_GATE_MIN_SECURITY_SCORE": "70"})
-    assert settings.wallet.credit_gate_min_security_score == 70.0
-
-
 def test_provider_cooldown_now_validated():
     from meme_intelligence.config.settings import ProviderSettings
     with pytest.raises(ConfigurationError):
@@ -327,22 +315,6 @@ def test_learning_veto_env_overrides():
     assert settings.learning.veto_min_samples == 25
 
 
-def test_learning_max_training_records_defaults_bounded_and_validates():
-    """2026-07-15 OOM crash-loop: an unbounded retrain over the bot's full
-    lifetime history ran a 1GB droplet out of memory. The cap must default
-    to a real, safe bound (not 0/unlimited) and reject negative values;
-    0 is the explicit unlimited escape hatch."""
-    from meme_intelligence.config.settings import LearningSettings
-
-    assert LearningSettings().max_training_records == 5000
-    with pytest.raises(ConfigurationError, match="max_training_records"):
-        LearningSettings(max_training_records=-1)
-    assert LearningSettings(max_training_records=0).max_training_records == 0
-    settings = Settings.from_env(
-        env={"MEMEINTEL_LEARNING_MAX_TRAINING_RECORDS": "2000"})
-    assert settings.learning.max_training_records == 2000
-
-
 def test_liquidity_probe_rejects_bad_sell_confirm_fraction():
     with pytest.raises(ConfigurationError, match="sell_confirm_fraction"):
         LiquidityProbeSettings(sell_confirm_fraction=0.0)
@@ -380,61 +352,26 @@ def test_insufficient_data_retry_settings_load_and_validate():
     assert settings.workflow.insufficient_data_max_age_minutes == 60.0
 
 
-def test_smart_wallet_defaults():
-    sw = Settings.from_env(env={}).smart_wallet
-    assert sw.enabled is False
-    assert sw.max_holders_per_token == 10
-    assert sw.max_seen_keys == 5000
+def test_boost_watcher_defaults():
+    bw = Settings.from_env(env={}).boost_watcher
+    assert bw.enabled is False
+    assert bw.threshold == 100.0
+    assert bw.poll_interval_seconds == 30.0
+    assert bw.chain_filter == "solana"
+    assert bw.max_seen_keys == 5000
 
 
-def test_smart_wallet_env_override():
-    sw = Settings.from_env(env={
-        "MEMEINTEL_SMART_WALLET_ENABLED": "true",
-        "MEMEINTEL_SMART_WALLET_MAX_HOLDERS_PER_TOKEN": "5",
-    }).smart_wallet
-    assert sw.enabled is True
-    assert sw.max_holders_per_token == 5
+def test_boost_watcher_env_override():
+    bw = Settings.from_env(env={
+        "MEMEINTEL_BOOST_WATCHER_ENABLED": "true",
+        "MEMEINTEL_BOOST_WATCHER_THRESHOLD": "250",
+        "MEMEINTEL_BOOST_WATCHER_CHAIN_FILTER": "",
+    }).boost_watcher
+    assert bw.enabled is True
+    assert bw.threshold == 250.0
+    assert bw.chain_filter == ""     # empty = all chains
 
 
-def test_smart_wallet_rejects_nonpositive_holder_cap():
-    with pytest.raises(ConfigurationError, match="max_holders_per_token"):
-        Settings.from_env(env={"MEMEINTEL_SMART_WALLET_MAX_HOLDERS_PER_TOKEN": "0"})
-
-
-def test_peak_decline_and_flat_band_defaults_and_overrides():
-    s = Settings.from_env(env={})
-    assert s.alert_engine.peak_decline_suppression_points == 15.0
-    assert s.momentum.flat_trend_band_percent == 2.0
-    s2 = Settings.from_env(env={
-        "MEMEINTEL_ALERT_ENGINE_PEAK_DECLINE_SUPPRESSION_POINTS": "25",
-        "MEMEINTEL_MOMENTUM_FLAT_TREND_BAND_PERCENT": "1.5",
-    })
-    assert s2.alert_engine.peak_decline_suppression_points == 25.0
-    assert s2.momentum.flat_trend_band_percent == 1.5
-    with pytest.raises(ConfigurationError):
-        Settings.from_env(env={"MEMEINTEL_ALERT_ENGINE_PEAK_DECLINE_SUPPRESSION_POINTS": "0"})
-
-
-def test_workflow_watchdog_settings_default_on_and_validate():
-    """Scanner stall watchdog (operator request, 2026-07-15): on by default,
-    sane cadence, and a stall threshold below the check cadence is rejected
-    (it could never be observed accurately)."""
-    from meme_intelligence.config.settings import WorkflowSettings
-
-    wf = WorkflowSettings()
-    assert wf.watchdog_enabled is True
-    assert wf.watchdog_stall_seconds == 900.0
-    assert wf.watchdog_check_seconds == 60.0
-    assert wf.watchdog_realert_seconds == 3600.0
-    with pytest.raises(ConfigurationError, match="watchdog_stall_seconds"):
-        WorkflowSettings(watchdog_stall_seconds=0)
-    with pytest.raises(ConfigurationError, match="watchdog_check_seconds"):
-        WorkflowSettings(watchdog_check_seconds=-5)
-    with pytest.raises(ConfigurationError, match="watchdog_stall_seconds must be >="):
-        WorkflowSettings(watchdog_stall_seconds=30, watchdog_check_seconds=60)
-    settings = Settings.from_env(env={
-        "MEMEINTEL_WORKFLOW_WATCHDOG_ENABLED": "false",
-        "MEMEINTEL_WORKFLOW_WATCHDOG_STALL_SECONDS": "600",
-    })
-    assert settings.workflow.watchdog_enabled is False
-    assert settings.workflow.watchdog_stall_seconds == 600.0
+def test_boost_watcher_rejects_nonpositive_threshold():
+    with pytest.raises(ConfigurationError, match="threshold"):
+        Settings.from_env(env={"MEMEINTEL_BOOST_WATCHER_THRESHOLD": "0"})

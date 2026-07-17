@@ -254,7 +254,7 @@ flag ships OFF. The procedure:
 
 | Symptom | Likely cause / fix |
 |---|---|
-| Service `failed`/restart loop | `journalctl -u meme-intelligence -n 50` — usually a bad `.env` edit (typo'd value fails validation loudly at startup, by design — EXCEPT a buy-side floor at/above its ceiling, which self-heals: the floor is disabled with a logged warning instead of crashing the seatbelt). Fix the line, restart. |
+| Service `failed`/restart loop | `journalctl -u meme-intelligence -n 50` — usually a bad `.env` edit (typo'd value fails validation loudly at startup, by design). Fix the line, restart. |
 | No alerts for hours | Usually normal (HIGH-only filter + strict gates + screens = quiet by design). Verify cycle lines are advancing; check `alerts` history for MEDIUM/LOW activity to confirm the pipeline is alive. |
 | Telegram alerts stopped | Delivery failures are logged and RETRIED after cooldown (never lost silently). Check log for `telegram delivery failed`; verify bot token/chat id; `alerts --test` sends a synthetic alert through every sink. |
 | Provider outage (DexScreener/GoPlus/etc.) | Self-healing: failover pool + cooldowns + honest "unknown" scoring. No action needed; log shows recovery. |
@@ -269,12 +269,6 @@ flag ships OFF. The procedure:
    `.env.example`) — Rule 15/19.
 3. Commit with a clear message; push to the designated `claude/...` branch
    (his droplet pulls that branch).
-3b. If a shipped DEFAULT changed, remember `.env` precedence: the FIRST
-   occurrence of a key in the droplet `.env` beats the new code default.
-   Give him a `sed -i '/MEMEINTEL_<KEY>/d' .env` line (or the exact new
-   value to set) so stale lines cannot silently pin the old behavior —
-   e.g. the 2026-07-14 ceiling defaults ship with
-   `sed -i '/MEMEINTEL_ALERTS_OPPORTUNITY_MAX/d' .env` in the update block.
 4. Send him the update block (above) + one sentence on what will change in
    what he sees.
 5. If a new env var matters to him, give the exact line to add and the nano

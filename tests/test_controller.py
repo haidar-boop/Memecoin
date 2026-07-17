@@ -21,9 +21,7 @@ def make_pair(address="TokenA", symbol="MEMA") -> DexPair:
     token = TokenIdentity(chain="solana", address=address, symbol=symbol)
     return DexPair(
         chain="solana", pair_address=f"Pool{address}", base_token=token,
-        # Under the (now default-ON) buy-side ceilings: mcap <= $100k,
-        # liquidity <= $50k — the profile the operator wants pitched.
-        market_cap=80_000.0, fdv=84_000.0, liquidity_usd=45_000.0,
+        market_cap=400_000.0, fdv=420_000.0, liquidity_usd=90_000.0,
         volume_24h=120_000.0, volume_1h=8_000.0,
         buys_24h=400, sells_24h=250, buys_1h=40, sells_1h=15,
         buyers_24h=300, sellers_24h=180,
@@ -633,7 +631,7 @@ def test_copycat_rule_requires_a_real_size_gap():
     much larger) pool wearing the same symbol/name is evidence."""
     from meme_intelligence.workflow.controller import _find_established_duplicate
 
-    candidate = make_pair()  # MEMA, 45k liquidity
+    candidate = make_pair()  # MEMA, 90k liquidity
     kwargs = dict(liquidity_ratio=10.0, min_liquidity_usd=100_000.0)
 
     def rival(address="OtherAddr", symbol="MEMA", name=None, liquidity=2_000_000.0):
@@ -645,10 +643,10 @@ def test_copycat_rule_requires_a_real_size_gap():
     veto = _find_established_duplicate(candidate, [rival()], **kwargs)
     assert veto is not None and "MEMA" in veto
 
-    # A small same-symbol coin is a coincidence, not an original (450k floor
-    # here = 10x the candidate's 45k) — and same symbol below the absolute
+    # A small same-symbol coin is a coincidence, not an original (900k floor
+    # here = 10x the candidate's 90k) — and same symbol below the absolute
     # floor never fires either.
-    assert _find_established_duplicate(candidate, [rival(liquidity=300_000.0)],
+    assert _find_established_duplicate(candidate, [rival(liquidity=500_000.0)],
                                        **kwargs) is None
 
     # The candidate token itself listed on another venue is not a duplicate.
@@ -924,48 +922,6 @@ async def test_metered_services_run_when_opted_in():
         assert history[0].analyzed == 1  # a no-data wallet answer never blocks analysis
         assert wallet.gather_calls == [pair.base_token.address]
         assert ai.judge_calls == 1
-
-
-async def test_credit_gate_skips_wallet_lookup_on_oversized_candidate():
-    """End-to-end through the real scanner (not just the pipeline unit
-    tests): a coin already past the buy-side ceiling can never earn an
-    opportunity alert, so the wallet credit gate skips it even with
-    enable_in_monitor on."""
-    oversized = _dc.replace(make_pair(), liquidity_usd=2_000_000.0, market_cap=5_000_000.0)
-    wallet = RecordingWalletService()
-    settings = Settings.from_env(env={
-        "MEMEINTEL_WALLET_ENABLE_IN_MONITOR": "true",
-        "MEMEINTEL_AI_VERIFY_OPPORTUNITIES": "false",
-    })
-    with Storage(":memory:", now_func=lambda: NOW) as storage:
-        scanner = make_scanner_with_metered(
-            storage, [oversized], {oversized.base_token.address: clean_profile(oversized.base_token)},
-            wallet=wallet, settings=settings,
-        )
-        history = await scanner.run(max_cycles=1)
-        assert history[0].analyzed == 1        # analysis still ran
-        assert wallet.gather_calls == []        # just no wallet credit spent
-
-
-async def test_credit_gate_still_checks_wallets_for_a_held_oversized_coin():
-    """A coin the operator holds always gets a wallet check regardless of
-    the ceiling — whale-exit visibility matters most for money he already
-    put in, whatever the coin's current size (2026-07-15 credit gate)."""
-    oversized = _dc.replace(make_pair(), liquidity_usd=2_000_000.0, market_cap=5_000_000.0)
-    wallet = RecordingWalletService()
-    settings = Settings.from_env(env={
-        "MEMEINTEL_WALLET_ENABLE_IN_MONITOR": "true",
-        "MEMEINTEL_AI_VERIFY_OPPORTUNITIES": "false",
-    })
-    with Storage(":memory:", now_func=lambda: NOW) as storage:
-        storage.set_holding(oversized.base_token)
-        scanner = make_scanner_with_metered(
-            storage, [oversized], {oversized.base_token.address: clean_profile(oversized.base_token)},
-            wallet=wallet, settings=settings,
-        )
-        history = await scanner.run(max_cycles=1)
-        assert history[0].analyzed == 1
-        assert wallet.gather_calls == [oversized.base_token.address]
 
 
 async def test_security_change_triggers_critical_alert_on_recheck():
@@ -1601,228 +1557,3 @@ async def test_rug_screen_now_covers_momentum_and_medium_alerts_too():
     # With the blacklisted deployer, the SAME fixture must now be fully
     # suppressed -- proof the free screen ran even though no HIGH tier fired.
     assert not any(e.alert_type in _BUY_SIDE_ALERT_TYPES for e in sink.sent)
-
-
-# ---- Smart-wallet data clock wiring (Part 17 groundwork) --------------------
-# The recorder is None-gated and never raises, so a broken wire is a SILENT
-# no-op — only an end-to-end cycle against real Storage proves the clock runs.
-
-from meme_intelligence.config.settings import SmartWalletSettings  # noqa: E402
-from meme_intelligence.core.models import TopHolder  # noqa: E402
-from meme_intelligence.workflow.smart_wallets import SmartWalletRecorder  # noqa: E402
-
-
-async def test_scan_cycle_records_top_holder_sightings():
-    """One real cycle: GoPlus profile -> pipeline -> controller -> recorder ->
-    Storage. Guards the feature's only production call site (a refactor that
-    drops the kwarg or the record() call must fail THIS test, not ship a
-    silent no-op that loses weeks of unrecoverable earliest-holder data)."""
-    pair = make_pair()
-    profile = _dc.replace(
-        clean_profile(pair.base_token),
-        top_holders=(TopHolder(address="EarlyWhale1", percent=8.0),
-                     TopHolder(address="EarlyWhale2", percent=3.5)),
-    )
-    async def fake_sleep(seconds):
-        pass
-    with Storage(":memory:", now_func=lambda: NOW) as storage:
-        notifier = NotificationEngine([RecordingSink()], AlertEngineSettings(),
-                                      time_func=lambda: 0.0)
-        scanner = ContinuousScanner(
-            SETTINGS, storage, notifier,
-            gecko_client=FakeGecko([pair]),
-            goplus_client=FakeGoPlus({pair.base_token.address: profile}),
-            smart_wallet_recorder=SmartWalletRecorder(
-                storage, SmartWalletSettings(enabled=True)),
-            now_func=lambda: NOW, sleep_func=fake_sleep,
-        )
-        await scanner.run(max_cycles=1)
-
-        assert set(storage.wallets_seen_on(pair.base_token)) == {"EarlyWhale1", "EarlyWhale2"}
-        history = storage.wallet_history("EarlyWhale1")
-        assert history[0]["source"] == "goplus_holders"
-        assert history[0]["side"] == "hold_top10"
-        assert history[0]["percent"] == 8.0
-
-
-async def test_scan_cycle_without_recorder_records_nothing():
-    """Default wiring (recorder None) must leave the sightings table empty —
-    the data clock is strictly opt-in (Rule 18)."""
-    pair = make_pair()
-    with Storage(":memory:", now_func=lambda: NOW) as storage:
-        scanner, _ = make_scanner(storage, [pair],
-                                  {pair.base_token.address: clean_profile(pair.base_token)})
-        await scanner.run(max_cycles=1)
-        assert storage.wallets_seen_on(pair.base_token) == []
-
-
-# ---- "Seen before" framing on re-alerts (operator complaint 2026-07-14) ----
-
-async def test_realert_carries_history_note():
-    """A token with prior alert history must re-alert WITH the 'seen before'
-    line — a recheck alert days later must never read like a brand-new
-    discovery. First-ever alerts stay clean (no note)."""
-    pair = make_pair()
-    profile = clean_profile(pair.base_token)
-    with Storage(":memory:", now_func=lambda: NOW) as storage:
-        # First ever alert: no note.
-        sink1 = RecordingSink()
-        scanner, _ = make_scanner(storage, [pair],
-                                  {pair.base_token.address: profile}, sink=sink1)
-        await scanner.run(max_cycles=1)
-        assert sink1.sent and all(not e.history_note for e in sink1.sent)
-
-        # A fresh scanner (fresh seen-set + cooldown) re-analyzes the same
-        # token: its alerts must now carry the history of round one.
-        sink2 = RecordingSink()
-        scanner2, _ = make_scanner(storage, [pair],
-                                   {pair.base_token.address: profile}, sink=sink2)
-        await scanner2.run(max_cycles=1)
-        assert sink2.sent
-        assert all("prior alert(s) for this coin" in e.history_note
-                   for e in sink2.sent)
-
-
-# ---- Staleness-door backlog drain (2026-07-15 "worked once then stopped") ----
-
-async def test_stale_archive_limit_bounds_one_recheck_pass():
-    """The door's first encounter with a pre-door backlog (8,690 entries on
-    the droplet) archived thousands in one uninterruptible synchronous sweep,
-    freezing the event loop and Telegram for minutes. One pass may now
-    archive at most watchlist_stale_archive_limit entries; the next pass
-    continues the drain."""
-    settings = Settings.from_env(env={
-        "MEMEINTEL_WORKFLOW_WATCHLIST_RECHECK_CYCLES": "1",
-        "MEMEINTEL_WORKFLOW_WATCHLIST_STALE_ARCHIVE_LIMIT": "3",
-    })
-    # Storage clock 10 days before the scanner clock -> every entry is stale.
-    with Storage(":memory:", now_func=lambda: NOW - timedelta(days=10)) as storage:
-        for i in range(8):
-            tok = TokenIdentity(chain="solana", address=f"Stale{i}", symbol=f"S{i}")
-            storage.update_watchlist(tok, WatchlistTier.TIER_2_DEVELOPING, score=70.0)
-        scanner = make_scanner_with_market(
-            storage, [], {}, FakeMarketService({}), settings=settings)
-        await scanner.run(max_cycles=1)
-        remaining = storage.get_watchlist()
-        assert len(remaining) == 5          # exactly 3 archived this pass
-        await scanner.run(max_cycles=1)     # next pass drains 3 more
-        assert len(storage.get_watchlist()) == 2
-
-
-async def test_scanner_staleness_door_now_covers_tier3_zombies():
-    """Tier-3 (research-only) is where undead coins accumulate, and the
-    scanner used to skip them BEFORE the stale check — thousands of zombies
-    only the once-a-day routine could drain. The stale check now runs first:
-    the agreed design archives ANY coin past the cap."""
-    settings = Settings.from_env(env={"MEMEINTEL_WORKFLOW_WATCHLIST_RECHECK_CYCLES": "1"})
-    with Storage(":memory:", now_func=lambda: NOW - timedelta(days=10)) as storage:
-        zombie = TokenIdentity(chain="solana", address="Zombie1", symbol="ZMB")
-        storage.update_watchlist(zombie, WatchlistTier.TIER_3_RESEARCH_ONLY, score=60.0)
-        scanner = make_scanner_with_market(
-            storage, [], {}, FakeMarketService({}), settings=settings)
-        await scanner.run(max_cycles=1)
-        assert storage.get_watchlist() == []                     # archived
-        assert storage.get_watchlist(include_archived=True)      # not deleted
-
-
-# ---- Scanner stall watchdog (operator request, 2026-07-15) ----
-
-class RecordingWatchdog:
-    """Stand-in for ScannerWatchdog recording the controller's wiring."""
-
-    instances: list = []
-
-    def __init__(self, settings, age_func, notify, *, now_func=None):
-        self.settings = settings
-        self.age_func = age_func
-        self.notify = notify
-        self.started = False
-        self.stopped = False
-        RecordingWatchdog.instances.append(self)
-
-    async def start(self):
-        self.started = True
-
-    async def stop(self):
-        self.stopped = True
-
-
-async def test_seconds_since_last_cycle_tracks_progress():
-    pair = make_pair()
-    with Storage(":memory:", now_func=lambda: NOW) as storage:
-        scanner, _ = make_scanner(storage, [pair],
-                                  {pair.base_token.address: clean_profile(pair.base_token)})
-        assert scanner.seconds_since_last_cycle() is None  # not started yet
-        await scanner.run(max_cycles=1)
-        # Clock is frozen at NOW, so a just-completed cycle reads 0s old.
-        assert scanner.seconds_since_last_cycle() == 0.0
-
-
-async def test_watchdog_started_and_stopped_with_the_scanner(monkeypatch):
-    monkeypatch.setattr("meme_intelligence.workflow.controller.ScannerWatchdog",
-                        RecordingWatchdog)
-    RecordingWatchdog.instances.clear()
-    pair = make_pair()
-    with Storage(":memory:", now_func=lambda: NOW) as storage:
-        scanner, _ = make_scanner(storage, [pair],
-                                  {pair.base_token.address: clean_profile(pair.base_token)})
-        await scanner.run(max_cycles=1)
-    assert len(RecordingWatchdog.instances) == 1
-    wd = RecordingWatchdog.instances[0]
-    assert wd.started and wd.stopped                # full lifecycle
-    assert wd.notify is None                        # no telegram listener wired here
-    assert wd.age_func() == 0.0                     # reads the scanner's heartbeat
-
-
-async def test_watchdog_disabled_by_flag(monkeypatch):
-    monkeypatch.setattr("meme_intelligence.workflow.controller.ScannerWatchdog",
-                        RecordingWatchdog)
-    RecordingWatchdog.instances.clear()
-    settings = Settings.from_env(env={"MEMEINTEL_WORKFLOW_WATCHDOG_ENABLED": "false"})
-    with Storage(":memory:", now_func=lambda: NOW) as storage:
-        scanner = make_scanner_with_market(storage, [], {}, FakeMarketService({}),
-                                           settings=settings)
-        await scanner.run(max_cycles=1)
-    assert RecordingWatchdog.instances == []        # never constructed
-
-
-async def test_watchdog_start_failure_does_not_stop_the_scanner(monkeypatch):
-    class ExplodingWatchdog(RecordingWatchdog):
-        async def start(self):
-            raise RuntimeError("watchdog boot failure")
-
-    monkeypatch.setattr("meme_intelligence.workflow.controller.ScannerWatchdog",
-                        ExplodingWatchdog)
-    RecordingWatchdog.instances.clear()
-    pair = make_pair()
-    with Storage(":memory:", now_func=lambda: NOW) as storage:
-        scanner, _ = make_scanner(storage, [pair],
-                                  {pair.base_token.address: clean_profile(pair.base_token)})
-        history = await scanner.run(max_cycles=1)   # must not raise
-        assert len(history) == 1                    # scanning proceeded normally
-
-
-def test_mind_veto_authority_ignores_windowed_metrics():
-    """The authority gate reads LIFETIME metrics, always: a strong windowed
-    section must NOT arm a veto whose lifetime record is weak. (A windowed-
-    authority opt-in was built and CUT in the 2026-07-16 review — the window's
-    rug precision is biased low while slow-rug labels mature, and window-scale
-    samples are too thin an evidence base for a live safety control.)"""
-    pair = make_pair()
-
-    class WindowedMind(FakeMind):
-        def __init__(self):
-            super().__init__(p_rug=0.99)
-            self._metrics = {
-                "rug": {"precision": 0.4, "true_positives": 4,
-                        "false_positives": 6},              # lifetime: weak
-                "recent": {"window_days": 7.0,
-                           "rug": {"precision": 0.9, "true_positives": 18,
-                                   "false_positives": 2}},  # this week: strong
-            }
-
-    settings = make_learning_settings_env(MEMEINTEL_LEARNING_ENABLE_IN_MONITOR="true")
-    with Storage(":memory:", now_func=lambda: NOW) as storage:
-        scanner = make_veto_scanner(storage, WindowedMind(), settings)
-        # Lifetime precision 0.4 < 0.70 floor -> abstains, window ignored.
-        assert scanner._deterministic_risk_veto(fake_veto_input(pair), [], None) is None

@@ -21,7 +21,6 @@ See ``.env.example`` at the repository root for the full list of variables.
 from __future__ import annotations
 
 import dataclasses
-import logging
 import math
 import os
 from dataclasses import dataclass, field
@@ -209,24 +208,9 @@ class AlertThresholds:
     # buy-side alert is SUPPRESSED. Protective warnings still fire (a large coin
     # can still rug). Unknown liquidity/mcap NEVER trips the ceiling (Rule 8 —
     # absent data is not evidence a coin is too big; that is the floor's job).
-    # ON by default since 2026-07-14 (operator: "it sends me coins with around
-    # 100 million to 1 billion market cap... make the market cap below 100k"):
-    # market cap capped at $100k (his number), liquidity at $50k (a sub-$100k-
-    # mcap coin with a deeper pool than that has already had its move; $50k is
-    # also SecurityThresholds.healthy_liquidity_usd — past "healthy" is past
-    # "early"). Set either to 0.0 to turn that ceiling OFF.
-    opportunity_max_liquidity_usd: float = 50_000.0
-    opportunity_max_market_cap_usd: float = 100_000.0
-    # Operator freshness gate (2026-07-14: "before it sends me anything on the
-    # telegram I want it to make sure it's not older than 1 day"): a BUY-SIDE
-    # alert on a pool older than this many hours is SUPPRESSED — a day-old coin
-    # is never a fresh find, whatever its numbers do (the discovery scan already
-    # rejects old pools; this closes the watchlist-recheck path that re-pitched
-    # them). Protective warnings still fire regardless of age. Unknown creation
-    # time NEVER trips the gate (Rule 8 — absent data is not evidence of age;
-    # the checklist shows "Pool age: not verified" so the gap stays visible).
-    # 0.0 = OFF.
-    opportunity_max_age_hours: float = 24.0
+    # Both default 0.0 = OFF, so existing behavior is unchanged until set (Rule 18).
+    opportunity_max_liquidity_usd: float = 0.0
+    opportunity_max_market_cap_usd: float = 0.0
     # Safety checklist (operator rule 2026-07-12): a buy-side alert now SENDS
     # even when a soft check falls short — the checklist rides ON the alert so
     # the operator sees what missed and decides. Only the rug engine's COMBINED
@@ -258,57 +242,19 @@ class AlertThresholds:
                     f"alert threshold '{name}' must be positive, got {value}")
         for name in ("opportunity_min_liquidity_usd", "opportunity_min_market_cap_usd",
                      "opportunity_max_liquidity_usd", "opportunity_max_market_cap_usd",
-                     "opportunity_max_age_hours", "checklist_new_launch_minutes"):
+                     "checklist_new_launch_minutes"):
             value = getattr(self, name)
             if not math.isfinite(value) or value < 0:
                 raise ConfigurationError(
                     f"alert threshold '{name}' must be >= 0, got {value}")
         # A ceiling must sit above the comfort floor when both are set (>0),
-        # else the "too big" cut would swallow the "too thin" note. This used
-        # to raise, but flipping the ceiling defaults ON (2026-07-14) meant a
-        # pre-existing floor line in the droplet .env above $50k/$100k would
-        # have crash-looped the 24/7 service on a plain `git pull` deploy —
-        # killing the protective rug alerts too (Rule 3/7: a config conflict
-        # must never take down the seatbelt). The operator's ceiling directive
-        # is the newer instruction, and the floor's original job (0-liquidity
-        # junk) is already covered by the untradeable hard block — so the
-        # conflicting FLOOR yields (disabled, 0.0) with a loud warning.
-        # Equality counts as a conflict: floor == ceiling would mean "only
-        # coins at exactly $X" — never what anyone intends.
-        #
-        # These warnings fire during Settings construction, BEFORE the CLI has
-        # configured logging (review finding: they only reached Python's bare
-        # lastResort stderr, never the rotating log file). They are therefore
-        # also collected into ``self.config_notes`` so __main__ can re-emit
-        # them once real handlers exist.
-        notes: list[str] = []
+        # else the "too big" cut would swallow the "too thin" note.
         for floor, cap in (("opportunity_min_liquidity_usd", "opportunity_max_liquidity_usd"),
                            ("opportunity_min_market_cap_usd", "opportunity_max_market_cap_usd")):
             lo, hi = getattr(self, floor), getattr(self, cap)
-            if hi > 0.0 and lo > 0.0 and hi <= lo:
-                notes.append(
-                    f"alert threshold '{floor}' ({lo}) is at or above the "
-                    f"'{cap}' ceiling ({hi}): the floor is DISABLED so buy-side "
-                    "alerts keep flowing under the ceiling — remove the stale "
-                    "floor from .env to silence this warning")
-                object.__setattr__(self, floor, 0.0)
-        # A liquidity ceiling at or below the strong-candidate depth floor
-        # makes the HIGH alert tiers structurally unreachable (deep enough for
-        # HIGH is over the ceiling; under the ceiling demotes to MEDIUM) — on
-        # a HIGH-filtered phone that is permanent silence. Warn loudly rather
-        # than raise, for the same never-crash-the-seatbelt reason as above.
-        if 0.0 < self.opportunity_max_liquidity_usd <= self.strong_candidate_min_liquidity_usd:
-            notes.append(
-                f"opportunity_max_liquidity_usd ({self.opportunity_max_liquidity_usd}) "
-                "is at or below strong_candidate_min_liquidity_usd "
-                f"({self.strong_candidate_min_liquidity_usd}): no coin can ever earn "
-                "a HIGH buy-side alert with this combination — raise the ceiling "
-                "or lower the strong-candidate depth floor")
-        # Not a dataclass field (env cannot set it; asdict/replace unaffected).
-        object.__setattr__(self, "config_notes", tuple(notes))
-        logger = logging.getLogger("meme_intelligence.config.settings")
-        for note in notes:
-            logger.warning(note)
+            if hi > 0.0 and lo > 0.0 and hi < lo:
+                raise ConfigurationError(
+                    f"alert threshold '{cap}' ({hi}) must be >= '{floor}' ({lo})")
         _check_range("alert threshold 'checklist_sell_tax_max_percent'",
                      self.checklist_sell_tax_max_percent, 0.0, 100.0)
 
@@ -478,35 +424,30 @@ class PumpFunSettings:
 
 
 @dataclass(frozen=True)
-class SmartWalletSettings:
-    """Smart-wallet data collection (Part 17 groundwork): record which
-    wallets hold each analyzed token early in its life.
+class BoostWatcherSettings:
+    """DexScreener boost radar (Project 5): DM the operator the first time any
+    token crosses ``threshold`` boosts on DexScreener.
 
-    Step 1 of the smart-wallet roadmap — the DATA CLOCK only. Top-holder
-    wallets already present in every GoPlus security response (previously
-    discarded at parse time) are recorded into ``wallet_sightings``; once
-    outcome tracking has labeled enough of those tokens as winners or
-    losers, a later step turns the accumulated co-occurrence into wallet
-    reputation scores. Free by construction: zero new API calls — this
-    only keeps data the bot already fetches. Off by default (Rule 18);
-    recording is one INSERT batch per token per process lifetime.
+    A boost is PAID promotion, not organic traction or a safety signal — this
+    is a "what is being pumped for visibility right now" heads-up, never a buy
+    signal (the emitted alert says so). Off by default (Rule 18): enabling it
+    is the only thing that changes behavior. Independent of the scan cycle —
+    its own poll loop and its own alert, so it never touches discovery,
+    analysis, storage, or trading.
     """
 
-    enabled: bool = False            # opt-in; off = no behavior change
-    max_holders_per_token: int = 10  # record at most the top N circulating holders
-    max_seen_keys: int = 5000        # bounded already-recorded dedup memory
-    # A wallet needs at least this many RESOLVED tokens (measured win or
-    # loss) before it gets a reputation score — one lucky pick is not a
-    # track record (Part 17 Section 2; Rule 8).
-    min_resolved_for_reputation: int = 3
+    enabled: bool = False              # opt-in; off = no behavior change
+    threshold: float = 100.0           # alert when totalAmount crosses this
+    poll_interval_seconds: float = 30.0  # matches DexScreener's ~30s edge cache
+    chain_filter: str = "solana"       # "" = every chain; "solana" = Solana-only
+    max_seen_keys: int = 5000          # bounded already-alerted dedup memory
 
     def __post_init__(self) -> None:
-        for name in ("max_holders_per_token", "max_seen_keys",
-                     "min_resolved_for_reputation"):
+        for name in ("threshold", "poll_interval_seconds", "max_seen_keys"):
             value = getattr(self, name)
-            if not isinstance(value, int) or value <= 0:
+            if not math.isfinite(value) or value <= 0:
                 raise ConfigurationError(
-                    f"smart wallet setting '{name}' must be a positive integer, got {value!r}")
+                    f"boost watcher setting '{name}' must be positive, got {value}")
 
 
 @dataclass(frozen=True)
@@ -768,38 +709,6 @@ class WorkflowSettings:
     insufficient_data_min_coverage: float = 0.5     # below this = "too early to judge"
     insufficient_data_retry_minutes: float = 15.0   # wait this long before another look
     insufficient_data_max_age_minutes: float = 120.0  # give up once the pool itself is this old
-    # The watchlist STALENESS DOOR (Part 14 of the handoff — approved
-    # 2026-07-14, built with the freshness-gate fix batch): archive ANY coin
-    # after this many days on the watchlist, however its numbers wobble. The
-    # watchlist's only other exits are death, falling to Avoid, or pairs
-    # vanishing — without an age cap a mediocre "undead" coin lingers in the
-    # recheck rotation forever, burning provider budget on alerts the
-    # freshness gate guarantees can never send. Operator holdings (/holding)
-    # are exempt; archived is not deleted (history, learning, and reputation
-    # all keep the rows; a truly revived coin re-enters via fresh discovery).
-    # ON by default per the agreed design; 0 = OFF.
-    watchlist_max_age_days: float = 3.0
-    # How many stale entries one recheck pass may archive before yielding to
-    # the next pass (0 = unlimited). The door's first encounter with a
-    # backlog built up before it existed (8,690 watchlist entries,
-    # 2026-07-15) tried to archive thousands in one uninterruptible sweep —
-    # two synchronous commits each — freezing the event loop, and with it
-    # Telegram, for minutes. Bounded, the backlog drains ~200 per recheck
-    # pass (every ~7.5 min at defaults) while the bot stays responsive.
-    watchlist_stale_archive_limit: int = 200
-    # Scanner stall watchdog (operator request after the 2026-07-15 OOM
-    # crash loop): an isolated background task that messages the operator on
-    # Telegram when no scan cycle has completed for ``watchdog_stall_seconds``
-    # (checked every ``watchdog_check_seconds``; repeats only after
-    # ``watchdog_realert_seconds``; sends a one-time recovery note when
-    # cycles resume). It only READS the scanner's last-cycle timestamp — it
-    # adds zero work to the scan loop and every failure inside it degrades
-    # to a log line (Rule 7). It cannot report a dead process (it dies with
-    # it — systemd Restart= covers that); it reports the alive-but-stuck case.
-    watchdog_enabled: bool = True
-    watchdog_stall_seconds: float = 900.0    # 15 min without a completed cycle = stalled
-    watchdog_check_seconds: float = 60.0     # how often the watchdog looks
-    watchdog_realert_seconds: float = 3600.0  # min gap between repeat stall alerts
 
     def __post_init__(self) -> None:
         if not self.networks.strip():
@@ -820,24 +729,6 @@ class WorkflowSettings:
             raise ConfigurationError(
                 "insufficient_data_max_age_minutes must be >= "
                 "insufficient_data_retry_minutes (must allow at least one retry)")
-        age_cap = self.watchlist_max_age_days
-        if not math.isfinite(age_cap) or age_cap < 0:
-            raise ConfigurationError(
-                f"workflow setting 'watchlist_max_age_days' must be >= 0, got {age_cap}")
-        if self.watchlist_stale_archive_limit < 0:
-            raise ConfigurationError(
-                "workflow setting 'watchlist_stale_archive_limit' must be >= 0, "
-                f"got {self.watchlist_stale_archive_limit}")
-        for name in ("watchdog_stall_seconds", "watchdog_check_seconds",
-                     "watchdog_realert_seconds"):
-            value = getattr(self, name)
-            if not math.isfinite(value) or value <= 0:
-                raise ConfigurationError(f"workflow setting '{name}' must be positive")
-        if self.watchdog_stall_seconds < self.watchdog_check_seconds:
-            raise ConfigurationError(
-                "watchdog_stall_seconds must be >= watchdog_check_seconds "
-                "(a stall threshold below the check cadence can never be observed "
-                "accurately)")
 
     @property
     def network_list(self) -> list[str]:
@@ -876,24 +767,6 @@ class WalletIntelSettings:
     dominant_buyer_volume_fraction: float = 0.60  # one wallet above = artificial demand
     min_buy_volume_for_dominance_usd: float = 500.0  # below this, dominance is meaningless dust
     enable_in_monitor: bool = False       # wallet calls in the continuous scanner
-    # Credit-gating (2026-07-15, DECISIONS_LOG 2026-07-11 "re-enable criteria"):
-    # a wallet lookup spends real, metered Helius/Birdeye credits. Wired
-    # unconditionally into the pipeline, it used to run on EVERY analyzed
-    # Solana token in the 24/7 monitor — that exhausted the free Helius tier
-    # within ~3 days and 429'd the trading wallet's own balance reads
-    # alongside it (the incident that got this whole layer turned off). The
-    # pipeline now only spends a lookup on a candidate that could plausibly
-    # still earn a buy-side alert: not destructive, and clearing this
-    # minimum security score (reuses ``SecurityAnalyzer``'s own bands — 50 is
-    # "Moderate Risk" or better; a coin scoring worse than that will never
-    # clear an alert gate regardless of what its wallets are doing). Combined
-    # with the buy-side ceiling/freshness-gate/untradeable checks
-    # (AlertThresholds — applied in the pipeline, not duplicated here), the
-    # original plan's estimated 5-10x reduction should hold. Tokens the
-    # operator holds (`/holding`) always get checked regardless of this gate
-    # (`ResearchPipeline.analyze_pair(..., force_wallet_check=True)`) — a
-    # coin he owns needs whale-exit visibility whatever its size or age.
-    credit_gate_min_security_score: float = 50.0
 
     def __post_init__(self) -> None:
         for name in ("whale_min_percent", "risk_whale_percent", "top_holders_limit",
@@ -909,8 +782,6 @@ class WalletIntelSettings:
             raise ConfigurationError(
                 "wallet setting 'min_buy_volume_for_dominance_usd' must be positive, "
                 f"got {self.min_buy_volume_for_dominance_usd}")
-        _check_range("wallet setting 'credit_gate_min_security_score'",
-                     self.credit_gate_min_security_score, 0.0, 100.0)
 
 
 @dataclass(frozen=True)
@@ -996,11 +867,6 @@ class MomentumThresholds:
     target_trend_24h_percent: float = 30.0    # 24h gain earning a strong trend signal
     spike_1h_percent: float = 30.0            # 1h move above this = unsupported-spike risk
     late_extension_24h_percent: float = 100.0  # 24h gain above this = late entry zone
-    # 1h/6h/24h changes ALL inside this band = flat, which is NO trend
-    # evidence, not a "consistent trend": a stale coin drifting sideways for
-    # days scored the same 90 as a genuinely climbing one and kept re-alerting
-    # as a fresh entry (operator complaint 2026-07-14).
-    flat_trend_band_percent: float = 2.0
     volume_acceleration_ratio: float = 1.5    # (1h volume x24) / 24h volume above = accelerating
     volume_fade_ratio: float = 0.5            # below = volume fading
     buy_ratio_shift: float = 0.05             # 1h vs 24h buy-ratio delta that matters
@@ -1020,14 +886,6 @@ class AlertEngineSettings:
 
     cooldown_seconds: float = 900.0  # same token+type alert suppressed within this window
     score_drop_review_points: float = 15.0  # score drop vs last snapshot triggering review
-    # Weak-tier buy-side alerts are also suppressed while the score sits this
-    # far below the token's own all-time peak. The one-step decline check
-    # above misses a coin that collapsed and then creeps back +2-3 points per
-    # recheck for days — each step reads as "improving," so it re-pitches as
-    # a fresh opportunity while still far below its best self (operator
-    # complaint 2026-07-14). Strong tiers stay exempt, as with the decline
-    # check.
-    peak_decline_suppression_points: float = 15.0
     # Below this, liquidity has collapsed and the token is treated as dead:
     # one MEDIUM post-mortem replaces the HIGH warning/score-drop pair, and
     # the token is archived instead of re-warned every recheck (Part 29
@@ -1260,38 +1118,11 @@ class LearningSettings:
     # Adaptive ensemble — Section 6
     accuracy_window: int = 200               # M: rolling window for source accuracy
     min_ensemble_confidence: float = 0.0     # floor; kept configurable
-    # Rug-engine grading (2026-07-16 mind-layer audit): the rug engine speaks
-    # ONLY to rug-vs-not-rug — it has no pump/flat/dump opinion. Its stored
-    # per-source label used to come from the argmax of its distribution, which
-    # ties three ways below a rug score of 25 and (by dict order) tie-broke to
-    # a fabricated 'pump'. The ensemble then graded the hard-signal rug source
-    # as a de-facto pump predictor, so it was "wrong" ~97% of the time on a
-    # rug-heavy population and its adaptive blend weight collapsed to ~2% —
-    # effectively deleting it from the veto's P(rug). It now abstains (None,
-    # skipped by the ensemble) at or below this score and is graded as a RUG
-    # call only above it. Deployer-independent production rug protection is the
-    # separate deterministic screen and is unaffected.
-    rug_engine_abstain_at_or_below_score: float = 25.0
 
     # Continuous learning / drift — Section 7
     drift_accuracy_floor: float = 0.40       # ensemble accuracy below -> full retrain
     drift_min_samples: int = 30              # graded finals needed before drift can fire
     scaler_refit_every_n: int = 500          # re-fit StandardScaler cadence
-    # Training/clustering set cap (2026-07-15 incident): _rebuild() and
-    # refresh_archetypes() used to pull EVERY resolved coin ever seen,
-    # unbounded — at 24,884 coins a single full rebuild (scaler + FAISS
-    # index + 480-tree LightGBM + HDBSCAN archetype clustering, ALL over the
-    # entire history) ran the 1-vCPU/1GB droplet at ~100% CPU for 2.5+
-    # minutes and was memory-killed before it could finish — every restart
-    # re-triggered the same unbounded rebuild, a self-sustaining crash loop
-    # (Telegram going silent was the first visible symptom). The bot will
-    # only keep growing this table, so a hard cap is permanent, not a
-    # one-time patch. Newest-first (Storage.resolved_coin_ids orders by
-    # updated_at DESC), so the cap trades the OLDEST history for a bounded,
-    # safe cost — and recent coins are more representative of current
-    # meme-coin market conditions anyway. 0 = unlimited (tests only; never
-    # safe on a 1GB droplet at scale).
-    max_training_records: int = 5000
 
     # Trajectory capture cadence — Section 1 (drives external snapshot callers)
     fast_snapshot_seconds: int = 60          # snapshot cadence in the first window
@@ -1302,34 +1133,6 @@ class LearningSettings:
     # Cold start — Section 11
     min_snapshots_for_confidence: int = 3    # fewer snapshots -> low confidence
     cold_start_samples: int = 100            # resolved coins below this = cold start
-
-    # Windowed self-evaluation (2026-07-16 mind-layer audit): /mind's headline
-    # numbers were LIFETIME aggregates — they mixed the era before the
-    # classifier had ever trained (fixed 2026-07-15) and the pre-ceiling coin
-    # population into one average, so nothing about the CURRENT models could be
-    # read off the card. get_learning_metrics now also grades only the
-    # predictions MADE in the last N days (keyed on the prediction's own
-    # created_at — the coin row's updated_at is re-bumped by later label writes
-    # and cannot split eras) and reports them alongside the lifetime numbers.
-    # 0 disables the windowed section. The window rolls forward, so it always
-    # reflects the models and coin population you are running TODAY. Honest
-    # caveat rendered on the card: labels mature for up to the longest
-    # backtest horizon (30d), so a slow rug confirmed after a prediction ages
-    # out of the window never enters its rug stats — windowed rug precision
-    # reads LOW while corrections are in flight (2026-07-16 review finding).
-    # The veto's earned-authority gate therefore always reads LIFETIME
-    # numbers; a windowed-authority opt-in was built and then CUT in review —
-    # window-scale authority (min 10 graded calls) plus the maturity bias is
-    # too thin an evidence base for a live safety control (Rule 8/21).
-    metrics_window_days: float = 7.0
-    # Bound on how many graded predictions one metrics pass reads (newest
-    # first; 0 = unlimited). The grading row count grows with the bot's
-    # lifetime and is attacker-inflatable (every analyzed coin stores one
-    # row), so an uncapped read is the same grows-forever cost shape the
-    # training cap closed (2026-07-15). At the default, months of history fit
-    # comfortably; beyond it "lifetime" numbers become "newest 100k", which
-    # is the honest trade (Rule 12).
-    metrics_max_records: int = 100_000
 
     # Alert veto (Project 3, ROADMAP #3): the mind layer's P(rug) blocks
     # HIGH opportunities ONLY once its measured rug precision has earned it
@@ -1371,8 +1174,6 @@ class LearningSettings:
         _check_range("learning drift_accuracy_floor", self.drift_accuracy_floor, 0.0, 1.0)
         _check_range("learning novelty_percentile", self.novelty_percentile, 0.0, 100.0)
         _check_range("learning min_ensemble_confidence", self.min_ensemble_confidence, 0.0, 1.0)
-        _check_range("learning rug_engine_abstain_at_or_below_score",
-                     self.rug_engine_abstain_at_or_below_score, 0.0, 100.0)
         _check_range("learning veto_min_p_rug", self.veto_min_p_rug, 0.0, 1.0)
         _check_range("learning veto_min_accuracy", self.veto_min_accuracy, 0.0, 1.0)
         if self.veto_min_samples <= 0:
@@ -1384,24 +1185,6 @@ class LearningSettings:
                 f"{self.veto_metrics_ttl_seconds}")
         if not self.horizon_hours():
             raise ConfigurationError("learning: horizons_hours must list at least one horizon")
-        if self.max_training_records < 0:
-            raise ConfigurationError(
-                "learning max_training_records must be >= 0 (0 = unlimited), got "
-                f"{self.max_training_records}")
-        # Upper bound: beyond ~740k days the cutoff arithmetic overflows
-        # datetime at RUNTIME, which would crash every /mind AND silently
-        # disarm the veto (its blanket except abstains) — a config typo must
-        # fail loudly at startup instead (Rule 6; 2026-07-16 review finding).
-        # 3650 days (10 years) is far beyond any meaningful window.
-        if (not math.isfinite(self.metrics_window_days)
-                or not 0 <= self.metrics_window_days <= 3650):
-            raise ConfigurationError(
-                "learning metrics_window_days must be in [0, 3650] (0 = off), got "
-                f"{self.metrics_window_days}")
-        if self.metrics_max_records < 0:
-            raise ConfigurationError(
-                "learning metrics_max_records must be >= 0 (0 = unlimited), got "
-                f"{self.metrics_max_records}")
 
     def horizon_hours(self) -> tuple[float, ...]:
         """Parse ``horizons_hours`` into an ordered tuple of positive floats."""
@@ -1628,7 +1411,7 @@ class Settings:
     providers: ProviderSettings = field(default_factory=ProviderSettings)
     discovery: DiscoverySettings = field(default_factory=DiscoverySettings)
     pumpfun: PumpFunSettings = field(default_factory=PumpFunSettings)
-    smart_wallet: SmartWalletSettings = field(default_factory=SmartWalletSettings)
+    boost_watcher: BoostWatcherSettings = field(default_factory=BoostWatcherSettings)
     security: SecurityThresholds = field(default_factory=SecurityThresholds)
     community: CommunityThresholds = field(default_factory=CommunityThresholds)
     onchain: OnChainThresholds = field(default_factory=OnChainThresholds)
@@ -1703,7 +1486,7 @@ class Settings:
             providers=_load_group(ProviderSettings, "PROVIDERS", env),
             discovery=_load_group(DiscoverySettings, "DISCOVERY", env),
             pumpfun=_load_group(PumpFunSettings, "PUMPFUN", env),
-            smart_wallet=_load_group(SmartWalletSettings, "SMART_WALLET", env),
+            boost_watcher=_load_group(BoostWatcherSettings, "BOOST_WATCHER", env),
             security=_load_group(SecurityThresholds, "SECURITY", env),
             community=_load_group(CommunityThresholds, "COMMUNITY", env),
             onchain=_load_group(OnChainThresholds, "ONCHAIN", env),
