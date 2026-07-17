@@ -285,6 +285,10 @@ class AutomationRules:
         #    coin whose pool or market cap has grown past the ceiling is no
         #    longer an early opportunity (the move already happened), so its
         #    buy-side alert is suppressed. OFF by default. See ``_oversized``.
+        # 3b) ALREADY TOO OLD — the operator's freshness window (2026-07-17:
+        #    "only send me coins less than 1 hour old"). A pool older than
+        #    ``opportunity_max_age_hours`` is past the entry window, so its
+        #    buy-side alert is suppressed. ON by default at 1h. See ``_too_old``.
         #
         # A fourth condition suppresses only the WEAK/provisional tiers
         # (``_DECLINE_SUPPRESSED_TYPES``):
@@ -312,7 +316,8 @@ class AutomationRules:
         # alerts always pass — a flagged/dying coin's holder still needs the
         # warning.
         if (deterministic_risk_veto is not None
-                or self._untradeable(result) or self._oversized(result)):
+                or self._untradeable(result) or self._oversized(result)
+                or self._too_old(result)):
             events = [e for e in events if e.alert_type not in _BUY_SIDE_ALERT_TYPES]
         else:
             if self._score_declining(result, previous_score):
@@ -368,6 +373,26 @@ class AutomationRules:
         if max_mcap > 0.0 and mcap is not None and math.isfinite(mcap) and mcap > max_mcap:
             return True
         return False
+
+    def _too_old(self, result: PipelineResult) -> bool:
+        """True when the pool is older than the operator's freshness window
+        (``opportunity_max_age_hours``, 2026-07-17: "only send me coins less
+        than 1 hour old"). An old coin is past the entry window the operator
+        trades, so its opportunity/momentum/smart-money alerts are suppressed.
+        Protective alerts still fire (an old coin can still rug). An UNKNOWN
+        pool age or a bad timestamp NEVER trips the gate (Rule 8 — absent data
+        is not evidence of age; same convention as ``_oversized``). 0 = OFF."""
+        max_age = self._t.opportunity_max_age_hours
+        if max_age <= 0.0:
+            return False
+        created = result.pair.pair_created_at
+        if created is None:
+            return False
+        try:
+            age_hours = (self._now() - created).total_seconds() / 3600.0
+        except Exception:  # noqa: BLE001 — a bad timestamp must never break alerting
+            return False
+        return age_hours > max_age
 
     def _safety_checklist(self, result: PipelineResult) -> list[_SafetyCheck]:
         """Build the per-alert safety checklist (operator rule 2026-07-12).

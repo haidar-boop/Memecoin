@@ -1402,3 +1402,37 @@ Rules 1/8/18/20:
 `config/settings.py`, the `mind` CLI command, and the opt-in hooks in
 `workflow/controller.py` and `analytics/backtesting.py`. Decision-support only;
 it never trades (Rule 21).
+
+## 2026-07-17 — Snapshot restore + 1-hour freshness gate
+
+**Restore:** the operator ordered the bot restored exactly to his
+2026-07-13 snapshot ("I want it exactly how it was. Take everything we did
+after the snapshot and delete it"). The uploaded tarball was verified
+byte-for-byte identical to commit 19d1a20 (168 files, both directions) and
+the tree was reset to it as a NEW commit (9b0eca7) — nothing force-deleted;
+the pre-restore tip (24156d9, 947 tests) stays recoverable in history, and
+a stamped pre-restore code tarball was handed to the operator. Everything
+2026-07-14 → 2026-07-16 is content-removed: ceilings/freshness gate,
+smart-wallet clock + reputation connector, staleness door, credit gate,
+threading fix, streaming rebuild, training cap, watchdog, mind upgrades
+1-2. Deploy guidance flipped MEMEINTEL_WALLET_ENABLE_IN_MONITOR and
+MEMEINTEL_BOOST_WATCHER_ENABLED back to false (the restored code has no
+credit gate, and the boost radar — removed 07-14 by operator decision —
+is alive again in this tree). Known regressions accepted with the restore
+and told to the operator: /mind's heavy walk will freeze the bot at
+today's 26k resolved coins (avoid the command), no watchdog, classifier
+retrains fail silently in the worker thread (the 07-13 behavior).
+
+**Freshness gate (built ON TOP of the restored tree, operator request:
+"Make it so it only sends me coins less then 1 hour old"):**
+``AlertThresholds.opportunity_max_age_hours`` (default 1.0 — ON per the
+explicit request; env ``MEMEINTEL_ALERTS_OPPORTUNITY_MAX_AGE_HOURS``;
+0 = off). ``AutomationRules._too_old`` suppresses BUY-SIDE alerts
+(opportunity/momentum/smart-money) for pools older than the window, in the
+same suppression clause as the untradeable/oversized gates. Protective
+alerts always fire, and an unknown pool age never trips the gate (Rule 8,
+mirroring the ceiling's convention). Generic test fixtures moved from a
+3h-old pair to 30min so the default-on gate is exercised, plus 6 dedicated
+tests (default-on suppression, fresh pass-through, unknown age, 0=off,
+protective exemption, config validation). Suite: **827 passing** (821
+restored + 6).

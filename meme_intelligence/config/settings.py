@@ -211,6 +211,15 @@ class AlertThresholds:
     # Both default 0.0 = OFF, so existing behavior is unchanged until set (Rule 18).
     opportunity_max_liquidity_usd: float = 0.0
     opportunity_max_market_cap_usd: float = 0.0
+    # Operator freshness gate for BUY-SIDE alerts (2026-07-17, post-restore:
+    # "Make it so it only sends me coins less than 1 hour old"). A pool OLDER
+    # than this many hours is past the entry window the operator trades, so
+    # its opportunity/momentum/smart-money alerts are SUPPRESSED. Protective
+    # warnings still fire (an old coin the operator holds can still rug), and
+    # an UNKNOWN pool age never trips the gate (Rule 8 — absent data is not
+    # evidence of age; same convention as the size ceiling above). ON by
+    # default at 1 hour per the operator's explicit request; 0 = OFF.
+    opportunity_max_age_hours: float = 1.0
     # Safety checklist (operator rule 2026-07-12): a buy-side alert now SENDS
     # even when a soft check falls short — the checklist rides ON the alert so
     # the operator sees what missed and decides. Only the rug engine's COMBINED
@@ -242,7 +251,7 @@ class AlertThresholds:
                     f"alert threshold '{name}' must be positive, got {value}")
         for name in ("opportunity_min_liquidity_usd", "opportunity_min_market_cap_usd",
                      "opportunity_max_liquidity_usd", "opportunity_max_market_cap_usd",
-                     "checklist_new_launch_minutes"):
+                     "opportunity_max_age_hours", "checklist_new_launch_minutes"):
             value = getattr(self, name)
             if not math.isfinite(value) or value < 0:
                 raise ConfigurationError(

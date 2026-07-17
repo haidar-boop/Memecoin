@@ -26,7 +26,7 @@ def make_pair(address="TokenA", symbol="MEMA") -> DexPair:
         buys_24h=400, sells_24h=250, buys_1h=40, sells_1h=15,
         buyers_24h=300, sellers_24h=180,
         price_change_24h=15.0, price_change_6h=8.0, price_change_1h=2.0,
-        pair_created_at=NOW - timedelta(hours=3),
+        pair_created_at=NOW - timedelta(minutes=30),
     )
 
 
