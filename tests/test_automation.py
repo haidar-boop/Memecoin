@@ -831,3 +831,41 @@ def test_freshness_gate_default_is_three_hours_and_validated():
     from meme_intelligence.config.settings import Settings
     s = Settings.from_env(env={"MEMEINTEL_ALERTS_OPPORTUNITY_MAX_AGE_HOURS": "6"})
     assert s.alerts.opportunity_max_age_hours == 6.0
+
+
+# ---- Momentum security floor (2026-07-17 review fix) ----
+
+async def test_momentum_alert_requires_the_security_floor():
+    """Momentum was the one buy-side type with no security bar: a sub-50
+    coin (all soft flags, no rug signal) could ride bot volume to a MEDIUM
+    momentum alert while the credit gate rightly skipped its wallet check.
+    The floor closes that band; 0 restores the old behavior."""
+    import dataclasses
+
+    result = await pipeline_result()
+    assert result.momentum is not None
+    # Real assessments throughout; only the security score is weakened.
+    weak = dataclasses.replace(
+        result, security=dataclasses.replace(result.security, overall_score=45.0))
+    strong_momentum = dataclasses.replace(
+        weak, momentum=dataclasses.replace(result.momentum, overall_score=85.0))
+
+    rules = make_rules()
+    assert rules._momentum_rule(strong_momentum) is None      # floored out
+    assert "momentum" not in {e.alert_type for e in rules.evaluate(strong_momentum)}
+
+    # Floor off (0) restores the pre-review behavior for the same coin.
+    off = AutomationRules(AlertThresholds(momentum_min_security_score=0.0),
+                          AlertEngineSettings(), now_func=lambda: NOW)
+    assert off._momentum_rule(strong_momentum) is not None
+
+    # At/above the floor the alert is unaffected.
+    fine = dataclasses.replace(
+        result, momentum=dataclasses.replace(result.momentum, overall_score=85.0))
+    assert rules._momentum_rule(fine) is not None
+
+
+def test_momentum_security_floor_validated():
+    assert AlertThresholds().momentum_min_security_score == 50.0
+    with pytest.raises(ConfigurationError, match="momentum_min_security_score"):
+        AlertThresholds(momentum_min_security_score=101.0)

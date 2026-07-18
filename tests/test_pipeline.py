@@ -204,3 +204,81 @@ def test_credit_gate_floor_configurable_and_validated():
     assert s.wallet.credit_gate_min_security_score == 70.0
     with pytest.raises(ConfigurationError, match="credit_gate_min_security_score"):
         WalletIntelSettings(credit_gate_min_security_score=101.0)
+
+
+# ---- Credit-gate spend bounds (2026-07-17 review fixes) ----
+
+def gate_pipeline_with_clock(env=None):
+    from datetime import timedelta as _td
+
+    clock = {"now": NOW}
+    wallet = RecordingWallet()
+    settings = Settings.from_env(env=env or {})
+    pipeline = ResearchPipeline(settings, FakeGoPlus(make_profile()),
+                                wallet_service=wallet,
+                                now_func=lambda: clock["now"])
+    return pipeline, wallet, clock
+
+
+def fresh_pair(address, clock_now=None):
+    token = TokenIdentity(chain="solana", address=address, symbol="T")
+    kwargs = dict(GOOD_PAIR_KWARGS, base_token=token, pair_address=f"P{address}")
+    if clock_now is not None:
+        kwargs["pair_created_at"] = clock_now - timedelta(hours=1)
+    return DexPair(**kwargs)
+
+
+async def test_daily_budget_caps_gated_lookups_but_not_forced():
+    env = {"MEMEINTEL_WALLET_CREDIT_GATE_MAX_LOOKUPS_PER_DAY": "2",
+           "MEMEINTEL_WALLET_CREDIT_GATE_COOLDOWN_MINUTES": "0"}
+    pipeline, wallet, clock = gate_pipeline_with_clock(env=env)
+    for i in range(4):
+        await pipeline.analyze_pair(fresh_pair(f"Tok{i}"))
+    assert len(wallet.calls) == 2                       # budget held at 2
+    # Forced lookups (holdings//check/plan) are never starved by the budget.
+    await pipeline.analyze_pair(fresh_pair("Held1"), force_wallet_check=True)
+    assert wallet.calls[-1] == "Held1"
+
+
+async def test_daily_budget_resets_on_the_next_utc_day():
+    env = {"MEMEINTEL_WALLET_CREDIT_GATE_MAX_LOOKUPS_PER_DAY": "1",
+           "MEMEINTEL_WALLET_CREDIT_GATE_COOLDOWN_MINUTES": "0"}
+    pipeline, wallet, clock = gate_pipeline_with_clock(env=env)
+    await pipeline.analyze_pair(fresh_pair("DayA1"))
+    await pipeline.analyze_pair(fresh_pair("DayA2"))
+    assert len(wallet.calls) == 1
+    clock["now"] = NOW + timedelta(days=1)
+    await pipeline.analyze_pair(fresh_pair("DayB1", clock_now=clock["now"]))
+    assert len(wallet.calls) == 2                       # fresh day, fresh budget
+
+
+async def test_cooldown_skips_repeat_lookup_on_the_same_token():
+    env = {"MEMEINTEL_WALLET_CREDIT_GATE_COOLDOWN_MINUTES": "60"}
+    pipeline, wallet, clock = gate_pipeline_with_clock(env=env)
+    await pipeline.analyze_pair(fresh_pair("Hot1"))
+    await pipeline.analyze_pair(fresh_pair("Hot1"))     # recheck 0 min later
+    assert wallet.calls == ["Hot1"]                     # not re-spent
+    clock["now"] = NOW + timedelta(minutes=61)
+    await pipeline.analyze_pair(fresh_pair("Hot1", clock_now=clock["now"]))
+    assert wallet.calls == ["Hot1", "Hot1"]             # cooldown elapsed
+
+
+async def test_forced_lookup_stamps_the_cooldown_for_gated_ones():
+    env = {"MEMEINTEL_WALLET_CREDIT_GATE_COOLDOWN_MINUTES": "60"}
+    pipeline, wallet, clock = gate_pipeline_with_clock(env=env)
+    await pipeline.analyze_pair(fresh_pair("Mix1"), force_wallet_check=True)
+    await pipeline.analyze_pair(fresh_pair("Mix1"))     # gated, 0 min later
+    assert wallet.calls == ["Mix1"]                     # redundant spend avoided
+
+
+def test_spend_bound_settings_validated():
+    import pytest
+    from meme_intelligence.config.settings import WalletIntelSettings
+    from meme_intelligence.core.errors import ConfigurationError
+
+    assert WalletIntelSettings().credit_gate_max_lookups_per_day == 200
+    assert WalletIntelSettings().credit_gate_cooldown_minutes == 60.0
+    with pytest.raises(ConfigurationError, match="max_lookups_per_day"):
+        WalletIntelSettings(credit_gate_max_lookups_per_day=-1)
+    with pytest.raises(ConfigurationError, match="cooldown_minutes"):
+        WalletIntelSettings(credit_gate_cooldown_minutes=-5.0)

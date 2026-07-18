@@ -1471,3 +1471,39 @@ pump.fun population his 1h freshness gate had concentrated on. His call:
 Suite: **837 passing** (+10: 9 pipeline gate tests incl. an empirically
 derived weak-but-not-destructive security fixture at 35.25, 1 controller
 holdings-bypass test).
+
+### Review pass on the 3h + credit-gate build (same day): 3 confirmed findings, all fixed
+
+A 5-agent review (2 finders, 3 adversarial verifiers — operator's agent cap)
+confirmed and fixed:
+
+1. **Momentum alerts had NO security floor** (medium; the review's core
+   find): opportunity tiers require security >= 80, but `_momentum_rule`
+   fired for any non-destructive coin — so a coin scoring 40-49 purely on
+   soft flags (zero rug signals; the verifier constructed one empirically at
+   44.2) could ride bot-painted volume to a delivered MEDIUM momentum alert
+   while the credit gate, by design, skipped its wallet screening. Fixed:
+   `AlertThresholds.momentum_min_security_score` (default 50, aligned with
+   the credit gate's floor; 0 = off). The gate's "below the floor never
+   reaches the phone as a buy signal" justification is now actually true.
+2. **No spend ceiling on gated lookups** (medium): every gate input is
+   attacker-manufacturable (clean-by-construction launches), theoretical
+   drain ~38k metered calls/day. Fixed:
+   `credit_gate_max_lookups_per_day` (default 200/UTC day, warn-once log
+   on exhaustion).
+3. **Watchlist rechecks re-spent on the same hot coin every ~7.5 min**
+   (found in overflow, fixed with #2's machinery):
+   `credit_gate_cooldown_minutes` (default 60) — per-token cooldown;
+   forced lookups stamp it too so a gated lookup right after a forced one
+   is not re-spent. Forced lookups (holdings, /check, plan/report) bypass
+   budget AND cooldown — operator safety is never starved.
+4. **CLI plan/report was silently gated** (overflow): operator-initiated
+   deep research now passes `force_wallet_check=True` like /check.
+
+Accepted limitation (documented, not built): the gate's freshness/ceiling
+conditions also govern a lookup that powers PROTECTIVE whale-exit/insider
+signals, so a watched-but-not-held coin older than 3h loses wallet-based
+whale-exit detection. The protective contract runs through /holding —
+holdings are always fully checked. Revisit only if the operator asks.
+
+Suite: **844 passing** (+7).

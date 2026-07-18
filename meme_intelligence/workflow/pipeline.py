@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable
@@ -95,6 +96,15 @@ class ResearchPipeline:
         self._wallet_service = wallet_service
         self._wallet_settings = settings.wallet
         self._alert_thresholds = settings.alerts
+        # Credit-gate spend bookkeeping (2026-07-17 review): gated lookups
+        # per UTC day, plus a per-token last-lookup stamp for the cooldown.
+        # In-memory by design — a restart resets the day's count, which can
+        # only UNDER-enforce briefly; the budget is a drain bound, not an
+        # accounting ledger (Rule 21).
+        self._wallet_lookup_day: str | None = None
+        self._wallet_lookups_today = 0
+        self._wallet_budget_warned_day: str | None = None
+        self._wallet_last_lookup: "OrderedDict[tuple[str, str], datetime]" = OrderedDict()
         self._jupiter = jupiter_client
         self._liquidity_probe = settings.liquidity_probe
         self._community_client = community_client
@@ -188,7 +198,8 @@ class ResearchPipeline:
         wallet = None
         onchain_profile = derive_onchain_profile(pair, profile)
         if (self._wallet_service is not None and pair.chain in ("solana", "sol")
-                and (force_wallet_check or self._worth_wallet_lookup(pair, security))):
+                and (force_wallet_check or self._gate_allows(pair, security))):
+            self._note_wallet_lookup(pair, forced=force_wallet_check)
             try:
                 data = await self._wallet_service.gather(pair.base_token)
                 wallet = self._wallet.assess(data, pair)
@@ -267,6 +278,55 @@ class ResearchPipeline:
         return result
 
     # ---- Wallet-intelligence credit gate (Rule 11, 2026-07-17 rebuild) ----
+
+    def _gate_allows(self, pair: DexPair, security) -> bool:
+        """Full gate for a NON-forced lookup: candidate quality, then the
+        per-token cooldown, then the daily spend budget (review findings:
+        without these, watchlist rechecks re-spent on the same hot coin every
+        ~7.5 min, and an attacker manufacturing gate-worthy launches had no
+        drain ceiling). Forced lookups (holdings, /check, plan/report) skip
+        this entirely — operator safety is never starved by a budget."""
+        if not self._worth_wallet_lookup(pair, security):
+            return False
+        ws = self._wallet_settings
+        if ws.credit_gate_cooldown_minutes > 0:
+            last = self._wallet_last_lookup.get(self._lookup_key(pair))
+            if (last is not None and (self._now() - last).total_seconds()
+                    < ws.credit_gate_cooldown_minutes * 60.0):
+                return False
+        if ws.credit_gate_max_lookups_per_day > 0:
+            self._roll_wallet_budget_day()
+            if self._wallet_lookups_today >= ws.credit_gate_max_lookups_per_day:
+                if self._wallet_budget_warned_day != self._wallet_lookup_day:
+                    self._wallet_budget_warned_day = self._wallet_lookup_day
+                    self._logger.warning(
+                        "wallet credit-gate daily budget exhausted (%d lookups) — "
+                        "further gated lookups wait for the next UTC day; "
+                        "holdings//check/plan lookups are unaffected",
+                        ws.credit_gate_max_lookups_per_day)
+                return False
+        return True
+
+    def _lookup_key(self, pair: DexPair) -> tuple[str, str]:
+        return (pair.chain, pair.base_token.address.lower())
+
+    def _roll_wallet_budget_day(self) -> None:
+        today = self._now().date().isoformat()
+        if today != self._wallet_lookup_day:
+            self._wallet_lookup_day = today
+            self._wallet_lookups_today = 0
+
+    def _note_wallet_lookup(self, pair: DexPair, *, forced: bool) -> None:
+        """Record a lookup that is about to run: stamp the cooldown (forced
+        ones too — a gated lookup right after a forced one is redundant) and
+        count NON-forced ones against the daily budget."""
+        self._wallet_last_lookup[self._lookup_key(pair)] = self._now()
+        self._wallet_last_lookup.move_to_end(self._lookup_key(pair))
+        while len(self._wallet_last_lookup) > 4096:  # bounded like the scanner caches
+            self._wallet_last_lookup.popitem(last=False)
+        if not forced:
+            self._roll_wallet_budget_day()
+            self._wallet_lookups_today += 1
 
     def _worth_wallet_lookup(self, pair: DexPair, security) -> bool:
         """Is this candidate worth spending metered wallet credits on?

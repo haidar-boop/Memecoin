@@ -237,6 +237,14 @@ class AlertThresholds:
     # concentrated — Rule 8, never punish a coin merely for being new).
     checklist_sell_tax_max_percent: float = 15.0
     checklist_new_launch_minutes: float = 60.0
+    # Security floor for MOMENTUM buy-side alerts (2026-07-17 review finding):
+    # momentum was the one buy-side type with no security bar — the
+    # opportunity tiers require security >= 80, but momentum fired for any
+    # non-destructive coin, letting a 40-49-scoring coin (all soft flags, no
+    # rug signal) ride bot-painted volume to the phone unscreened. Aligned
+    # with the wallet credit gate's floor so "below the floor never reaches
+    # the phone as a buy signal" is actually true. 0 = off (old behavior).
+    momentum_min_security_score: float = 50.0
 
     def __post_init__(self) -> None:
         for name in ("security", "community", "liquidity", "onchain", "overall",
@@ -270,6 +278,8 @@ class AlertThresholds:
                     f"alert threshold '{cap}' ({hi}) must be >= '{floor}' ({lo})")
         _check_range("alert threshold 'checklist_sell_tax_max_percent'",
                      self.checklist_sell_tax_max_percent, 0.0, 100.0)
+        _check_range("alert threshold 'momentum_min_security_score'",
+                     self.momentum_min_security_score, 0.0, 100.0)
 
 
 @dataclass(frozen=True)
@@ -787,12 +797,28 @@ class WalletIntelSettings:
     # ~3 days and 429'd the trading wallet's own balance reads (the incident
     # that got the whole layer turned off 2026-07-11). The pipeline now only
     # spends a lookup on a candidate that could still plausibly earn a
-    # buy-side alert: not destructive, security score at/above this floor
-    # (50 = "Moderate Risk" or better — a coin below it never clears an alert
-    # gate whatever its wallets do), tradeable, and inside the alert engine's
-    # own size ceiling / freshness window. Operator holdings and manual
-    # /check lookups always bypass the gate (deliberate, rare spend).
+    # buy-side alert: not destructive, security score at/above this floor,
+    # tradeable, and inside the alert engine's own size ceiling / freshness
+    # window. The floor is only sound because AlertThresholds.momentum_min_
+    # security_score holds the SAME line on the alert side (review finding:
+    # momentum alerts used to fire with no security bar, so a sub-floor coin
+    # could reach the phone precisely while being exempted from wallet
+    # screening — keep the two floors aligned). Operator holdings, /check,
+    # and plan/report lookups always bypass the gate (deliberate spend).
     credit_gate_min_security_score: float = 50.0
+    # Hard spend bounds (2026-07-17 review findings): every quality input the
+    # gate reads (GoPlus score, liquidity, mcap, pair age) can be manufactured
+    # by an attacker launching clean-by-construction tokens, and without a
+    # budget the theoretical drain was ~38k metered calls/day; separately,
+    # watchlist rechecks (~7.5 min cadence) re-spent a full-price lookup on
+    # the same hot coin every pass. The budget caps gated lookups per UTC day
+    # (0 = unlimited); the cooldown skips a repeat lookup on the SAME token
+    # inside the window (0 = off). Forced lookups (operator holdings, /check,
+    # plan/report) bypass both — operator safety is never starved by a
+    # budget — but still stamp the cooldown so a gated lookup right after a
+    # forced one is not re-spent.
+    credit_gate_max_lookups_per_day: int = 200
+    credit_gate_cooldown_minutes: float = 60.0
 
     def __post_init__(self) -> None:
         for name in ("whale_min_percent", "risk_whale_percent", "top_holders_limit",
@@ -802,6 +828,15 @@ class WalletIntelSettings:
                 raise ConfigurationError(f"wallet setting '{name}' must be positive")
         _check_range("wallet credit_gate_min_security_score",
                      self.credit_gate_min_security_score, 0.0, 100.0)
+        if self.credit_gate_max_lookups_per_day < 0:
+            raise ConfigurationError(
+                "wallet credit_gate_max_lookups_per_day must be >= 0 (0 = unlimited), "
+                f"got {self.credit_gate_max_lookups_per_day}")
+        if (not math.isfinite(self.credit_gate_cooldown_minutes)
+                or self.credit_gate_cooldown_minutes < 0):
+            raise ConfigurationError(
+                "wallet credit_gate_cooldown_minutes must be >= 0 (0 = off), "
+                f"got {self.credit_gate_cooldown_minutes}")
         for name in ("artificial_same_size_fraction", "dominant_buyer_volume_fraction"):
             if not (0 < getattr(self, name) <= 1):
                 raise ConfigurationError(f"wallet setting '{name}' must be within (0, 1]")
