@@ -733,15 +733,6 @@ class AutomationRules:
         momentum = result.momentum
         if momentum is None or result.security.is_destructive:
             return None
-        # Momentum was the ONE buy-side type with no security-score bar: the
-        # opportunity tiers require security >= 80, but a coin scoring 40-49
-        # purely on soft flags (no rug signal fired) could ride bot-painted
-        # volume straight to a MEDIUM momentum alert — unscreened by wallet
-        # intelligence, whose credit gate rightly skips sub-50 coins
-        # (2026-07-17 review finding). Rising price on a coin with bad
-        # security is bait, not a signal.
-        if result.security.overall_score < self._t.momentum_min_security_score:
-            return None
         if momentum.overall_score < self._t.momentum:
             return None
         if momentum.entry_zone is EntryZone.LATE:

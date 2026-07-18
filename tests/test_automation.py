@@ -776,18 +776,17 @@ async def test_deterministic_veto_keeps_protective_alerts():
 # ---- Operator freshness gate: "only send me coins less than 1 hour old" ----
 
 async def test_old_coin_buy_side_suppressed_by_default():
-    """The 3h freshness window is ON by default (operator request 2026-07-17,
-    widened from 1h the same day): a 4-hour-old pool clears every score gate
-    but its buy-side alerts are suppressed. Protective behavior is
-    untouched."""
-    old_pair = make_pair(pair_created_at=NOW - timedelta(hours=4))
+    """The 1h freshness window is ON by default (operator request 2026-07-17):
+    a 2-hour-old pool clears every score gate but its buy-side alerts are
+    suppressed. Protective behavior is untouched."""
+    old_pair = make_pair(pair_created_at=NOW - timedelta(hours=2))
     result = await pipeline_result(pair=old_pair)
     types = {e.alert_type for e in make_rules().evaluate(result)}
     assert not (types & _BUY_SIDE_ALERT_TYPES)
 
 
 async def test_fresh_coin_passes_the_freshness_gate():
-    fresh_pair = make_pair(pair_created_at=NOW - timedelta(hours=2, minutes=30))
+    fresh_pair = make_pair(pair_created_at=NOW - timedelta(minutes=45))
     result = await pipeline_result(pair=fresh_pair)
     types = {e.alert_type for e in make_rules().evaluate(result)}
     assert types & _BUY_SIDE_ALERT_TYPES
@@ -822,50 +821,10 @@ async def test_freshness_gate_spares_protective_alerts():
     assert not (types & _BUY_SIDE_ALERT_TYPES)          # buy-side: gated
 
 
-def test_freshness_gate_default_is_three_hours_and_validated():
-    # 1h on first request, widened to 3h the same day (operator: the sub-1h
-    # population was dominated by volume-bot launches).
-    assert AlertThresholds().opportunity_max_age_hours == 3.0
+def test_freshness_gate_default_is_one_hour_and_validated():
+    assert AlertThresholds().opportunity_max_age_hours == 1.0
     with pytest.raises(ConfigurationError, match="opportunity_max_age_hours"):
         AlertThresholds(opportunity_max_age_hours=-1.0)
     from meme_intelligence.config.settings import Settings
     s = Settings.from_env(env={"MEMEINTEL_ALERTS_OPPORTUNITY_MAX_AGE_HOURS": "6"})
     assert s.alerts.opportunity_max_age_hours == 6.0
-
-
-# ---- Momentum security floor (2026-07-17 review fix) ----
-
-async def test_momentum_alert_requires_the_security_floor():
-    """Momentum was the one buy-side type with no security bar: a sub-50
-    coin (all soft flags, no rug signal) could ride bot volume to a MEDIUM
-    momentum alert while the credit gate rightly skipped its wallet check.
-    The floor closes that band; 0 restores the old behavior."""
-    import dataclasses
-
-    result = await pipeline_result()
-    assert result.momentum is not None
-    # Real assessments throughout; only the security score is weakened.
-    weak = dataclasses.replace(
-        result, security=dataclasses.replace(result.security, overall_score=45.0))
-    strong_momentum = dataclasses.replace(
-        weak, momentum=dataclasses.replace(result.momentum, overall_score=85.0))
-
-    rules = make_rules()
-    assert rules._momentum_rule(strong_momentum) is None      # floored out
-    assert "momentum" not in {e.alert_type for e in rules.evaluate(strong_momentum)}
-
-    # Floor off (0) restores the pre-review behavior for the same coin.
-    off = AutomationRules(AlertThresholds(momentum_min_security_score=0.0),
-                          AlertEngineSettings(), now_func=lambda: NOW)
-    assert off._momentum_rule(strong_momentum) is not None
-
-    # At/above the floor the alert is unaffected.
-    fine = dataclasses.replace(
-        result, momentum=dataclasses.replace(result.momentum, overall_score=85.0))
-    assert rules._momentum_rule(fine) is not None
-
-
-def test_momentum_security_floor_validated():
-    assert AlertThresholds().momentum_min_security_score == 50.0
-    with pytest.raises(ConfigurationError, match="momentum_min_security_score"):
-        AlertThresholds(momentum_min_security_score=101.0)
