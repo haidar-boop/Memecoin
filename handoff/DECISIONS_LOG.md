@@ -1436,3 +1436,38 @@ mirroring the ceiling's convention). Generic test fixtures moved from a
 tests (default-on suppression, fresh pass-through, unknown age, 0=off,
 protective exemption, config validation). Suite: **827 passing** (821
 restored + 6).
+
+## 2026-07-17 (later) — 3-hour freshness window + wallet intelligence rebuilt with the credit gate
+
+Operator reported buy-side alerts full of "unusual graphs like a robot is
+controlling it" — volume-bot/bundler launches, which dominate the sub-1h
+pump.fun population his 1h freshness gate had concentrated on. His call:
+"Make it three hours and build a wallet intelligents thing."
+
+1. **opportunity_max_age_hours default 1.0 -> 3.0.** Most bot-run launches
+   collapse or dump inside the first hour; a coin still healthy at 2-3h is
+   likelier organic. Same gate semantics (buy-side only, protective alerts
+   exempt, unknown age never trips).
+2. **Wallet-intelligence credit gate rebuilt** (the 2026-07-15 design,
+   re-implemented on the restored 2026-07-13 tree — the original was
+   content-deleted by the restore): `WalletIntelSettings.credit_gate_min_
+   security_score` (default 50, env-configurable); `ResearchPipeline._worth_
+   wallet_lookup` spends a metered lookup only on a candidate that could
+   still earn a buy-side alert (not destructive, score >= floor, tradeable,
+   inside the alert engine's own ceiling AND the 3h freshness window —
+   deliberately the same thresholds the alert engine enforces, so no lookup
+   is ever spent on a coin the operator can never be pitched);
+   `force_wallet_check` bypass threaded through all 5 controller call
+   sites (holdings always checked; /check always checks). Wallet
+   intelligence is the layer with the purpose-built bot-chart detectors
+   (identical-size trade fraction, dominant-buyer volume fraction) — with
+   the gate, re-enabling it costs a handful of lookups per day instead of
+   one per analyzed token (the 2026-07-11 credit-burn incident).
+   The monitor flag stays operator-controlled in .env; flipping it on is
+   part of the deploy block. Until the Helius account's monthly credits
+   reset, gated lookups will fail gracefully (429) and analysis continues
+   without wallet data — it starts working the moment credits return.
+
+Suite: **837 passing** (+10: 9 pipeline gate tests incl. an empirically
+derived weak-but-not-destructive security fixture at 35.25, 1 controller
+holdings-bypass test).

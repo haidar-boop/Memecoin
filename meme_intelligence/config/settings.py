@@ -218,8 +218,12 @@ class AlertThresholds:
     # warnings still fire (an old coin the operator holds can still rug), and
     # an UNKNOWN pool age never trips the gate (Rule 8 — absent data is not
     # evidence of age; same convention as the size ceiling above). ON by
-    # default at 1 hour per the operator's explicit request; 0 = OFF.
-    opportunity_max_age_hours: float = 1.0
+    # default per the operator's explicit request — first 1h (2026-07-17),
+    # widened to 3h the same day ("Make it three hours": the under-1h window
+    # was dominated by volume-bot/bundler launches painting robot charts;
+    # coins that still look good a couple hours in are likelier real).
+    # 0 = OFF.
+    opportunity_max_age_hours: float = 3.0
     # Safety checklist (operator rule 2026-07-12): a buy-side alert now SENDS
     # even when a soft check falls short — the checklist rides ON the alert so
     # the operator sees what missed and decides. Only the rug engine's COMBINED
@@ -776,6 +780,19 @@ class WalletIntelSettings:
     dominant_buyer_volume_fraction: float = 0.60  # one wallet above = artificial demand
     min_buy_volume_for_dominance_usd: float = 500.0  # below this, dominance is meaningless dust
     enable_in_monitor: bool = False       # wallet calls in the continuous scanner
+    # Credit gate (2026-07-17, rebuilt after the snapshot restore; original
+    # build 2026-07-15): a wallet lookup spends real, metered Helius/Birdeye
+    # credits. Wired unconditionally, it used to run on EVERY analyzed Solana
+    # token in the 24/7 monitor — that exhausted the free Helius tier within
+    # ~3 days and 429'd the trading wallet's own balance reads (the incident
+    # that got the whole layer turned off 2026-07-11). The pipeline now only
+    # spends a lookup on a candidate that could still plausibly earn a
+    # buy-side alert: not destructive, security score at/above this floor
+    # (50 = "Moderate Risk" or better — a coin below it never clears an alert
+    # gate whatever its wallets do), tradeable, and inside the alert engine's
+    # own size ceiling / freshness window. Operator holdings and manual
+    # /check lookups always bypass the gate (deliberate, rare spend).
+    credit_gate_min_security_score: float = 50.0
 
     def __post_init__(self) -> None:
         for name in ("whale_min_percent", "risk_whale_percent", "top_holders_limit",
@@ -783,6 +800,8 @@ class WalletIntelSettings:
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
                 raise ConfigurationError(f"wallet setting '{name}' must be positive")
+        _check_range("wallet credit_gate_min_security_score",
+                     self.credit_gate_min_security_score, 0.0, 100.0)
         for name in ("artificial_same_size_fraction", "dominant_buyer_volume_fraction"):
             if not (0 < getattr(self, name) <= 1):
                 raise ConfigurationError(f"wallet setting '{name}' must be within (0, 1]")

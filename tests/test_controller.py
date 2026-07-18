@@ -17,9 +17,9 @@ NOW = datetime(2026, 7, 8, 12, 0, tzinfo=timezone.utc)
 SETTINGS = Settings.from_env(env={})
 
 
-def make_pair(address="TokenA", symbol="MEMA") -> DexPair:
+def make_pair(address="TokenA", symbol="MEMA", **overrides) -> DexPair:
     token = TokenIdentity(chain="solana", address=address, symbol=symbol)
-    return DexPair(
+    defaults = dict(
         chain="solana", pair_address=f"Pool{address}", base_token=token,
         market_cap=400_000.0, fdv=420_000.0, liquidity_usd=90_000.0,
         volume_24h=120_000.0, volume_1h=8_000.0,
@@ -28,6 +28,8 @@ def make_pair(address="TokenA", symbol="MEMA") -> DexPair:
         price_change_24h=15.0, price_change_6h=8.0, price_change_1h=2.0,
         pair_created_at=NOW - timedelta(minutes=30),
     )
+    defaults.update(overrides)
+    return DexPair(**defaults)
 
 
 def clean_profile(token: TokenIdentity) -> SecurityProfile:
@@ -1557,3 +1559,49 @@ async def test_rug_screen_now_covers_momentum_and_medium_alerts_too():
     # With the blacklisted deployer, the SAME fixture must now be fully
     # suppressed -- proof the free screen ran even though no HIGH tier fired.
     assert not any(e.alert_type in _BUY_SIDE_ALERT_TYPES for e in sink.sent)
+
+
+# ---- Wallet-intelligence credit gate in the scan loop (2026-07-17) ----
+
+async def test_credit_gate_skips_wallet_lookup_on_stale_candidate():
+    """A scanned coin outside the freshness window gets no wallet spend."""
+    class RecordingWallet:
+        def __init__(self):
+            self.calls = []
+
+        async def gather(self, token):
+            self.calls.append(token.address)
+            raise TransientCollectorError("no data in tests")
+
+    stale_pair = make_pair(pair_created_at=NOW - timedelta(hours=6))
+    settings = Settings.from_env(env={"MEMEINTEL_WALLET_ENABLE_IN_MONITOR": "true"})
+    wallet = RecordingWallet()
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        notifier = NotificationEngine([RecordingSink()], AlertEngineSettings(),
+                                      time_func=lambda: 0.0)
+
+        async def fake_sleep(seconds): ...
+
+        scanner = ContinuousScanner(
+            settings, storage, notifier,
+            gecko_client=FakeGecko([stale_pair]),
+            goplus_client=FakeGoPlus(
+                {stale_pair.base_token.address: clean_profile(stale_pair.base_token)}),
+            wallet_service=wallet,
+            now_func=lambda: NOW, sleep_func=fake_sleep,
+        )
+        await scanner.run(max_cycles=1)
+        assert wallet.calls == []                    # gate held: no spend
+
+        # The SAME stale coin, held by the operator, bypasses the gate.
+        storage.set_holding(stale_pair.base_token, note="test")
+        scanner2 = ContinuousScanner(
+            settings, storage, notifier,
+            gecko_client=FakeGecko([stale_pair]),
+            goplus_client=FakeGoPlus(
+                {stale_pair.base_token.address: clean_profile(stale_pair.base_token)}),
+            wallet_service=wallet,
+            now_func=lambda: NOW, sleep_func=fake_sleep,
+        )
+        await scanner2.run(max_cycles=1)
+        assert wallet.calls == [stale_pair.base_token.address]   # holding: always checked

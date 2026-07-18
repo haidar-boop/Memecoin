@@ -776,17 +776,18 @@ async def test_deterministic_veto_keeps_protective_alerts():
 # ---- Operator freshness gate: "only send me coins less than 1 hour old" ----
 
 async def test_old_coin_buy_side_suppressed_by_default():
-    """The 1h freshness window is ON by default (operator request 2026-07-17):
-    a 2-hour-old pool clears every score gate but its buy-side alerts are
-    suppressed. Protective behavior is untouched."""
-    old_pair = make_pair(pair_created_at=NOW - timedelta(hours=2))
+    """The 3h freshness window is ON by default (operator request 2026-07-17,
+    widened from 1h the same day): a 4-hour-old pool clears every score gate
+    but its buy-side alerts are suppressed. Protective behavior is
+    untouched."""
+    old_pair = make_pair(pair_created_at=NOW - timedelta(hours=4))
     result = await pipeline_result(pair=old_pair)
     types = {e.alert_type for e in make_rules().evaluate(result)}
     assert not (types & _BUY_SIDE_ALERT_TYPES)
 
 
 async def test_fresh_coin_passes_the_freshness_gate():
-    fresh_pair = make_pair(pair_created_at=NOW - timedelta(minutes=45))
+    fresh_pair = make_pair(pair_created_at=NOW - timedelta(hours=2, minutes=30))
     result = await pipeline_result(pair=fresh_pair)
     types = {e.alert_type for e in make_rules().evaluate(result)}
     assert types & _BUY_SIDE_ALERT_TYPES
@@ -821,8 +822,10 @@ async def test_freshness_gate_spares_protective_alerts():
     assert not (types & _BUY_SIDE_ALERT_TYPES)          # buy-side: gated
 
 
-def test_freshness_gate_default_is_one_hour_and_validated():
-    assert AlertThresholds().opportunity_max_age_hours == 1.0
+def test_freshness_gate_default_is_three_hours_and_validated():
+    # 1h on first request, widened to 3h the same day (operator: the sub-1h
+    # population was dominated by volume-bot launches).
+    assert AlertThresholds().opportunity_max_age_hours == 3.0
     with pytest.raises(ConfigurationError, match="opportunity_max_age_hours"):
         AlertThresholds(opportunity_max_age_hours=-1.0)
     from meme_intelligence.config.settings import Settings

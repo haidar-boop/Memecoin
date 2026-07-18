@@ -77,3 +77,130 @@ async def test_pipeline_without_jupiter_client_is_unchanged():
     assert result.security_profile.live_buy_route_found is None
     assert result.security_profile.live_sell_route_found is None
     assert not result.security.is_destructive
+
+
+# ---- Wallet-intelligence credit gate (Rule 11, 2026-07-17 rebuild) ----
+
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+NOW = datetime(2026, 7, 8, 12, 0, tzinfo=timezone.utc)
+
+# A small, fresh, clean candidate — the profile the credit gate SHOULD
+# spend a wallet lookup on (inside the 3h freshness window and under any
+# ceiling; scores well above the 50 floor).
+GOOD_PAIR_KWARGS = dict(
+    chain="solana", pair_address="PairG", base_token=TOKEN,
+    market_cap=80_000.0, liquidity_usd=45_000.0, volume_24h=20_000.0,
+    pair_created_at=NOW - timedelta(hours=1),
+)
+
+# Weak but NOT destructive: empirically scores ~35 with SecurityAnalyzer —
+# below the credit gate's 50 floor, above nothing that would abort analysis.
+WEAK_PROFILE_KWARGS = dict(
+    token=TOKEN, source="goplus",
+    is_honeypot=False, cannot_buy=False, cannot_sell_all=False,
+    is_open_source=False, is_proxy=True, is_mintable=True,
+    ownership_renounced=False, hidden_owner=True, can_take_back_ownership=True,
+    has_blacklist=True, trading_pausable=True, is_freezable=True,
+    balance_mutable=False, selfdestruct=False,
+    buy_tax_percent=8.0, sell_tax_percent=14.0, tax_modifiable=True,
+    fake_token=False, is_airdrop_scam=False, anti_whale_modifiable=True,
+    slippage_modifiable=True, personal_slippage_modifiable=True,
+    trading_cooldown=True, honeypot_same_creator_count=0,
+    holder_count=25, top_holder_percent=25.0, top10_holder_percent=80.0,
+    creator_percent=12.0, owner_percent=9.0, lp_locked_percent=5.0,
+)
+
+
+class RecordingWallet:
+    """WalletDataService stand-in that records whether it was asked to spend."""
+
+    def __init__(self):
+        self.calls: list[str] = []
+
+    async def gather(self, token):
+        self.calls.append(token.address)
+        from meme_intelligence.core.errors import CollectorError
+        raise CollectorError("no real data in tests")  # analysis continues
+
+
+def gate_pipeline(profile=None, env=None):
+    wallet = RecordingWallet()
+    settings = Settings.from_env(env=env or {})
+    pipeline = ResearchPipeline(settings, FakeGoPlus(profile or make_profile()),
+                                wallet_service=wallet, now_func=lambda: NOW)
+    return pipeline, wallet
+
+
+async def test_wallet_lookup_runs_for_a_small_fresh_clean_candidate():
+    pipeline, wallet = gate_pipeline()
+    result = await pipeline.analyze_pair(DexPair(**GOOD_PAIR_KWARGS))
+    assert result is not None
+    assert wallet.calls == [TOKEN.address]          # gate opened: worth the spend
+
+
+async def test_wallet_lookup_skipped_when_too_old():
+    pipeline, wallet = gate_pipeline()
+    stale = dict(GOOD_PAIR_KWARGS, pair_created_at=NOW - timedelta(hours=5))
+    result = await pipeline.analyze_pair(DexPair(**stale))
+    assert result is not None                        # analysis still complete
+    assert wallet.calls == []                        # but no credits spent
+
+
+async def test_wallet_lookup_skipped_when_untradeable():
+    pipeline, wallet = gate_pipeline()
+    dead = dict(GOOD_PAIR_KWARGS, liquidity_usd=None, market_cap=None)
+    await pipeline.analyze_pair(DexPair(**dead))
+    assert wallet.calls == []
+
+
+async def test_wallet_lookup_skipped_when_oversized():
+    env = {"MEMEINTEL_ALERTS_OPPORTUNITY_MAX_LIQUIDITY_USD": "50000"}
+    pipeline, wallet = gate_pipeline(env=env)
+    big = dict(GOOD_PAIR_KWARGS, liquidity_usd=2_800_000.0)
+    await pipeline.analyze_pair(DexPair(**big))
+    assert wallet.calls == []
+
+
+async def test_wallet_lookup_skipped_below_security_score_floor():
+    pipeline, wallet = gate_pipeline(profile=SecurityProfile(**WEAK_PROFILE_KWARGS))
+    result = await pipeline.analyze_pair(DexPair(**GOOD_PAIR_KWARGS))
+    assert result is not None
+    assert not result.security.is_destructive        # weak, not invalid
+    assert result.security.overall_score < 50.0      # fixture sanity
+    assert wallet.calls == []
+
+
+async def test_wallet_lookup_skipped_when_destructive():
+    pipeline, wallet = gate_pipeline(profile=make_profile(is_honeypot=True))
+    await pipeline.analyze_pair(DexPair(**GOOD_PAIR_KWARGS))
+    assert wallet.calls == []
+
+
+async def test_force_wallet_check_bypasses_the_gate():
+    """Operator holdings and manual /check lookups always get wallet data —
+    the deliberate, rare spend the gate must not block."""
+    pipeline, wallet = gate_pipeline(profile=SecurityProfile(**WEAK_PROFILE_KWARGS))
+    stale = dict(GOOD_PAIR_KWARGS, pair_created_at=NOW - timedelta(days=2))
+    await pipeline.analyze_pair(DexPair(**stale), force_wallet_check=True)
+    assert wallet.calls == [TOKEN.address]
+
+
+async def test_unknown_age_does_not_block_the_lookup():
+    pipeline, wallet = gate_pipeline()
+    ageless = dict(GOOD_PAIR_KWARGS, pair_created_at=None)
+    await pipeline.analyze_pair(DexPair(**ageless))
+    assert wallet.calls == [TOKEN.address]           # Rule 8: unknown != old
+
+
+def test_credit_gate_floor_configurable_and_validated():
+    import pytest
+    from meme_intelligence.config.settings import WalletIntelSettings
+    from meme_intelligence.core.errors import ConfigurationError
+
+    assert WalletIntelSettings().credit_gate_min_security_score == 50.0
+    s = Settings.from_env(
+        env={"MEMEINTEL_WALLET_CREDIT_GATE_MIN_SECURITY_SCORE": "70"})
+    assert s.wallet.credit_gate_min_security_score == 70.0
+    with pytest.raises(ConfigurationError, match="credit_gate_min_security_score"):
+        WalletIntelSettings(credit_gate_min_security_score=101.0)

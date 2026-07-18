@@ -10,6 +10,7 @@ per module; Rule 18: extend, don't duplicate).
 from __future__ import annotations
 
 import dataclasses
+import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable
@@ -92,6 +93,8 @@ class ResearchPipeline:
     ) -> None:
         self._goplus = goplus_client
         self._wallet_service = wallet_service
+        self._wallet_settings = settings.wallet
+        self._alert_thresholds = settings.alerts
         self._jupiter = jupiter_client
         self._liquidity_probe = settings.liquidity_probe
         self._community_client = community_client
@@ -120,6 +123,7 @@ class ResearchPipeline:
         *,
         narrative_inputs: NarrativeInputs | None = None,
         research_mode: ResearchMode = ResearchMode.STANDARD,
+        force_wallet_check: bool = False,
     ) -> PipelineResult | None:
         """Full chain for one pair; ``None`` when security data is unavailable
         (a token that cannot be security-screened is not analyzable — Part 4).
@@ -173,10 +177,18 @@ class ResearchPipeline:
             return None
 
         # Wallet intelligence (Part 17): Solana-only, costs metered credits,
-        # so it only runs when a wallet service was provided (Rule 10).
+        # so it only runs when a wallet service was provided (Rule 10) AND
+        # the candidate clears the credit gate — a coin that could never earn
+        # a buy-side alert anyway (destructive, weak security, untradeable,
+        # oversized, or past the freshness window) does not get real money
+        # spent on its wallets (Rule 11; 2026-07-17 rebuild of the 07-15
+        # gate). ``force_wallet_check`` bypasses the gate for operator
+        # holdings and manual /check lookups — the deliberate, rare spend
+        # the gate is not meant to block.
         wallet = None
         onchain_profile = derive_onchain_profile(pair, profile)
-        if self._wallet_service is not None and pair.chain in ("solana", "sol"):
+        if (self._wallet_service is not None and pair.chain in ("solana", "sol")
+                and (force_wallet_check or self._worth_wallet_lookup(pair, security))):
             try:
                 data = await self._wallet_service.gather(pair.base_token)
                 wallet = self._wallet.assess(data, pair)
@@ -253,6 +265,51 @@ class ResearchPipeline:
         if self._ai is not None and not security.is_destructive:
             result = await self._enrich_with_ai(result, research_mode)
         return result
+
+    # ---- Wallet-intelligence credit gate (Rule 11, 2026-07-17 rebuild) ----
+
+    def _worth_wallet_lookup(self, pair: DexPair, security) -> bool:
+        """Is this candidate worth spending metered wallet credits on?
+
+        Mirrors the alert engine's own buy-side suppression checks: a coin
+        that is destructive, below the security floor, untradeable, past the
+        operator's size ceiling, or past the freshness window can never earn
+        a buy-side alert — so a wallet lookup on it is money spent on a coin
+        the operator will never be pitched. Unknown liquidity/mcap counts as
+        untradeable (a lookup you cannot act on is not worth paying for);
+        unknown age does NOT trip the age check (Rule 8, matching
+        ``AutomationRules._too_old``).
+        """
+        if security.is_destructive:
+            return False
+        if security.overall_score < self._wallet_settings.credit_gate_min_security_score:
+            return False
+        liq, mcap = pair.liquidity_usd, pair.market_cap
+        if liq is None or not math.isfinite(liq) or liq <= 0.0:
+            return False
+        if mcap is None or not math.isfinite(mcap) or mcap <= 0.0:
+            return False
+        t = self._alert_thresholds
+        if t.opportunity_max_liquidity_usd > 0.0 and liq > t.opportunity_max_liquidity_usd:
+            return False
+        if t.opportunity_max_market_cap_usd > 0.0 and mcap > t.opportunity_max_market_cap_usd:
+            return False
+        max_age = t.opportunity_max_age_hours
+        if max_age > 0.0:
+            age = self._pair_age_hours(pair)
+            if age is not None and age > max_age:
+                return False
+        return True
+
+    def _pair_age_hours(self, pair: DexPair) -> float | None:
+        """Pool age in hours, or None when unknown/bad (never a gate trip)."""
+        created = pair.pair_created_at
+        if created is None:
+            return None
+        try:
+            return (self._now() - created).total_seconds() / 3600.0
+        except Exception:  # noqa: BLE001 — a bad timestamp must never break analysis
+            return None
 
     # ---- AI enrichment (Part 23) ----
 
