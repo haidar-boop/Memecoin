@@ -125,11 +125,13 @@ def _fits(callback_data: str) -> bool:
     return len(callback_data.encode()) <= _CALLBACK_DATA_MAX_BYTES
 
 
-def feedback_keyboard(address: str, *, buy_presets: tuple[float, ...] = ()) -> dict | None:
+def feedback_keyboard(address: str, *, buy_percents: tuple[float, ...] = ()) -> dict | None:
     """Inline buttons for one alert: 👍/👎 feedback, a one-tap copy-address
-    button, and — when ``buy_presets`` is non-empty (trading enabled) — a row
-    of one-tap buy buttons plus a Dump button. Returns ``None`` when no valid
-    keyboard can be built."""
+    button, and — when ``buy_percents`` is non-empty (trading enabled) — a row
+    of one-tap buy buttons sized as a PERCENT of the trading wallet's balance
+    (resolved live at tap time, never baked into the button — 2026-07-18,
+    replaces the old fixed-SOL-amount presets) plus a Dump button. Returns
+    ``None`` when no valid keyboard can be built."""
     if not address or not _fits(f"fb:1:{address}"):
         return None
     keyboard = [[
@@ -140,12 +142,12 @@ def feedback_keyboard(address: str, *, buy_presets: tuple[float, ...] = ()) -> d
     if copy_button is not None:
         keyboard.append([copy_button])
     buy_row = [
-        {"text": f"Buy {amount:g}◎", "callback_data": f"buy:{address}:{amount:g}"}
-        for amount in buy_presets if _fits(f"buy:{address}:{amount:g}")
+        {"text": f"Buy {pct:g}%", "callback_data": f"buy:{address}:pct:{pct:g}"}
+        for pct in buy_percents if _fits(f"buy:{address}:pct:{pct:g}")
     ]
     if buy_row:
         keyboard.append(buy_row)
-    if buy_presets and _fits(f"dump:{address}"):
+    if buy_percents and _fits(f"dump:{address}"):
         keyboard.append([{"text": "💥 Dump all", "callback_data": f"dump:{address}"}])
     return {"inline_keyboard": keyboard}
 
@@ -204,7 +206,7 @@ class TelegramSink(BaseCollector):
         *,
         routes: dict[str, str] | None = None,
         min_priority: AlertPriority = AlertPriority.MEDIUM,
-        buy_presets_sol: tuple[float, ...] = (),  # non-empty -> show Buy/Dump buttons
+        buy_button_percents: tuple[float, ...] = (),  # non-empty -> show Buy/Dump buttons
         **kwargs,
     ) -> None:
         kwargs.setdefault("name", "telegram")
@@ -215,7 +217,7 @@ class TelegramSink(BaseCollector):
         self._chat_id = chat_id
         self._routes = routes or {}
         self._min_rank = _PRIORITY_RANK[min_priority]
-        self._buy_presets = tuple(buy_presets_sol)
+        self._buy_percents = tuple(buy_button_percents)
 
     async def send(self, event: AlertEvent) -> bool | None:
         """True = delivered, False = FAILED, None = filtered by min-priority.
@@ -237,7 +239,7 @@ class TelegramSink(BaseCollector):
         # buy button only when the operator flipped the execution flag). The
         # sink and the command listener are separate objects — feedback flows
         # back through the listener and lands in storage; no shared state.
-        markup = feedback_keyboard(event.token.address, buy_presets=self._buy_presets)
+        markup = feedback_keyboard(event.token.address, buy_percents=self._buy_percents)
         if markup is not None:
             json_body["reply_markup"] = markup
         try:

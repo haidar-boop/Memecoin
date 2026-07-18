@@ -1436,3 +1436,45 @@ mirroring the ceiling's convention). Generic test fixtures moved from a
 tests (default-on suppression, fresh pass-through, unknown age, 0=off,
 protective exemption, config validation). Suite: **827 passing** (821
 restored + 6).
+
+## 2026-07-18 — Buy buttons: percent-of-balance instead of fixed SOL presets
+
+Operator request: "remove the 0.01 and the 0.04 SOL [buttons] and replace
+it with percentages. Like 20% of my sol, 50% 75% and 100%." (The fixed
+presets didn't scale — a $0.05 SOL preset means something different at a
+0.1 SOL balance than at a 1 SOL one, and the operator wants to size
+relative to what's actually in the wallet.)
+
+**Built:**
+- `ExecutionSettings.buy_button_percents` (default `"20,50,75,100"`,
+  replaces the removed `buy_presets_sol`) — validated to (0, 100] each.
+- `LiveExecutor.get_spendable_balance_sol()` / `DryRunExecutor.
+  get_spendable_balance_sol()`: a live RPC balance read MINUS the same
+  fee/rent buffer `execute_buy` always reserves, so a 100% tap computes an
+  amount that can actually clear `execute_buy`'s own balance re-check
+  instead of being refused for lacking fee money. Dry-run honestly returns
+  `None` (no real wallet exists — Rule 8, never fabricate a balance).
+- `feedback_keyboard`/`TelegramSink`: buttons now read "Buy 20%" / "Buy
+  50%" / etc., callback data `buy:<address>:pct:<percent>`.
+- `_handle_buy`: resolves the percent against a FRESH balance lookup at
+  the moment the button is tapped (never at alert-render time — the
+  balance moves) — `sol_amount = spendable_balance * (percent/100)` —
+  then proceeds through the EXACT same `_do_buy` path as before. The
+  `buy:<address>:<sol>` legacy callback format is still accepted (Rule
+  3/18) so any button on an alert already delivered before this change
+  keeps working; only newly rendered alerts show percentage buttons.
+- Deliberately did NOT touch: `max_buy_sol` (still a hard per-trade
+  ceiling — a computed percentage that exceeds it is refused, exactly like
+  a too-large fixed amount always was), the `/buy <address> <sol>` manual
+  text command (unchanged — explicit amount, operator's call), or the
+  balance re-check inside `execute_buy` (still authoritative; the
+  percentage lookup is a sizing convenience, not a new spend path).
+
+Operator flagged during this same session: wallet tracking stays OFF by
+design (his call, unrelated to this change) — the July 11 credit-exhaustion
+incident is reason enough not to revisit it without him asking.
+
+Suite: **840 passing** (+13: executor balance/fee-buffer tests, keyboard/
+sink rendering tests, telegram callback-handling tests including legacy-
+format backward compatibility, double-tap, and off-guard-before-lookup
+ordering).

@@ -930,29 +930,55 @@ class TelegramCommandListener(BaseCollector):
         return f"Feedback recorded: {'👍' if verdict == 'up' else '👎'} (advisory)"
 
     async def _handle_buy(self, data: str, dedup_id=None) -> str:
-        """Callback ``buy:<address>:<sol>`` — an alert's preset buy button.
+        """Callback ``buy:<address>:pct:<percent>`` — an alert's one-tap buy
+        button, sized as a percent of the trading wallet's CURRENT spendable
+        balance (2026-07-18, operator request — replaces the old fixed-SOL
+        presets so the buttons scale with the wallet instead of a stale
+        round number). ``buy:<address>:<sol>`` — the pre-percentage format —
+        is still accepted so a button on an alert already delivered before
+        this change keeps working (Rule 3/18); only NEWLY rendered alerts
+        show percentage buttons.
 
         Unlike the text commands (D4), a callback ack is a small popup, not a
         chat message — a stale/disabled button must not spam the chat, so a
         guard failure returns ack-only. A real trade replies with the full
         result AND returns a short ack (the popup can't hold a Solscan link)."""
-        parts = data.split(":", 2)
-        if len(parts) != 3 or classify_address(parts[1]) is None:
+        parts = data.split(":")
+        if len(parts) < 3 or classify_address(parts[1]) is None:
             return "Invalid buy button."
-        try:
-            sol_amount = float(parts[2])
-        except ValueError:
-            return "Invalid buy amount."
-        if not math.isfinite(sol_amount) or sol_amount <= 0:
-            return "Invalid buy amount."
+        address = parts[1]
+        is_percent = len(parts) == 4 and parts[2] == "pct"
+        if not is_percent and len(parts) != 3:
+            return "Invalid buy button."
         guard = self._trading_guard()
         if guard:
             return guard
-        # Claimed AFTER the guard (so a guard-off tap isn't consumed) and
-        # BEFORE execution — a repeat tap of this button is rejected here.
+        if is_percent:
+            try:
+                percent = float(parts[3])
+            except ValueError:
+                return "Invalid buy percentage."
+            if not math.isfinite(percent) or not (0.0 < percent <= 100.0):
+                return "Invalid buy percentage."
+            balance = await self._ctx.executor.get_spendable_balance_sol()
+            if balance is None:
+                return ("Can't size a percentage buy right now — the trading "
+                        "wallet balance is unavailable. Try /buy <address> <sol> instead.")
+            if balance <= 0:
+                return "Trading wallet has no spendable SOL right now."
+            sol_amount = balance * (percent / 100.0)
+        else:
+            try:
+                sol_amount = float(parts[2])
+            except ValueError:
+                return "Invalid buy amount."
+            if not math.isfinite(sol_amount) or sol_amount <= 0:
+                return "Invalid buy amount."
+        # Claimed AFTER the guard/sizing (so a guard-off tap isn't consumed)
+        # and BEFORE execution — a repeat tap of this button is rejected here.
         if not self._claim_button(dedup_id):
             return "Already actioned — see chat for the earlier result."
-        message = await self._do_buy(parts[1], sol_amount)
+        message = await self._do_buy(address, sol_amount)
         await self._reply(message)
         # The full outcome (success, refusal, or failure) is in the chat
         # reply above. The popup ack must NOT assert "Buy sent" — a refusal

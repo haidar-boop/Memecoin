@@ -266,13 +266,13 @@ def build_sinks(settings: Settings) -> list:
     }
     if settings.telegram_bot_token and settings.telegram_chat_id:
         # Buy/Dump buttons appear only when the operator turned them on
-        # (Project 6); the amounts are the configured presets.
-        presets = (settings.execution.buy_preset_list()
-                   if settings.execution.buy_button_enabled else ())
+        # (Project 6); sized as configured percentages of wallet balance.
+        percents = (settings.execution.buy_percent_list()
+                    if settings.execution.buy_button_enabled else ())
         sinks.append(TelegramSink(
             settings.telegram_bot_token, settings.telegram_chat_id,
             routes=parse_routes(settings.alert_delivery.telegram_routes),
-            buy_presets_sol=presets,
+            buy_button_percents=percents,
             **shared,
         ))
     if settings.discord_webhook_url:

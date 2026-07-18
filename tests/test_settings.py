@@ -249,14 +249,20 @@ def test_execution_settings_validation_and_defaults():
     defaults = ExecutionSettings()
     assert defaults.buy_button_enabled is False   # buttons hidden by default
     assert defaults.live_enabled is False         # live trading off by default
-    assert defaults.buy_preset_list() == (0.05, 0.1)
+    assert defaults.buy_percent_list() == (20.0, 50.0, 75.0, 100.0)
     with pytest.raises(ConfigurationError, match="max_buy_sol"):
         ExecutionSettings(max_buy_sol=0.0)
     with pytest.raises(ConfigurationError, match="slippage_bps"):
         ExecutionSettings(slippage_bps=0)
-    # A preset above the per-trade cap is rejected (can't offer an illegal button).
-    with pytest.raises(ConfigurationError, match="exceeds max_buy_sol"):
-        ExecutionSettings(max_buy_sol=0.1, buy_presets_sol="0.05,0.5")
+    # Percent buttons are sized against the LIVE balance at tap time, not a
+    # fixed SOL amount, so there is no "preset exceeds max_buy_sol" case
+    # left to reject at config time — max_buy_sol is enforced at execution.
+    with pytest.raises(ConfigurationError, match="buy_button_percents"):
+        ExecutionSettings(buy_button_percents="20,150")
+    with pytest.raises(ConfigurationError, match="buy_button_percents"):
+        ExecutionSettings(buy_button_percents="20,0")
+    with pytest.raises(ConfigurationError, match="buy_button_percents"):
+        ExecutionSettings(buy_button_percents="20,notanumber")
 
 
 def test_execution_live_env_overrides():

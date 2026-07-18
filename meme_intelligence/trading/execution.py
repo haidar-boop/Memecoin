@@ -88,6 +88,12 @@ class DryRunExecutor:
         return (f"DRY RUN — no real trade executed. Would dump the full {mint} "
                 "position. Live execution is off.")
 
+    async def get_spendable_balance_sol(self) -> float | None:
+        """No real wallet exists in dry-run — an honest unknown, never a
+        fabricated number (Rule 8). Percentage buy buttons report this as
+        'balance unavailable' rather than guessing."""
+        return None
+
     def _journal(self, address: str, chain: str, kind: str, content: str) -> None:
         try:
             self._storage.add_journal(TokenIdentity(chain=chain, address=address), kind, content)
@@ -141,6 +147,21 @@ class LiveExecutor:
     @property
     def wallet_address(self) -> str:
         return self._pubkey
+
+    async def get_spendable_balance_sol(self) -> float | None:
+        """Live wallet balance minus the fee/rent buffer ``execute_buy``
+        always reserves, so a percentage-of-balance button's 100% tap sizes
+        to an amount that can actually clear the balance re-check inside
+        ``execute_buy`` instead of being refused for lacking fee money
+        (Project 6 button rebuild, 2026-07-18). ``None`` on a read failure —
+        an unreadable balance must never be treated as zero or as unlimited
+        (Rule 8); callers refuse the button rather than guess.
+        """
+        try:
+            lamports = await self._rpc.get_sol_balance_lamports(self._pubkey)
+        except CollectorError:
+            return None
+        return max(0, lamports - _FEE_BUFFER_LAMPORTS) / _LAMPORTS_PER_SOL
 
     async def execute_buy(self, intent: TradeIntent) -> str:
         if intent.chain not in ("solana", "sol"):

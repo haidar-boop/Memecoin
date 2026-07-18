@@ -1305,8 +1305,17 @@ class ExecutionSettings:
     slippage_bps: int = 500           # base slippage for trade quotes (dynamic on top)
     priority_fee_max_lamports: int = 1_000_000   # cap on priority fee per trade (0.001 SOL)
     confirm_timeout_seconds: float = 45.0        # how long to wait for on-chain confirmation
-    # Preset one-tap buy sizes (SOL) offered as buttons on alerts.
-    buy_presets_sol: str = "0.05,0.1"
+    # One-tap buy buttons on alerts, sized as a PERCENT of the trading wallet's
+    # current spendable balance (2026-07-18, operator request — replaces the
+    # old fixed-SOL-amount presets: "0.01/0.04 SOL" buttons didn't scale with
+    # the wallet's actual balance). Percentage is resolved against a LIVE
+    # balance read at the moment the button is tapped (never at alert-render
+    # time — the balance moves), after reserving the same fee/rent buffer
+    # ``execute_buy`` always keeps back, so a 100% tap can actually succeed.
+    # Every computed SOL amount still passes through the existing
+    # ``max_buy_sol`` hard cap and live balance re-check — a percentage
+    # button is a sizing convenience, not a bypass of the safety model.
+    buy_button_percents: str = "20,50,75,100"
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.max_buy_sol) or self.max_buy_sol <= 0:
@@ -1323,16 +1332,12 @@ class ExecutionSettings:
             raise ConfigurationError(
                 "execution confirm_timeout_seconds must be positive, got "
                 f"{self.confirm_timeout_seconds}")
-        for preset in self.buy_preset_list():
-            if preset > self.max_buy_sol:
-                raise ConfigurationError(
-                    f"execution buy preset {preset} SOL exceeds max_buy_sol "
-                    f"{self.max_buy_sol}")
+        self.buy_percent_list()  # validates as a side effect
 
-    def buy_preset_list(self) -> tuple[float, ...]:
-        """Parse ``buy_presets_sol`` into positive SOL amounts, ordered."""
-        presets: list[float] = []
-        for part in self.buy_presets_sol.split(","):
+    def buy_percent_list(self) -> tuple[float, ...]:
+        """Parse ``buy_button_percents`` into percentages in (0, 100], ordered."""
+        percents: list[float] = []
+        for part in self.buy_button_percents.split(","):
             part = part.strip()
             if not part:
                 continue
@@ -1340,12 +1345,13 @@ class ExecutionSettings:
                 value = float(part)
             except ValueError as exc:
                 raise ConfigurationError(
-                    f"execution buy_presets_sol has a non-number: {part!r}") from exc
-            if value <= 0:
+                    f"execution buy_button_percents has a non-number: {part!r}") from exc
+            if not math.isfinite(value) or not (0.0 < value <= 100.0):
                 raise ConfigurationError(
-                    f"execution buy preset must be positive, got {value}")
-            presets.append(value)
-        return tuple(presets)
+                    "execution buy_button_percents entries must be in (0, 100], "
+                    f"got {value}")
+            percents.append(value)
+        return tuple(percents)
 
 
 @dataclass(frozen=True)

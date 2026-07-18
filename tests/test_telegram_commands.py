@@ -776,3 +776,114 @@ async def test_boost_command_survives_lookup_error():
         listener._ctx.boost_lookup = boom
         reply = await listener._cmd_boost([SOL_ADDR])
         assert "try again" in reply.lower()   # never raises into the poll loop
+
+
+# ---- Percentage-of-balance buy buttons (2026-07-18, operator request) ----
+
+class FakeBalanceExecutor:
+    """Executor stand-in with a controllable spendable balance, so the
+    percentage-sizing math can be verified independent of a real wallet."""
+
+    def __init__(self, balance):
+        self._balance = balance
+        self.buy_calls = []
+
+    async def get_spendable_balance_sol(self):
+        return self._balance
+
+    async def execute_buy(self, intent):
+        self.buy_calls.append(intent.sol_amount)
+        return f"DRY RUN — would buy {intent.sol_amount:g} SOL of {intent.token_address}."
+
+    async def execute_sell_all(self, mint, chain="solana"):
+        return f"DRY RUN — would dump {mint}."
+
+
+async def test_percent_buy_button_sizes_against_live_balance():
+    settings = make_settings(MEMEINTEL_EXECUTION_BUY_BUTTON_ENABLED="true")
+    executor = FakeBalanceExecutor(balance=2.0)
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage, settings=settings, executor=executor)
+        await listener._handle_update(callback_update(f"buy:{SOL_ADDR}:pct:50"))
+    assert executor.buy_calls == [1.0]                  # 50% of 2.0 SOL
+    replies = sent_messages(calls)
+    assert replies and "1 SOL" in replies[0]["text"]
+
+
+async def test_percent_buy_button_100_percent_uses_full_spendable_balance():
+    settings = make_settings(MEMEINTEL_EXECUTION_BUY_BUTTON_ENABLED="true")
+    executor = FakeBalanceExecutor(balance=0.993)  # already fee-buffer-adjusted
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage, settings=settings, executor=executor)
+        await listener._handle_update(callback_update(f"buy:{SOL_ADDR}:pct:100"))
+    assert len(executor.buy_calls) == 1 and abs(executor.buy_calls[0] - 0.993) < 1e-9
+
+
+async def test_percent_buy_button_unavailable_balance_refuses_cleanly():
+    """DryRunExecutor honestly reports no balance (no real wallet) — the
+    percentage button must refuse with a clear reason, never guess."""
+    settings = make_settings(MEMEINTEL_EXECUTION_BUY_BUTTON_ENABLED="true")
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage, settings=settings)  # DryRunExecutor
+        await listener._handle_update(callback_update(f"buy:{SOL_ADDR}:pct:50"))
+    acks = callback_answers(calls)
+    assert acks and "balance is unavailable" in acks[0]["text"].lower()
+    assert sent_messages(calls) == []                    # no chat spam on refusal
+
+
+async def test_percent_buy_button_zero_balance_refuses_cleanly():
+    settings = make_settings(MEMEINTEL_EXECUTION_BUY_BUTTON_ENABLED="true")
+    executor = FakeBalanceExecutor(balance=0.0)
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage, settings=settings, executor=executor)
+        await listener._handle_update(callback_update(f"buy:{SOL_ADDR}:pct:50"))
+    acks = callback_answers(calls)
+    assert acks and "no spendable sol" in acks[0]["text"].lower()
+    assert executor.buy_calls == []
+
+
+async def test_percent_buy_button_rejects_out_of_range_percent():
+    settings = make_settings(MEMEINTEL_EXECUTION_BUY_BUTTON_ENABLED="true")
+    executor = FakeBalanceExecutor(balance=1.0)
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage, settings=settings, executor=executor)
+        await listener._handle_update(callback_update(f"buy:{SOL_ADDR}:pct:0"))
+        await listener._handle_update(callback_update(f"buy:{SOL_ADDR}:pct:150"))
+    assert executor.buy_calls == []
+    acks = callback_answers(calls)
+    assert all("invalid buy percentage" in a["text"].lower() for a in acks)
+
+
+async def test_percent_buy_button_off_is_a_hard_noop_before_balance_lookup():
+    """The trading guard (buttons off) must short-circuit BEFORE any balance
+    lookup — mirrors the legacy-format ordering."""
+    executor = FakeBalanceExecutor(balance=5.0)
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage, executor=executor)  # buttons off
+        await listener._handle_update(callback_update(f"buy:{SOL_ADDR}:pct:50"))
+    assert executor.buy_calls == []
+    acks = callback_answers(calls)
+    assert acks and "off" in acks[0]["text"].lower()
+
+
+async def test_percent_buy_double_tap_fires_once():
+    settings = make_settings(MEMEINTEL_EXECUTION_BUY_BUTTON_ENABLED="true")
+    executor = FakeBalanceExecutor(balance=1.0)
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage, settings=settings, executor=executor)
+        update = callback_update(f"buy:{SOL_ADDR}:pct:50", message_id=99)
+        await listener._handle_update(update)
+        await listener._handle_update(update)
+    assert executor.buy_calls == [0.5]                   # exactly one trade
+    acks = callback_answers(calls)
+    assert "already actioned" in acks[1]["text"].lower()
+
+
+async def test_percent_buy_button_malformed_payload_rejected():
+    settings = make_settings(MEMEINTEL_EXECUTION_BUY_BUTTON_ENABLED="true")
+    executor = FakeBalanceExecutor(balance=1.0)
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage, settings=settings, executor=executor)
+        await listener._handle_update(callback_update(f"buy:{SOL_ADDR}:pct:notanumber"))
+        await listener._handle_update(callback_update(f"buy:{SOL_ADDR}:notpct:50"))
+    assert executor.buy_calls == []

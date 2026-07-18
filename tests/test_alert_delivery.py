@@ -473,19 +473,23 @@ def test_feedback_keyboard_has_thumbs_and_copy_but_no_buy_by_default():
     assert all("buy:" not in str(row) for row in rows)
 
 
-def test_feedback_keyboard_adds_buy_and_dump_when_presets_given():
+def test_feedback_keyboard_adds_buy_and_dump_when_percents_given():
     from meme_intelligence.alerts.sinks import feedback_keyboard
 
     addr = "So1MemeToken111111111111111111111111111111"
-    rows = feedback_keyboard(addr, buy_presets=(0.05, 0.1))["inline_keyboard"]
+    rows = feedback_keyboard(addr, buy_percents=(20, 50, 75, 100))["inline_keyboard"]
     flat = [b for row in rows for b in row]
     buys = [b for b in flat if b.get("callback_data", "").startswith("buy:")]
-    assert [b["callback_data"] for b in buys] == [f"buy:{addr}:0.05", f"buy:{addr}:0.1"]
+    assert [b["callback_data"] for b in buys] == [
+        f"buy:{addr}:pct:20", f"buy:{addr}:pct:50",
+        f"buy:{addr}:pct:75", f"buy:{addr}:pct:100",
+    ]
+    assert [b["text"] for b in buys] == ["Buy 20%", "Buy 50%", "Buy 75%", "Buy 100%"]
     dumps = [b for b in flat if b.get("callback_data") == f"dump:{addr}"]
     assert dumps and dumps[0]["text"] == "💥 Dump all"
 
 
-def test_feedback_keyboard_no_trade_buttons_without_presets():
+def test_feedback_keyboard_no_trade_buttons_without_percents():
     from meme_intelligence.alerts.sinks import feedback_keyboard
 
     addr = "So1MemeToken111111111111111111111111111111"
@@ -526,8 +530,8 @@ async def test_telegram_alert_carries_feedback_keyboard(monkeypatch):
     assert "fb:1:" in data and "copy_text" in data and "buy:" not in data
 
 
-async def test_telegram_alert_shows_trade_buttons_with_presets(monkeypatch):
-    sink = make_telegram(buy_presets_sol=(0.05, 0.1))
+async def test_telegram_alert_shows_trade_buttons_with_percents(monkeypatch):
+    sink = make_telegram(buy_button_percents=(20, 50, 75, 100))
     calls = []
 
     async def fake_get_json(path, params=None, *, cache_key=None, cache_ttl=None,

@@ -471,3 +471,52 @@ async def test_send_cancellation_journals_derived_signature_and_reraises():
         # though send() never returned.
         journal = storage.journal_entries(limit=5)
         assert journal and "send cancelled mid-flight" in journal[0]["content"]
+
+
+# ---- Percentage-of-balance buy buttons (2026-07-18, operator request) ----
+
+async def test_live_spendable_balance_reserves_the_fee_buffer():
+    kp = new_keypair()
+    rpc = FakeRpc(sol=1 * LAMPORTS)  # exactly 1.0 SOL
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        ex = make_live(storage, kp, jupiter=FakeJupiter(quote=None, swap_b64=""), rpc=rpc)
+        spendable = await ex.get_spendable_balance_sol()
+        # 1.0 SOL minus the 0.007 SOL fee/rent buffer.
+        assert spendable == pytest.approx(0.993, abs=1e-9)
+
+
+async def test_live_spendable_balance_never_negative():
+    kp = new_keypair()
+    rpc = FakeRpc(sol=1_000_000)  # 0.001 SOL, below the fee buffer itself
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        ex = make_live(storage, kp, jupiter=FakeJupiter(quote=None, swap_b64=""), rpc=rpc)
+        assert await ex.get_spendable_balance_sol() == 0.0
+
+
+async def test_live_spendable_balance_none_on_rpc_failure():
+    kp = new_keypair()
+    rpc = FakeRpc(sol="raise")
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        ex = make_live(storage, kp, jupiter=FakeJupiter(quote=None, swap_b64=""), rpc=rpc)
+        assert await ex.get_spendable_balance_sol() is None
+
+
+async def test_dry_run_spendable_balance_is_honestly_unknown():
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        ex = DryRunExecutor(storage)
+        assert await ex.get_spendable_balance_sol() is None
+
+
+async def test_100_percent_button_sizing_actually_clears_execute_buy():
+    """The whole point of reserving the fee buffer in get_spendable_balance_sol:
+    a 100% button must compute an amount execute_buy can actually accept,
+    not one that immediately refuses for lacking fee money."""
+    kp = new_keypair()
+    jup = FakeJupiter(quote={"outAmount": "500000", "routePlan": []}, swap_b64=swap_tx_b64(kp))
+    rpc = FakeRpc(sol=1 * LAMPORTS, sig="MAXSIG", status="confirmed")
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        ex = make_live(storage, kp, jupiter=jup, rpc=rpc, max_buy_sol=2.0)
+        balance = await ex.get_spendable_balance_sol()
+        sol_amount = balance * 1.0  # 100%
+        msg = await ex.execute_buy(intent(sol_amount))
+        assert "BUY confirmed" in msg
