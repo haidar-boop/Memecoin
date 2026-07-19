@@ -1766,3 +1766,59 @@ tests, settings defaults/validation/env round-trip, pipeline gate/budget/
 cooldown/force-bypass tests, a full merged-profile integration test, a
 LunarCrush-failure-preserves-CoinGecko test, the dormancy no-op test,
 controller wiring tests, and `merge_community_profiles` unit tests).
+
+## 2026-07-20 — Fixed 8 confirmed bugs from an external code review
+
+Operator pasted an 11-item external code review and asked me to verify
+each before acting. Investigated every claim directly (grep/read the
+actual code, ran ruff and pyright myself) before touching anything:
+8 were real, 2 (Helius owner-resolution cache key + zip alignment) were
+already fixed in an earlier session with tests/comments proving it, and
+1 (`Storage.archive()` discarding a return value) didn't match the
+current code at all — no `change` variable exists in that function.
+Reported the verdict, operator said fix the real ones.
+
+`meme_intelligence/collectors/security_data.py`:
+- `_flag()` mapped any unrecognized GoPlus value to `False` ("not a
+  risk") instead of `None` ("unknown") — silently reading a malformed
+  or novel API value on `is_honeypot`/`has_blacklist`/`selfdestruct`/
+  etc. as reassuring instead of reducing confidence (Rule 8). Now only
+  an exact `"1"`/`True` or `"0"`/`False` is a confirmed value.
+- Burn-address detection matched the substring `"dead"` anywhere in an
+  address — both EVM hex and Solana base58 addresses can innocently
+  contain those four characters, silently excluding a real whale from
+  concentration math. Replaced with an exact-match set (EVM ∪ Solana
+  canonical burn/incinerator addresses), matching the existing
+  `_RENOUNCED_OWNERS` pattern.
+
+`meme_intelligence/core/provider_pool.py`:
+- All-providers-cooling-down previously raised
+  `AllProvidersFailedError` with an empty causes dict ("no providers
+  available"), hiding the real reason. Cooldown skips now record why.
+- Only `CollectorError`/`TransientCollectorError` were caught, so any
+  other exception from a provider killed the whole failover loop —
+  contradicting the pool's own "continue with the rest" contract.
+  Added a bounded `except Exception` (never `BaseException` —
+  `CancelledError`/`KeyboardInterrupt`/`SystemExit` still propagate
+  immediately, verified by test) that logs it as a likely provider bug
+  and moves on.
+
+`meme_intelligence/collectors/base.py` + `__main__.py` (pure typing,
+zero behavior change): `BaseCollector.__aenter__` now returns `Self`
+instead of the base class, fixing 10 pyright errors in `__main__.py`
+where subclass methods were flagged unknown after an `async with`.
+`_gather_assessments()` gained an explicit return type and its three
+call sites gained a narrowing `assert` before unpacking.
+
+11 ruff issues fixed, all in test files (ambiguous loop variables, one
+unused import, late imports moved to the top after checking for
+circular-import risk).
+
+Built via 4 parallel fix agents (one per disjoint file group) + 5
+independent adversarial reviewers split across code-review/
+security-review lenses — zero findings, nothing needed a second round.
+Independently re-verified myself afterward: 921/921 passing across 3
+separate runs, `ruff check .` clean, pyright 0 errors on the two typing
+fix files, and every diff read line-by-line against what was promised.
+
+Suite: **921 passing** (900 + 21).

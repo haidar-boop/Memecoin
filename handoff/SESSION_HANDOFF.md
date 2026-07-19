@@ -16,7 +16,7 @@
   Telegram control + copy-address button), **Project 3** (mind-layer P(rug)
   veto — built, veto flag off until authority is earned), and **Project 6**
   (live buy/dump from Telegram — see below).
-- **900 tests passing** (`python -m pytest tests/ -q`).
+- **921 tests passing** (`python -m pytest tests/ -q`).
 - **Live in production**: 24/7 on the operator's $6/mo DigitalOcean droplet
   (systemd service `meme-intelligence`, repo at `~/meme-intelligence`),
   Telegram alerts arriving on his phone.
