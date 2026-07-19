@@ -1292,16 +1292,21 @@ class ExecutionSettings:
       operator's main wallet, read only from ``MEMEINTEL_EXECUTION_PRIVATE_KEY``
       (never in code, git, or logs — Rule 16). The real hard cap is how
       little the operator funds it with.
-    * ``max_buy_sol`` is a per-trade ceiling; a single buy above it is
-      refused. The wallet balance is the ultimate cap (the bot cannot spend
-      SOL it does not hold).
+    * ``max_buy_sol`` is an OPTIONAL per-trade ceiling; a single buy above it
+      is refused. 0 = no ceiling (operator request, 2026-07-20 — the fixed
+      cap didn't scale once percentage-of-balance buy buttons existed, so an
+      ordinary percentage tap started getting refused as the wallet grew).
+      With it at 0, the wallet balance is the ONLY automatic limit left: the
+      bot still can never spend SOL it does not hold, and a live re-check
+      against the current balance still runs immediately before every trade
+      — but nothing stops a single tap from committing the entire balance.
 
-    See DECISIONS_LOG (2026-07-10, Project 6).
+    See DECISIONS_LOG (2026-07-10, Project 6; 2026-07-20 cap removal).
     """
 
     buy_button_enabled: bool = False  # show Buy/Dump buttons on Telegram alerts
     live_enabled: bool = False        # actually sign+send trades (else dry-run)
-    max_buy_sol: float = 0.15         # per-trade SOL ceiling (~$50 CAD at build time)
+    max_buy_sol: float = 0.15         # per-trade SOL ceiling; 0 = no ceiling
     slippage_bps: int = 500           # base slippage for trade quotes (dynamic on top)
     priority_fee_max_lamports: int = 1_000_000   # cap on priority fee per trade (0.001 SOL)
     confirm_timeout_seconds: float = 45.0        # how long to wait for on-chain confirmation
@@ -1318,9 +1323,10 @@ class ExecutionSettings:
     buy_button_percents: str = "20,50,75,100"
 
     def __post_init__(self) -> None:
-        if not math.isfinite(self.max_buy_sol) or self.max_buy_sol <= 0:
+        if not math.isfinite(self.max_buy_sol) or self.max_buy_sol < 0:
             raise ConfigurationError(
-                f"execution max_buy_sol must be positive, got {self.max_buy_sol}")
+                f"execution max_buy_sol must be >= 0 (0 = no ceiling), got "
+                f"{self.max_buy_sol}")
         if not (0 < self.slippage_bps <= 10000):
             raise ConfigurationError(
                 f"execution slippage_bps must be within (0, 10000], got {self.slippage_bps}")

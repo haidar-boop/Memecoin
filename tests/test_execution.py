@@ -142,6 +142,33 @@ async def test_buy_refused_over_per_trade_cap():
         assert rpc.sent == [] and jup.calls == []      # nothing quoted or sent
 
 
+async def test_buy_with_zero_cap_has_no_ceiling_but_still_checks_balance():
+    """0 = no per-trade ceiling (operator request, 2026-07-20): a large buy
+    that would have been refused at 0.15 now goes through when the wallet
+    actually holds enough -- the live balance re-check is the only guard
+    left, and it still refuses a buy the wallet can't cover."""
+    kp = new_keypair()
+    jup = FakeJupiter(quote={"outAmount": "500000", "routePlan": []}, swap_b64=swap_tx_b64(kp))
+
+    # Plenty of balance: a 0.5 SOL buy that a 0.15 cap would have refused
+    # now clears, because there is no cap.
+    rpc_funded = FakeRpc(sol=100 * LAMPORTS, sig="NOCAPSIG", status="confirmed")
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        ex = make_live(storage, kp, jupiter=jup, rpc=rpc_funded, max_buy_sol=0.0)
+        msg = await ex.execute_buy(intent(0.5))
+        assert "BUY confirmed" in msg
+        assert len(rpc_funded.sent) == 1
+
+    # Insufficient balance is STILL refused -- the cap removal did not
+    # touch the wallet-can't-spend-what-it-doesn't-hold guard.
+    rpc_broke = FakeRpc(sol=1_000_000)  # 0.001 SOL
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        ex = make_live(storage, kp, jupiter=jup, rpc=rpc_broke, max_buy_sol=0.0)
+        msg = await ex.execute_buy(intent(0.5))
+        assert "Refused: wallet holds" in msg
+        assert rpc_broke.sent == []
+
+
 async def test_buy_refused_insufficient_balance():
     kp = new_keypair()
     jup = FakeJupiter(quote={"outAmount": "1"}, swap_b64=swap_tx_b64(kp))

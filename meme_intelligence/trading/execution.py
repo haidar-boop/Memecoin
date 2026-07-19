@@ -16,8 +16,9 @@ SAFETY MODEL (see DECISIONS_LOG 2026-07-10, Project 6):
 * The signing key belongs to a DEDICATED, low-balance wallet — never the
   operator's main wallet — and is read only from an environment variable,
   never logged (Rule 16). The real hard cap is how little it is funded with.
-* Every buy is capped per-trade (``max_buy_sol``) and re-checked against the
-  live wallet balance; the wallet can never spend SOL it does not hold.
+* Every buy is optionally capped per-trade (``max_buy_sol``, 0 = no ceiling —
+  operator request, 2026-07-20) and re-checked against the live wallet
+  balance; the wallet can never spend SOL it does not hold, cap or no cap.
 * ``LiveExecutor`` is only constructed when ``execution.live_enabled`` is on
   AND a key is present; otherwise the dry-run executor is used.
 """
@@ -172,7 +173,9 @@ class LiveExecutor:
         # money gate — it must not rely on the caller having validated.
         if not math.isfinite(intent.sol_amount) or intent.sol_amount <= 0:
             return "Buy amount must be positive."
-        if intent.sol_amount > self._max_buy_sol:
+        # 0 = no ceiling (operator request, 2026-07-20): the live balance
+        # re-check just below remains the only automatic limit.
+        if self._max_buy_sol > 0 and intent.sol_amount > self._max_buy_sol:
             return (f"Refused: {intent.sol_amount:g} SOL exceeds the per-trade cap of "
                     f"{self._max_buy_sol:g} SOL (MEMEINTEL_EXECUTION_MAX_BUY_SOL).")
         lamports = int(intent.sol_amount * _LAMPORTS_PER_SOL)

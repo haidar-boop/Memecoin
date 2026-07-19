@@ -250,8 +250,11 @@ def test_execution_settings_validation_and_defaults():
     assert defaults.buy_button_enabled is False   # buttons hidden by default
     assert defaults.live_enabled is False         # live trading off by default
     assert defaults.buy_percent_list() == (20.0, 50.0, 75.0, 100.0)
+    # 0 = no per-trade ceiling (operator request, 2026-07-20); negative/non-
+    # finite still rejected.
+    assert ExecutionSettings(max_buy_sol=0.0).max_buy_sol == 0.0
     with pytest.raises(ConfigurationError, match="max_buy_sol"):
-        ExecutionSettings(max_buy_sol=0.0)
+        ExecutionSettings(max_buy_sol=-0.01)
     with pytest.raises(ConfigurationError, match="slippage_bps"):
         ExecutionSettings(slippage_bps=0)
     # Percent buttons are sized against the LIVE balance at tap time, not a

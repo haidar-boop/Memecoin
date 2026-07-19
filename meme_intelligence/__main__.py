@@ -249,8 +249,9 @@ def build_executor(
         print(f"Note: live trading disabled — {exc}. Buy/dump run in DRY RUN.")
         from meme_intelligence.trading.execution import DryRunExecutor
         return DryRunExecutor(storage), rpc
+    cap_desc = f"{ex.max_buy_sol:g} SOL" if ex.max_buy_sol > 0 else "NONE (wallet balance is the only limit)"
     print(f"LIVE TRADING ARMED — trading wallet {executor.wallet_address}. "
-          f"Per-trade cap {ex.max_buy_sol:g} SOL.")
+          f"Per-trade cap {cap_desc}.")
     return executor, rpc
 
 

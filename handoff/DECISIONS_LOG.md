@@ -1478,3 +1478,25 @@ Suite: **840 passing** (+13: executor balance/fee-buffer tests, keyboard/
 sink rendering tests, telegram callback-handling tests including legacy-
 format backward compatibility, double-tap, and off-guard-before-lookup
 ordering).
+
+## 2026-07-20 — Removed the per-trade SOL cap (operator explicit request)
+
+Operator's percent-of-balance buy buttons (2026-07-18) kept getting
+refused as the wallet grew — a 20% tap became bigger than the fixed
+`MEMEINTEL_EXECUTION_MAX_BUY_SOL` ceiling set back when the wallet was
+first funded. Operator: "I don't want a cap remove it." Flagged plainly
+before building it (the cap was one of four pillars of the documented
+"HARD SAFETY MODEL," Project 6, 2026-07-10) — operator's call stood.
+
+`ExecutionSettings.max_buy_sol` now accepts 0 = no ceiling (same
+convention as every other cap this session: `max_training_records`,
+`opportunity_max_age_hours`, `credit_gate_max_lookups_per_day`, etc.);
+negative/non-finite still rejected. `LiveExecutor.execute_buy` skips the
+ceiling check entirely at 0. **Explicitly NOT touched:** the live
+balance re-check immediately before every trade — the bot still cannot
+spend SOL the wallet does not hold; that remains the sole automatic
+guard with the cap off. Startup log now prints "Per-trade cap NONE
+(wallet balance is the only limit)" instead of a misleading "0 SOL" when
+disabled.
+
+Suite: **841 passing** (+1).
