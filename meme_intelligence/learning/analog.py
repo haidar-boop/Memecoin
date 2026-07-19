@@ -23,6 +23,7 @@ analog" (weight ~0), never a negative vote.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, Sequence
@@ -30,7 +31,11 @@ from typing import Callable, Sequence
 import numpy as np
 
 from meme_intelligence.core.logging_setup import get_logger
-from meme_intelligence.learning.features import FEATURE_DIM, FingerprintExtractor
+from meme_intelligence.learning.features import (
+    FEATURE_DIM,
+    FEATURE_VERSION,
+    FingerprintExtractor,
+)
 from meme_intelligence.learning.models import (
     AnalogNeighbor,
     CoinRecord,
@@ -99,6 +104,11 @@ class AnalogMemory:
         self._index = faiss.IndexFlatIP(dim)
         self._entries: list[AnalogEntry] = []
         self._now = now_func
+        # Feature space the stored vectors live in. Set to the current version
+        # for a freshly built index; overwritten from the meta on load so a
+        # reloader can reject an index written in an incompatible space (a split
+        # deploy where the cron upgraded FEATURE_VERSION ahead of this process).
+        self.feature_version: int | None = FEATURE_VERSION
 
     @property
     def size(self) -> int:
@@ -252,10 +262,24 @@ class AnalogMemory:
     # ---- Persistence (Section 9) ----
 
     def save(self, index_path: str, meta_path: str) -> None:
+        """Persist the index then its metadata.
+
+        Both files are written to a temp path and atomically renamed, so a
+        reader (the other process reloading the index) never observes a
+        half-written file (Rule 7). The metadata is written LAST and carries
+        the current :data:`FEATURE_VERSION`; the reloader keys its freshness
+        check to the metadata file's mtime, so it only adopts the pair once the
+        write has fully completed (avoids a torn index/metadata view).
+        """
         import joblib
 
-        self._faiss.write_index(self._index, index_path)
-        joblib.dump({"entries": self._entries, "dim": self._dim}, meta_path)
+        tmp_index = f"{index_path}.tmp"
+        tmp_meta = f"{meta_path}.tmp"
+        self._faiss.write_index(self._index, tmp_index)
+        os.replace(tmp_index, index_path)
+        joblib.dump({"entries": self._entries, "dim": self._dim,
+                     "feature_version": FEATURE_VERSION}, tmp_meta)
+        os.replace(tmp_meta, meta_path)
 
     @classmethod
     def load(
@@ -272,6 +296,9 @@ class AnalogMemory:
         memory = cls(dim=payload.get("dim", FEATURE_DIM), now_func=now_func)
         memory._index = faiss.read_index(index_path)
         memory._entries = list(payload["entries"])
+        # None for indices written before feature_version was recorded — the
+        # reloader treats an unknown version as compatible (Rule 18).
+        memory.feature_version = payload.get("feature_version")
         return memory
 
 

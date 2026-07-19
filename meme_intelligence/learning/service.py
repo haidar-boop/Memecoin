@@ -118,6 +118,30 @@ class LearningService:
         # predictions are marked scored durably, those grades could never be
         # regenerated (bug-hunt finding).
         self._ensemble_dirty = False
+        # Non-analog model-artifact ownership (scaler / classifier /
+        # archetypes / retrain-count state): True once THIS process has
+        # retrained them (retrain_if_due / refresh_archetypes). Guards those
+        # writes in persist so a pure reader never rewrites them. Latch; never
+        # reset to False.
+        self._models_dirty = False
+        # Analog-index ownership, tracked SEPARATELY from _models_dirty. True
+        # only while this process holds analog mutations not yet flushed to
+        # disk — an instant-learning insert (_on_resolved / _on_rug_upgrade) or
+        # a full in-memory rebuild (_rebuild). It must NOT be latched by a
+        # warm-start retrain: warm-start leaves the analog index untouched
+        # (see _rebuild), so latching it there would (a) freeze the monitor's
+        # cross-process reload and (b) make its shutdown persist clobber the
+        # cron's grown index with a stale copy — the "memory frozen" bug. Reset
+        # to False by persist() once the index is flushed, so the reload re-arms.
+        self._analog_dirty = False
+        # mtime of index_meta.joblib (the LAST file save() writes) as last
+        # loaded/saved by this process — drives the cross-process reload in
+        # _maybe_reload_analog. Keyed to the metadata file so a reload only
+        # fires once a peer's write has fully completed (no torn view).
+        self._analog_mtime_ns: int | None = None
+        # False after a feature-version mismatch: the on-disk index is in an
+        # OLD feature space and must never be reloaded into this process.
+        self._analog_reload_ok = True
 
         self._load_artifacts()
 
@@ -158,6 +182,7 @@ class LearningService:
                         stored_version, FEATURE_VERSION)
                 self._last_retrain_count = 0
                 self._scaler_fit_count = 0
+                self._analog_reload_ok = False
                 return
 
             if os.path.exists(self._path("scaler.joblib")):
@@ -166,6 +191,7 @@ class LearningService:
                 self._analog = AnalogMemory.load(
                     self._path("index.faiss"), self._path("index_meta.joblib"),
                     now_func=self._now)
+                self._analog_mtime_ns = self._analog_meta_mtime_ns()
             if os.path.exists(self._path("classifier.txt")):
                 self._classifier.load_model(self._path("classifier.txt"))
             if os.path.exists(self._path("archetypes.joblib")):
@@ -174,29 +200,116 @@ class LearningService:
             self._logger.error("failed to load learning artifacts (%s); cold start", exc)
 
     def persist(self) -> None:
-        """Persist all mutable artifacts. Called after learning updates."""
+        """Persist all mutable artifacts. Called after learning updates.
+
+        OWNERSHIP GUARDS (the "memory frozen at a fixed number" bug): the
+        monitor and the backtest cron share this state dir. The analog index is
+        grown by BOTH — the cron appends resolved coins (instant learning) and
+        the monitor rebuilds it on a full retrain — so each process may only
+        write the index when it holds its own un-flushed analog mutations
+        (``_analog_dirty``). A pure reader, or a process that merely
+        warm-started the classifier, must never write the index: doing so would
+        clobber the peer's grown copy with a stale one. The non-analog model
+        artifacts (scaler, classifier, archetypes, retrain-count state) are
+        written only by a process that retrained them (``_models_dirty``), and
+        the ensemble's accuracy history only by a process that graded it
+        (``_ensemble_dirty``). The three guards are independent so a legitimate
+        warm-start in the monitor never drags the analog-index write along.
+        """
         if self._state_dir == ":memory:":
             return
         os.makedirs(self._state_dir, exist_ok=True)
         try:
-            if self._scaler.is_fitted:
-                self._scaler.save(self._path("scaler.joblib"))
-            if self._analog.size > 0:
-                self._analog.save(self._path("index.faiss"), self._path("index_meta.joblib"))
-            if self._classifier.is_ready:
-                self._classifier.save(self._path("classifier.txt"))
-            if self._archetypes.is_fitted:
-                self._archetypes.save(self._path("archetypes.joblib"))
+            analog_flushed = False
+            if self._analog_dirty and self._analog.size > 0:
+                self._analog.save(self._path("index.faiss"),
+                                  self._path("index_meta.joblib"))
+                self._analog_mtime_ns = self._analog_meta_mtime_ns()
+                # Flushed: in-memory now matches disk, so re-arm the reload —
+                # otherwise the first full rebuild would latch this process off
+                # its peer's later growth forever (the "memory frozen" bug).
+                self._analog_dirty = False
+                analog_flushed = True
+            if self._models_dirty:
+                if self._scaler.is_fitted:
+                    self._scaler.save(self._path("scaler.joblib"))
+                if self._classifier.is_ready:
+                    self._classifier.save(self._path("classifier.txt"))
+                if self._archetypes.is_fitted:
+                    self._archetypes.save(self._path("archetypes.joblib"))
+            # The state marker carries the feature version that gates loading on
+            # the next boot; it must accompany the index even for a resolve-only
+            # writer (the cron), which grows the analog index without retraining
+            # the other models. The retrain counters are loaded at boot and only
+            # advanced by retrain_if_due, so re-writing their current values here
+            # preserves a peer's progress rather than clobbering it.
+            if self._models_dirty or analog_flushed:
+                import joblib
+
+                joblib.dump({"last_retrain_count": self._last_retrain_count,
+                             "scaler_fit_count": self._scaler_fit_count,
+                             "feature_version": FEATURE_VERSION},
+                            self._path("state.joblib"))
             if self._ensemble_dirty or not os.path.exists(self._path("ensemble.joblib")):
                 self._ensemble.save(self._path("ensemble.joblib"))
-            import joblib
-
-            joblib.dump({"last_retrain_count": self._last_retrain_count,
-                         "scaler_fit_count": self._scaler_fit_count,
-                         "feature_version": FEATURE_VERSION},
-                        self._path("state.joblib"))
         except Exception as exc:
             self._logger.error("failed to persist learning artifacts: %s", exc)
+
+    def _analog_meta_mtime_ns(self) -> int | None:
+        # Keyed to the metadata file, which save() writes LAST: a peer's index
+        # write is only "visible" for reload once the metadata catches up, so
+        # we never adopt an index newer than its metadata (a torn view).
+        try:
+            return os.stat(self._path("index_meta.joblib")).st_mtime_ns
+        except OSError:
+            return None
+
+    def _maybe_reload_analog(self) -> None:
+        """Pick up analog-index growth written by the OTHER process.
+
+        The cron grows the analog index as it resolves coins; the monitor
+        otherwise holds its boot-time copy until restart, so /mind shows a
+        stale count and fresh analogs are invisible to live verdicts. A cheap
+        mtime check reloads the index only when the file changed. Never reload
+        while this process holds un-flushed analog mutations of its own
+        (``_analog_dirty``) — its in-memory copy is ahead of the file; once
+        persist flushes them the flag clears and the reload re-arms. Never
+        reload after a feature-version mismatch (``_analog_reload_ok`` False) —
+        the on-disk index is in an old feature space. A reloaded index is also
+        re-checked against the current ``FEATURE_VERSION`` (a split deploy can
+        move the on-disk index into a new feature space under a still-running
+        old process); an incompatible index is rejected, not queried with the
+        wrong scaler. Best-effort: a torn or mid-write file keeps the current
+        copy and retries on the next call (Rule 7).
+        """
+        if (self._state_dir == ":memory:" or not self._analog_reload_ok
+                or self._analog_dirty):
+            return
+        mtime = self._analog_meta_mtime_ns()
+        if mtime is None or mtime == self._analog_mtime_ns:
+            return
+        try:
+            reloaded = AnalogMemory.load(self._path("index.faiss"),
+                                         self._path("index_meta.joblib"),
+                                         now_func=self._now)
+        except Exception as exc:  # noqa: BLE001 — mid-write file: retry next call
+            self._logger.warning("analog reload failed (keeping current copy): %s", exc)
+            return
+        if (reloaded.feature_version is not None
+                and reloaded.feature_version != FEATURE_VERSION):
+            # Split deploy: the on-disk index was rebuilt in a different feature
+            # space. Querying it with this process's scaler yields silently
+            # wrong distances — refuse it and stop retrying (Rule 8).
+            self._logger.warning(
+                "on-disk analog index feature space changed (v%s -> v%d); "
+                "refusing to reload until this process is restarted",
+                reloaded.feature_version, FEATURE_VERSION)
+            self._analog_reload_ok = False
+            return
+        self._analog = reloaded
+        self._analog_mtime_ns = mtime
+        self._logger.info("analog memory reloaded from disk: %d coins",
+                          self._analog.size)
 
     # ---- Lifecycle (Section 1 / Section 10) ----
 
@@ -235,6 +348,7 @@ class LearningService:
         creator: str | None = None,
     ) -> dict:
         """The full verdict for a live coin (Section 10 — the public contract)."""
+        self._maybe_reload_analog()
         snaps = [CoinSnapshot.from_dict(s) for s in snapshot_series]
         fingerprint = self._extractor.extract(snaps)
         scaled = self._scaler.transform(fingerprint.vector)
@@ -386,6 +500,7 @@ class LearningService:
                             bucket=bucket, resolved_at=_resolution_time(record)),
                 scaled,
             )
+            self._analog_dirty = True  # only the analog index changed here
         else:
             self._logger.info("analog insert skipped for %s: empty trajectory",
                               record.token.address)
@@ -456,6 +571,7 @@ class LearningService:
                             resolved_at=_resolution_time(record)),
                 scaled,
             )
+            self._analog_dirty = True  # only the analog index changed here
         self.persist()
 
     # ---- Learning loops (Section 4 / Section 7) ----
@@ -494,14 +610,22 @@ class LearningService:
                 self._ensemble.final_accuracy() or 0.0,
                 self._ls.drift_accuracy_floor, self._ensemble.final_samples)
         self._rebuild(full=needs_scaler)
+        self._models_dirty = True
         self._last_retrain_count = resolved
         if needs_scaler:
             self._scaler_fit_count = resolved
         if drift:
             # Old grades measured the replaced models; keeping them would
             # re-fire the trigger every cycle until the window rolled over.
+            # Reset the in-memory history so this process stops re-firing, but
+            # do NOT force _ensemble_dirty here: retrain_if_due runs in the
+            # monitor, which never grades the ensemble (it does not resolve
+            # coins). Persisting the monitor's reset would clobber the cron's
+            # live accuracy window with an empty one. _ensemble_dirty is already
+            # True for a process that actually graded (_on_resolved /
+            # _on_rug_upgrade), so leaving it as-is persists the reset only for
+            # the true owner of the history.
             self._ensemble.reset_final_history()
-            self._ensemble_dirty = True  # a real mutation this process owns
         self.persist()
         return True
 
@@ -523,9 +647,15 @@ class LearningService:
         if full or not self._scaler.is_fitted:
             self._scaler.fit(raw)
             # Rebuild the analog index in the freshly-scaled space so instant-
-            # learning inserts and bulk data stay consistent.
+            # learning inserts and bulk data stay consistent. This rebuilds the
+            # WHOLE index from the authoritative resolved records, so the copy
+            # is complete (not stale) and safe to flush — mark it dirty so
+            # persist writes it. A warm-start (full=False, scaler already
+            # fitted) skips this block and leaves the analog index untouched,
+            # so _analog_dirty stays as it was and the reload keeps working.
             self._analog = AnalogMemory(now_func=self._now)
             self._analog.build_from_records(records, self._extractor, self._scaler)
+            self._analog_dirty = True
 
         scaled = self._scaler.transform_many(raw)
         self._classifier.fit(scaled, buckets, times, warm_start=not full)
@@ -544,6 +674,7 @@ class LearningService:
         buckets = [r.final_bucket for r in records]
         n = self._archetypes.fit(scaled, buckets,
                                  min_cluster_size=self._ls.archetype_min_cluster_size)
+        self._models_dirty = True
         self.persist()
         return n
 
@@ -551,6 +682,7 @@ class LearningService:
 
     def get_learning_metrics(self, *, persist: bool = True) -> dict:
         """Compute the self-evaluation metrics over resolved predictions."""
+        self._maybe_reload_analog()
         records: list[PredictionRecord] = []
         for record in self._store.resolved_records():
             coin_id = self._store.coin_id(record.token)

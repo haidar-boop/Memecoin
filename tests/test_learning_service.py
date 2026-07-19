@@ -1,5 +1,6 @@
 """End-to-end tests for the LearningService orchestrator (Section 10)."""
 
+import os
 from datetime import datetime, timezone
 
 
@@ -390,3 +391,318 @@ def test_retrain_not_due_below_threshold():
     service.resolve_outcome("c1", "solana", 24.0, 80.0)
     # Only one resolved coin, far below min_train_samples.
     assert service.retrain_if_due() is False
+
+
+# ---- Frozen-analog-memory regression suite (monitor vs cron) ----------------
+#
+# The monitor and the backtest cron share one state dir. Only the cron mutates
+# models (it resolves coins); the monitor only reads. Two bugs made the
+# monitor's analog memory freeze at its boot-time size for a whole run:
+#   1. the monitor's shutdown persist() wrote its stale boot-time index over
+#      whatever the cron had appended since — permanently resetting the file;
+#   2. the monitor never reloaded the index the cron kept growing.
+# The fix: a _models_dirty ownership guard on the model-side writes, plus a
+# cheap mtime-driven _maybe_reload_analog at both read entry points.
+
+
+def _disk_settings(tmp_path):
+    env = dict(_ENV)
+    env["MEMEINTEL_LEARNING_STATE_DIR"] = str(tmp_path)
+    return Settings.from_env(env=env)
+
+
+def _resolve_batch(service, prefix, n):
+    """Resolve n real-trajectory rug coins (each enters the analog index)."""
+    for i in range(n):
+        addr = f"{prefix}{i}"
+        service.record_detection(addr, "solana", detection_price_usd=1.0)
+        for snap in _rug_series():
+            service.capture_snapshot(addr, "solana", snap)
+        service.resolve_outcome(addr, "solana", 24.0, -95.0, is_rug=True)
+
+
+def _ondisk_analog_size(tmp_path):
+    from meme_intelligence.learning.analog import AnalogMemory
+
+    memory = AnalogMemory.load(str(tmp_path / "index.faiss"),
+                               str(tmp_path / "index_meta.joblib"),
+                               now_func=lambda: NOW)
+    return memory.size
+
+
+def _write_fresh_index(tmp_path, n):
+    """Build and save a brand-new analog index of n entries, simulating the
+    cron having grown (or replaced) the on-disk file with a newer mtime."""
+    import numpy as np
+
+    from meme_intelligence.learning.analog import AnalogEntry, AnalogMemory
+    from meme_intelligence.learning.features import FEATURE_DIM
+    from meme_intelligence.learning.models import OutcomeBucket
+
+    memory = AnalogMemory(now_func=lambda: NOW)
+    for i in range(n):
+        vec = np.ones(FEATURE_DIM, dtype=np.float32) * (i + 1)
+        memory.add(AnalogEntry(address=f"fresh{i}", chain="solana",
+                               bucket=OutcomeBucket.RUG, resolved_at=NOW), vec)
+    memory.save(str(tmp_path / "index.faiss"), str(tmp_path / "index_meta.joblib"))
+    return n
+
+
+def test_monitor_persist_does_not_clobber_grown_index(tmp_path):
+    """Regression: a monitor-style service (never resolves, _models_dirty stays
+    False) whose shutdown persist() runs must NOT overwrite an index another
+    process grew. Otherwise its stale boot copy resets the file forever."""
+    settings = _disk_settings(tmp_path)
+
+    # Cron process A: resolves coins, grows + persists the index.
+    cron = LearningService(settings, now_func=lambda: NOW)
+    _resolve_batch(cron, "a", 5)
+    cron.persist()
+    cron.store.close()
+    assert _ondisk_analog_size(tmp_path) == 5
+
+    # Monitor process B: loads the index, never resolves anything.
+    monitor = LearningService(settings, now_func=lambda: NOW)
+    assert monitor._analog.size == 5            # boot copy
+    assert monitor._models_dirty is False
+    assert monitor._analog_dirty is False       # never mutated the index
+
+    # Cron keeps growing the on-disk index while the monitor is up.
+    _write_fresh_index(tmp_path, 9)
+    assert _ondisk_analog_size(tmp_path) == 9
+
+    # Monitor shutdown persist must leave the grown file untouched.
+    monitor.persist()
+    assert _ondisk_analog_size(tmp_path) == 9   # the cron's 9, NOT the boot 5
+    monitor.store.close()
+
+
+def test_maybe_reload_analog_picks_up_growth_without_restart(tmp_path):
+    """Regression: the monitor must reflect index growth the cron wrote,
+    without a restart — both /mind (get_learning_metrics) and live verdicts
+    (evaluate_coin) reload on a cheap mtime check."""
+    settings = _disk_settings(tmp_path)
+    cron = LearningService(settings, now_func=lambda: NOW)
+    _resolve_batch(cron, "a", 5)
+    cron.persist()
+    cron.store.close()
+
+    monitor = LearningService(settings, now_func=lambda: NOW)
+    assert monitor.get_learning_metrics(persist=False)["analog_memory_size"] == 5
+
+    # The cron grows the file (new mtime + more coins) while the monitor runs.
+    _write_fresh_index(tmp_path, 9)
+
+    # /mind reflects the larger memory without a restart...
+    assert monitor.get_learning_metrics(persist=False)["analog_memory_size"] == 9
+    # ...and so does the live verdict path.
+    _write_fresh_index(tmp_path, 12)
+    monitor.evaluate_coin("live", "solana", _rug_series())
+    assert monitor._analog.size == 12
+    monitor.store.close()
+
+
+def test_mutating_process_still_persists_grown_index(tmp_path):
+    """A process that mutates the analog index (instant learning on resolve)
+    flushes the grown index to disk — the guard only silences pure readers.
+    Each resolve persists internally and clears _analog_dirty, so the on-disk
+    file always reflects the latest growth."""
+    settings = _disk_settings(tmp_path)
+    cron = LearningService(settings, now_func=lambda: NOW)
+    _resolve_batch(cron, "a", 5)
+    assert cron._analog_dirty is False          # flushed by the per-resolve persist
+    assert _ondisk_analog_size(tmp_path) == 5
+
+    # Resolve more — each writer resolve flushes the grown index.
+    _resolve_batch(cron, "b", 3)
+    cron.persist()
+    assert _ondisk_analog_size(tmp_path) == 8
+    cron.store.close()
+
+
+def test_feature_version_mismatch_blocks_analog_reload(tmp_path):
+    """After a feature-version mismatch the on-disk index is in an old feature
+    space; _maybe_reload_analog must never adopt it, even if the file changes."""
+    import joblib
+
+    settings = _disk_settings(tmp_path)
+    svc1 = LearningService(settings, now_func=lambda: NOW)
+    _seed(svc1)
+    assert svc1.retrain_if_due() is True
+    svc1.persist()
+    svc1.store.close()
+
+    state = joblib.load(str(tmp_path / "state.joblib"))
+    state["feature_version"] = 1
+    joblib.dump(state, str(tmp_path / "state.joblib"))
+
+    svc2 = LearningService(settings, now_func=lambda: NOW)
+    assert svc2._analog_reload_ok is False
+    assert svc2.get_learning_metrics(persist=False)["analog_memory_size"] == 0
+
+    # Even a fresh (newer-mtime) index on disk must not be reloaded.
+    _write_fresh_index(tmp_path, 7)
+    assert svc2.get_learning_metrics(persist=False)["analog_memory_size"] == 0
+    svc2.store.close()
+
+
+def test_torn_index_reload_is_swallowed_and_retries(tmp_path):
+    """A torn/mid-write index during reload keeps the current in-memory copy
+    (no crash) and retries on the next call (Rule 7)."""
+    settings = _disk_settings(tmp_path)
+    cron = LearningService(settings, now_func=lambda: NOW)
+    _resolve_batch(cron, "a", 5)
+    cron.persist()
+    cron.store.close()
+
+    monitor = LearningService(settings, now_func=lambda: NOW)
+    assert monitor._analog.size == 5
+
+    # Simulate a torn write: garbage in index.faiss, and bump the meta mtime
+    # (the reload freshness key) so a reload is actually attempted.
+    with open(str(tmp_path / "index.faiss"), "wb") as fh:
+        fh.write(b"not a real faiss index")
+    meta = str(tmp_path / "index_meta.joblib")
+    st = os.stat(meta)
+    os.utime(meta, ns=(st.st_atime_ns + 1_000_000_000, st.st_mtime_ns + 1_000_000_000))
+
+    # Reload is attempted, fails, and is swallowed: the copy stays put.
+    assert monitor.get_learning_metrics(persist=False)["analog_memory_size"] == 5
+
+    # A subsequent valid write is picked up on the next call (retry).
+    _write_fresh_index(tmp_path, 9)
+    assert monitor.get_learning_metrics(persist=False)["analog_memory_size"] == 9
+    monitor.store.close()
+
+
+def test_unchanged_mtime_is_a_cheap_noop_reload(tmp_path):
+    """When the index file has not changed, _maybe_reload_analog does no reload
+    work — it keeps the exact same in-memory object (the cheap mtime path)."""
+    settings = _disk_settings(tmp_path)
+    cron = LearningService(settings, now_func=lambda: NOW)
+    _resolve_batch(cron, "a", 5)
+    cron.persist()
+    cron.store.close()
+
+    monitor = LearningService(settings, now_func=lambda: NOW)
+    before = monitor._analog
+    monitor._maybe_reload_analog()
+    monitor.get_learning_metrics(persist=False)
+    monitor.evaluate_coin("live", "solana", _rug_series())
+    assert monitor._analog is before   # never reloaded
+    monitor.store.close()
+
+
+# The monitor calls retrain_if_due every scan cycle (workflow controller). The
+# tests above simulate a "monitor" that only reads; these exercise the real
+# controller path, where the monitor DOES retrain — the case that reintroduced
+# the frozen-mind / clobber bugs when a single _models_dirty flag latched the
+# analog-index write and reload for a mere classifier warm-start.
+
+
+def test_monitor_warmstart_retrain_does_not_clobber_or_freeze(tmp_path):
+    """Regression (frozen mind): a warm-start retrain in the monitor leaves the
+    analog index untouched, so it must NOT clobber the cron's grown on-disk
+    index and must keep reloading the cron's later growth."""
+    settings = _disk_settings(tmp_path)
+
+    # Cron: seed + first (full) train, growing and persisting the index.
+    cron = LearningService(settings, now_func=lambda: NOW)
+    _seed(cron)                              # 30 resolved coins
+    assert cron.retrain_if_due() is True     # first train: full rebuild, fits scaler
+    cron.persist()
+    cron.store.close()
+    assert _ondisk_analog_size(tmp_path) == 30
+
+    # Monitor: boots as a reader (scaler fitted, classifier ready, index=30).
+    monitor = LearningService(settings, now_func=lambda: NOW)
+    assert monitor._analog.size == 30
+    assert monitor._analog_dirty is False
+
+    # Cron keeps resolving: 5 new coins reach the shared DB and on-disk index.
+    cron2 = LearningService(settings, now_func=lambda: NOW)
+    _resolve_batch(cron2, "grow", 5)
+    cron2.store.close()
+    assert _ondisk_analog_size(tmp_path) == 35
+
+    # The monitor's periodic retrain fires as a warm-start (scaler already fit,
+    # 5 new resolved >= retrain_every_n, no drift, no scaler refit due).
+    assert monitor.retrain_if_due() is True
+    assert monitor._analog_dirty is False            # warm-start left it clean
+    assert _ondisk_analog_size(tmp_path) == 35        # NOT clobbered back to 30
+
+    # Reload still works after the retrain: further cron growth reaches verdicts.
+    cron3 = LearningService(settings, now_func=lambda: NOW)
+    _resolve_batch(cron3, "more", 5)
+    cron3.store.close()
+    assert _ondisk_analog_size(tmp_path) == 40
+    monitor.evaluate_coin("live", "solana", _rug_series())
+    assert monitor._analog.size == 40                 # reloaded, not frozen at 30
+    monitor.store.close()
+
+
+def test_monitor_drift_retrain_does_not_clobber_graded_ensemble(tmp_path):
+    """Regression: the monitor's drift path resets its in-memory ensemble but
+    must NOT persist that reset over the cron's graded accuracy history — the
+    monitor never grades the ensemble, so it does not own it."""
+    settings = _disk_settings(tmp_path)
+
+    # Cron: seed, train, then grade six blended verdicts through the real path.
+    cron = LearningService(settings, now_func=lambda: NOW)
+    _seed(cron)
+    cron.retrain_if_due()
+    for i in range(6):
+        addr = f"graded{i}"
+        cron.evaluate_coin(addr, "solana", _rug_series())
+        cron.resolve_outcome(addr, "solana", 24.0, -95.0, is_rug=True)
+    cron.persist()
+    cron.store.close()
+
+    from meme_intelligence.learning.ensemble import AdaptiveEnsemble
+    assert AdaptiveEnsemble.load(str(tmp_path / "ensemble.joblib")).final_samples == 6
+
+    # Monitor: boots, then a stale/bad in-memory window drives drift. Injecting
+    # via the ensemble object (not resolve_outcome) mirrors the monitor, which
+    # never grades — so _ensemble_dirty stays False.
+    monitor = LearningService(settings, now_func=lambda: NOW)
+    monitor._ensemble.reset_final_history()
+    for _ in range(6):
+        monitor._ensemble.record_outcome({}, "pump", final_label="rug")  # all wrong
+    assert monitor._ensemble_dirty is False
+
+    assert monitor.retrain_if_due() is True           # drift fires the rebuild
+    assert monitor._ensemble.final_samples == 0       # in-memory history reset
+    monitor.store.close()
+
+    # The cron's graded ensemble on disk survived (not overwritten with 0).
+    assert AdaptiveEnsemble.load(str(tmp_path / "ensemble.joblib")).final_samples == 6
+
+
+def test_reload_rejects_incompatible_feature_version(tmp_path):
+    """Split deploy: a peer rebuilds the on-disk index in a NEW feature space
+    while this process still runs old code. _maybe_reload_analog must refuse the
+    incompatible index rather than query it with the wrong scaler (Rule 8)."""
+    import joblib
+
+    from meme_intelligence.learning.features import FEATURE_VERSION
+
+    settings = _disk_settings(tmp_path)
+    cron = LearningService(settings, now_func=lambda: NOW)
+    _resolve_batch(cron, "a", 5)
+    cron.persist()
+    cron.store.close()
+
+    monitor = LearningService(settings, now_func=lambda: NOW)
+    assert monitor._analog.size == 5
+
+    # Simulate the peer having upgraded FEATURE_VERSION: bump the meta's version
+    # (and its mtime, the reload freshness key).
+    meta_path = str(tmp_path / "index_meta.joblib")
+    payload = joblib.load(meta_path)
+    payload["feature_version"] = FEATURE_VERSION + 1
+    joblib.dump(payload, meta_path)
+
+    monitor.evaluate_coin("live", "solana", _rug_series())
+    assert monitor._analog_reload_ok is False         # refused and latched off
+    assert monitor._analog.size == 5                  # kept its own compatible copy
+    monitor.store.close()
