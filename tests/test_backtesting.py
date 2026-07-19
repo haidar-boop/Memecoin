@@ -300,3 +300,79 @@ def test_old_database_migrates_new_columns(tmp_path):
         storage.record_snapshot(master(1, 80.0, Classification.WATCHLIST, T0),
                                 source="test", pair=pair(1, 1.0), regime="bull")
         assert storage.predictions()[0]["price_usd"] == pytest.approx(1.0)
+
+
+# ---- Batched mind-layer persists during a refresh run (2026-07-19) ----
+
+class RecordingBatchedLearning:
+    """Mind-layer stand-in WITH deferred_persist: records the batching calls
+    so the wiring (context entered, flush cadence passed through, resolves
+    still delivered inside the block) is verifiable."""
+
+    def __init__(self):
+        self.resolved: list[tuple] = []
+        self.flush_every = None
+        self.entered = 0
+        self.exited = 0
+
+    def deferred_persist(self, *, flush_every=0):
+        import contextlib
+
+        self.flush_every = flush_every
+
+        @contextlib.contextmanager
+        def _ctx():
+            self.entered += 1
+            try:
+                yield self
+            finally:
+                self.exited += 1
+
+        return _ctx()
+
+    def resolve_outcome(self, address, chain, window, change, *, is_rug=False):
+        assert self.entered > self.exited, \
+            "resolve_outcome must run INSIDE the deferred-persist block"
+        self.resolved.append((address, window, is_rug))
+
+
+class PlainLearning:
+    """Mind-layer stand-in WITHOUT deferred_persist (Rule 18 fallback)."""
+
+    def __init__(self):
+        self.resolved: list[tuple] = []
+
+    def resolve_outcome(self, address, chain, window, change, *, is_rug=False):
+        self.resolved.append((address, window, is_rug))
+
+
+async def test_refresh_batches_mind_persists_with_configured_cadence(tmp_path):
+    with make_storage(tmp_path) as storage:
+        seed(storage, 1, Classification.STRONG_CANDIDATE, 1.00, 2.00)
+        mind = RecordingBatchedLearning()
+        settings = BacktestSettings(learning_persist_every_n=123)
+        recorded = await refresh_outcomes(storage, None, settings=settings,
+                                          learning_service=mind,
+                                          now_func=lambda: NOW)
+        assert recorded == 1
+        assert mind.entered == 1 and mind.exited == 1   # block opened + closed
+        assert mind.flush_every == 123                  # cadence from settings
+        assert len(mind.resolved) == 1                  # resolve delivered inside
+
+
+async def test_refresh_works_with_a_learning_service_lacking_deferred_persist(tmp_path):
+    with make_storage(tmp_path) as storage:
+        seed(storage, 1, Classification.STRONG_CANDIDATE, 1.00, 2.00)
+        mind = PlainLearning()
+        recorded = await refresh_outcomes(storage, None, settings=SETTINGS,
+                                          learning_service=mind,
+                                          now_func=lambda: NOW)
+        assert recorded == 1
+        assert len(mind.resolved) == 1                  # old behavior intact
+
+
+def test_learning_persist_every_n_validated():
+    assert BacktestSettings().learning_persist_every_n == 200
+    assert BacktestSettings(learning_persist_every_n=0).learning_persist_every_n == 0
+    with pytest.raises(ConfigurationError, match="learning_persist_every_n"):
+        BacktestSettings(learning_persist_every_n=-1)

@@ -27,6 +27,7 @@ decoupled and testable (Rule 4).
 
 from __future__ import annotations
 
+import contextlib
 import os
 from datetime import datetime, timezone
 from typing import Callable, Sequence
@@ -118,6 +119,11 @@ class LearningService:
         # predictions are marked scored durably, those grades could never be
         # regenerated (bug-hunt finding).
         self._ensemble_dirty = False
+        # Deferred-persist state (see deferred_persist): depth supports
+        # nesting; writes/flush_every drive the mid-block flush cadence.
+        self._defer_depth = 0
+        self._deferred_writes = 0
+        self._defer_flush_every = 0
 
         self._load_artifacts()
 
@@ -174,7 +180,53 @@ class LearningService:
             self._logger.error("failed to load learning artifacts (%s); cold start", exc)
 
     def persist(self) -> None:
-        """Persist all mutable artifacts. Called after learning updates."""
+        """Persist all mutable artifacts. Called after learning updates.
+
+        Inside a :meth:`deferred_persist` block the write is BATCHED instead
+        of immediate (2026-07-19, "store everything faster"): resolving a
+        coin calls persist(), and an outcome-refresh run resolves thousands —
+        each write rewrites the full analog index (~3.4MB), so per-coin
+        persistence turned one cron run into gigabytes of redundant disk
+        writes. Deferred, the artifacts are flushed every ``flush_every``
+        resolutions and once at block exit. Outside a deferral block the
+        behavior is exactly as before (immediate write, Rule 18).
+        """
+        if self._defer_depth > 0:
+            self._deferred_writes += 1
+            if (self._defer_flush_every > 0
+                    and self._deferred_writes >= self._defer_flush_every):
+                self._deferred_writes = 0
+                self._persist_now()
+            return
+        self._persist_now()
+
+    @contextlib.contextmanager
+    def deferred_persist(self, *, flush_every: int = 0):
+        """Batch persist() calls inside the block; flush on exit.
+
+        ``flush_every`` > 0 additionally flushes mid-block every that many
+        deferred writes, bounding how much instant-learning progress a crash
+        could lose (measured outcome labels are always durable in SQLite the
+        moment they are recorded — this only affects the model artifacts).
+        Re-entrant: nested blocks flush once, at the outermost exit.
+        """
+        self._defer_depth += 1
+        if self._defer_depth == 1:
+            self._defer_flush_every = max(0, int(flush_every))
+            self._deferred_writes = 0
+        try:
+            yield self
+        finally:
+            self._defer_depth -= 1
+            if self._defer_depth == 0:
+                had_writes = self._deferred_writes > 0
+                self._deferred_writes = 0
+                self._defer_flush_every = 0
+                if had_writes:
+                    self._persist_now()
+
+    def _persist_now(self) -> None:
+        """The real artifact write — see :meth:`persist` for the contract."""
         if self._state_dir == ":memory:":
             return
         os.makedirs(self._state_dir, exist_ok=True)

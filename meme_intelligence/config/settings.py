@@ -646,6 +646,16 @@ class BacktestSettings:
     alert_useful_drift_points: float = 10.0  # score drift that labels an alert useful (S12/29)
     alert_outcome_min_hours: float = 24.0    # alerts younger than this stay unlabeled
     min_predictions_for_weights: int = 10    # weight experiments need a real sample (S1)
+    # Batched mind-layer saves during an outcome-refresh run (2026-07-19,
+    # operator request "store everything faster"): resolving a coin used to
+    # rewrite ALL learning artifacts to disk per coin — a 2,000-coin cron run
+    # rewrote the ~3.4MB analog index 2,000 times (~7GB of redundant writes).
+    # The refresh loop now defers those saves and flushes every N resolutions
+    # plus once at the end. Outcome labels themselves are still written to
+    # SQLite durably the moment they are measured — a crash mid-run loses at
+    # most the last N coins' analog-index appends, never a measured outcome.
+    # 0 = flush only at the end of the run.
+    learning_persist_every_n: int = 200
 
     def __post_init__(self) -> None:
         windows = [w.strip() for w in self.windows_hours.split(",") if w.strip()]
@@ -671,6 +681,10 @@ class BacktestSettings:
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
                 raise ConfigurationError(f"backtest setting '{name}' must be positive")
+        if self.learning_persist_every_n < 0:
+            raise ConfigurationError(
+                "backtest learning_persist_every_n must be >= 0 (0 = flush only at "
+                f"the end of a refresh run), got {self.learning_persist_every_n}")
 
     @property
     def window_list(self) -> list[float]:

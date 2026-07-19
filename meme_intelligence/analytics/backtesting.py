@@ -23,6 +23,7 @@ Doctrine encoded here (Sections 1 and 14):
 
 from __future__ import annotations
 
+import contextlib
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -86,61 +87,72 @@ async def refresh_outcomes(
     """
     now = now_func()
     recorded = 0
-    for prediction in storage.predictions():
-        predicted_at = _parse_at(prediction["created_at"])
-        base_price = prediction["price_usd"]
-        existing = storage.outcomes_for_snapshot(prediction["snapshot_id"])
-        series = None  # fetched lazily per token
+    # Batch the mind layer's per-resolution artifact saves for the whole run
+    # (2026-07-19 "store everything faster"): resolving thousands of coins
+    # used to rewrite the full analog index once PER COIN. Duck-typed like
+    # every other learning_service touchpoint here — a stand-in without
+    # deferred_persist just keeps the old per-coin behavior (Rule 18).
+    if learning_service is not None and hasattr(learning_service, "deferred_persist"):
+        batcher = learning_service.deferred_persist(
+            flush_every=settings.learning_persist_every_n)
+    else:
+        batcher = contextlib.nullcontext()
+    with batcher:
+        for prediction in storage.predictions():
+            predicted_at = _parse_at(prediction["created_at"])
+            base_price = prediction["price_usd"]
+            existing = storage.outcomes_for_snapshot(prediction["snapshot_id"])
+            series = None  # fetched lazily per token
 
-        for window in settings.window_list:
-            if window in existing:
-                continue
-            target = predicted_at + timedelta(hours=window)
-            if target > now:
-                continue  # not due yet — never measured early (Section 14)
+            for window in settings.window_list:
+                if window in existing:
+                    continue
+                target = predicted_at + timedelta(hours=window)
+                if target > now:
+                    continue  # not due yet — never measured early (Section 14)
 
-            if series is None:
-                series = storage.snapshots_for_token(prediction["token_id"])
-            measurement = _nearest_snapshot(series, prediction["snapshot_id"],
-                                            target, window, settings)
-            source = "snapshot"
-            if measurement is None and market_service is not None:
-                measurement = await _live_measurement(market_service, prediction, now)
-                source = "live_fetch"
-            if measurement is None:
-                continue  # honest gap: nothing observed near this window
+                if series is None:
+                    series = storage.snapshots_for_token(prediction["token_id"])
+                measurement = _nearest_snapshot(series, prediction["snapshot_id"],
+                                                target, window, settings)
+                source = "snapshot"
+                if measurement is None and market_service is not None:
+                    measurement = await _live_measurement(market_service, prediction, now)
+                    source = "live_fetch"
+                if measurement is None:
+                    continue  # honest gap: nothing observed near this window
 
-            price, liquidity, measured_at = measurement
-            change = (100.0 * (price - base_price) / base_price
-                      if price is not None and base_price else None)
-            survived = (liquidity >= settings.survival_min_liquidity_usd
-                        if liquidity is not None else None)
-            storage.record_outcome(
-                snapshot_id=prediction["snapshot_id"],
-                token_id=prediction["token_id"],
-                window_hours=window,
-                target_at=target.isoformat(),
-                measured_at=measured_at.isoformat(),
-                price_usd=price,
-                price_change_percent=change,
-                liquidity_usd=liquidity,
-                survived=survived,
-                source=source,
-            )
-            recorded += 1
+                price, liquidity, measured_at = measurement
+                change = (100.0 * (price - base_price) / base_price
+                          if price is not None and base_price else None)
+                survived = (liquidity >= settings.survival_min_liquidity_usd
+                            if liquidity is not None else None)
+                storage.record_outcome(
+                    snapshot_id=prediction["snapshot_id"],
+                    token_id=prediction["token_id"],
+                    window_hours=window,
+                    target_at=target.isoformat(),
+                    measured_at=measured_at.isoformat(),
+                    price_usd=price,
+                    price_change_percent=change,
+                    liquidity_usd=liquidity,
+                    survived=survived,
+                    source=source,
+                )
+                recorded += 1
 
-            # Feed the mind layer the same measurement (Section 1): a return
-            # we could compute, with a confirmed rug when liquidity fell below
-            # the survival floor (survived is False; unknown liquidity is not
-            # a rug — Rule 8).
-            if learning_service is not None and change is not None:
-                try:
-                    learning_service.resolve_outcome(
-                        prediction["address"], prediction["chain"],
-                        float(window), change, is_rug=(survived is False))
-                except Exception as exc:  # noqa: BLE001 — best-effort, never break
-                    _logger.warning("mind-layer resolve_outcome failed for %s: %s",
-                                    prediction["address"], exc)
+                # Feed the mind layer the same measurement (Section 1): a return
+                # we could compute, with a confirmed rug when liquidity fell below
+                # the survival floor (survived is False; unknown liquidity is not
+                # a rug — Rule 8).
+                if learning_service is not None and change is not None:
+                    try:
+                        learning_service.resolve_outcome(
+                            prediction["address"], prediction["chain"],
+                            float(window), change, is_rug=(survived is False))
+                    except Exception as exc:  # noqa: BLE001 — best-effort, never break
+                        _logger.warning("mind-layer resolve_outcome failed for %s: %s",
+                                        prediction["address"], exc)
     if recorded:
         _logger.info("recorded %d new outcome measurement(s)", recorded)
     return recorded

@@ -1478,3 +1478,35 @@ Suite: **840 passing** (+13: executor balance/fee-buffer tests, keyboard/
 sink rendering tests, telegram callback-handling tests including legacy-
 format backward compatibility, double-tap, and off-guard-before-lookup
 ordering).
+
+## 2026-07-19 — Faster grading: hourly outcome cron + batched mind-layer saves
+
+Operator request ("how do we make it grade faster and store everything
+faster"), with an explicit reversal agreement: if he says reverse, this
+gets reverted (git revert + crontab back to */6).
+
+1. **Backtest cron 6h -> hourly** (deploy/install-cron.sh: `15 * * * *`).
+   A coin whose 1h measurement window came due used to wait up to 6 hours
+   for the next run; now at most ~1. Same total work spread over smaller
+   runs; flock still prevents overlap. Deployed by re-running
+   `bash deploy/install-cron.sh` (the installer replaces its own block).
+2. **Batched artifact saves during a refresh run.**
+   `LearningService.deferred_persist(flush_every=N)` context manager:
+   inside it, `persist()` calls are counted, flushed every N and once at
+   exit; outside it, behavior is byte-identical to before (Rule 18).
+   `refresh_outcomes` wraps its prediction loop in it (duck-typed —
+   a learning stand-in without the method keeps the old per-coin path).
+   Cadence from `BacktestSettings.learning_persist_every_n` (default 200,
+   env `MEMEINTEL_BACKTEST_LEARNING_PERSIST_EVERY_N`, 0 = end-of-run
+   only). Previously a 2,052-coin cron run rewrote the ~3.4MB analog
+   index 2,052 times (~7GB of redundant writes); now ~11 rewrites.
+   Crash trade-off (documented, accepted): measured outcome labels are
+   durable in SQLite the moment they are recorded; a crash mid-run loses
+   at most the last N coins' in-memory analog appends — and because those
+   coins are already marked resolved, their analog entries return at the
+   next full index rebuild, not before. Instant learning is unaffected
+   (the in-memory index still grows per resolution — tested).
+
+Suite: **849 passing** (+9: 6 deferral-semantics tests incl. reentrancy
+and immediate-outside-block, 2 refresh wiring tests incl. the Rule 18
+fallback, 1 settings validation).

@@ -390,3 +390,75 @@ def test_retrain_not_due_below_threshold():
     service.resolve_outcome("c1", "solana", 24.0, 80.0)
     # Only one resolved coin, far below min_train_samples.
     assert service.retrain_if_due() is False
+
+
+# ---- Deferred persist (2026-07-19, "store everything faster") ----
+
+def _count_real_persists(service):
+    """Monkeypatch-free spy: swap _persist_now for a counter."""
+    calls = {"n": 0}
+    original = service._persist_now
+
+    def counting():
+        calls["n"] += 1
+        original()
+
+    service._persist_now = counting
+    return calls
+
+
+def test_deferred_persist_batches_and_flushes_on_exit():
+    service = _service()
+    calls = _count_real_persists(service)
+    with service.deferred_persist(flush_every=3):
+        for _ in range(7):
+            service.persist()
+        assert calls["n"] == 2          # flushed at 3 and 6, not per call
+    assert calls["n"] == 3              # final flush on exit (7th write pending)
+
+
+def test_deferred_persist_no_flush_on_exit_without_writes():
+    service = _service()
+    calls = _count_real_persists(service)
+    with service.deferred_persist(flush_every=10):
+        pass
+    assert calls["n"] == 0              # nothing written, nothing flushed
+
+
+def test_deferred_persist_zero_means_flush_only_at_exit():
+    service = _service()
+    calls = _count_real_persists(service)
+    with service.deferred_persist(flush_every=0):
+        for _ in range(500):
+            service.persist()
+        assert calls["n"] == 0
+    assert calls["n"] == 1
+
+
+def test_persist_outside_deferral_is_immediate():
+    service = _service()
+    calls = _count_real_persists(service)
+    service.persist()
+    service.persist()
+    assert calls["n"] == 2              # unchanged pre-existing behavior (Rule 18)
+
+
+def test_deferred_persist_is_reentrant():
+    service = _service()
+    calls = _count_real_persists(service)
+    with service.deferred_persist(flush_every=0):
+        with service.deferred_persist(flush_every=0):
+            service.persist()
+        assert calls["n"] == 0          # inner exit does NOT flush early
+    assert calls["n"] == 1              # single flush at the outermost exit
+
+
+def test_resolve_outcome_inside_deferral_still_learns_instantly():
+    """Batching only defers DISK writes — the in-memory analog index still
+    grows the moment a coin resolves (instant learning intact)."""
+    service = _service()
+    with service.deferred_persist(flush_every=0):
+        service.evaluate_coin("d1", "solana", _rug_series())
+        service.resolve_outcome("d1", "solana", 24.0, -95.0, is_rug=True)
+        metrics = service.get_learning_metrics(persist=False)
+        assert metrics["analog_memory_size"] == 1   # learned before any flush
