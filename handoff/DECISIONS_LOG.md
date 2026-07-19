@@ -1437,6 +1437,77 @@ tests (default-on suppression, fresh pass-through, unknown age, 0=off,
 protective exemption, config validation). Suite: **827 passing** (821
 restored + 6).
 
+## 2026-07-17 (later) — 3-hour freshness window + wallet intelligence rebuilt with the credit gate
+
+Operator reported buy-side alerts full of "unusual graphs like a robot is
+controlling it" — volume-bot/bundler launches, which dominate the sub-1h
+pump.fun population his 1h freshness gate had concentrated on. His call:
+"Make it three hours and build a wallet intelligents thing."
+
+1. **opportunity_max_age_hours default 1.0 -> 3.0.** Most bot-run launches
+   collapse or dump inside the first hour; a coin still healthy at 2-3h is
+   likelier organic. Same gate semantics (buy-side only, protective alerts
+   exempt, unknown age never trips).
+2. **Wallet-intelligence credit gate rebuilt** (the 2026-07-15 design,
+   re-implemented on the restored 2026-07-13 tree — the original was
+   content-deleted by the restore): `WalletIntelSettings.credit_gate_min_
+   security_score` (default 50, env-configurable); `ResearchPipeline._worth_
+   wallet_lookup` spends a metered lookup only on a candidate that could
+   still earn a buy-side alert (not destructive, score >= floor, tradeable,
+   inside the alert engine's own ceiling AND the 3h freshness window —
+   deliberately the same thresholds the alert engine enforces, so no lookup
+   is ever spent on a coin the operator can never be pitched);
+   `force_wallet_check` bypass threaded through all 5 controller call
+   sites (holdings always checked; /check always checks). Wallet
+   intelligence is the layer with the purpose-built bot-chart detectors
+   (identical-size trade fraction, dominant-buyer volume fraction) — with
+   the gate, re-enabling it costs a handful of lookups per day instead of
+   one per analyzed token (the 2026-07-11 credit-burn incident).
+   The monitor flag stays operator-controlled in .env; flipping it on is
+   part of the deploy block. Until the Helius account's monthly credits
+   reset, gated lookups will fail gracefully (429) and analysis continues
+   without wallet data — it starts working the moment credits return.
+
+Suite: **837 passing** (+10: 9 pipeline gate tests incl. an empirically
+derived weak-but-not-destructive security fixture at 35.25, 1 controller
+holdings-bypass test).
+
+### Review pass on the 3h + credit-gate build (same day): 3 confirmed findings, all fixed
+
+A 5-agent review (2 finders, 3 adversarial verifiers — operator's agent cap)
+confirmed and fixed:
+
+1. **Momentum alerts had NO security floor** (medium; the review's core
+   find): opportunity tiers require security >= 80, but `_momentum_rule`
+   fired for any non-destructive coin — so a coin scoring 40-49 purely on
+   soft flags (zero rug signals; the verifier constructed one empirically at
+   44.2) could ride bot-painted volume to a delivered MEDIUM momentum alert
+   while the credit gate, by design, skipped its wallet screening. Fixed:
+   `AlertThresholds.momentum_min_security_score` (default 50, aligned with
+   the credit gate's floor; 0 = off). The gate's "below the floor never
+   reaches the phone as a buy signal" justification is now actually true.
+2. **No spend ceiling on gated lookups** (medium): every gate input is
+   attacker-manufacturable (clean-by-construction launches), theoretical
+   drain ~38k metered calls/day. Fixed:
+   `credit_gate_max_lookups_per_day` (default 200/UTC day, warn-once log
+   on exhaustion).
+3. **Watchlist rechecks re-spent on the same hot coin every ~7.5 min**
+   (found in overflow, fixed with #2's machinery):
+   `credit_gate_cooldown_minutes` (default 60) — per-token cooldown;
+   forced lookups stamp it too so a gated lookup right after a forced one
+   is not re-spent. Forced lookups (holdings, /check, plan/report) bypass
+   budget AND cooldown — operator safety is never starved.
+4. **CLI plan/report was silently gated** (overflow): operator-initiated
+   deep research now passes `force_wallet_check=True` like /check.
+
+Accepted limitation (documented, not built): the gate's freshness/ceiling
+conditions also govern a lookup that powers PROTECTIVE whale-exit/insider
+signals, so a watched-but-not-held coin older than 3h loses wallet-based
+whale-exit detection. The protective contract runs through /holding —
+holdings are always fully checked. Revisit only if the operator asks.
+
+Suite: **844 passing** (+7).
+
 ## 2026-07-18 — Buy buttons: percent-of-balance instead of fixed SOL presets
 
 Operator request: "remove the 0.01 and the 0.04 SOL [buttons] and replace
@@ -1547,3 +1618,42 @@ Fixes:
 Suite: **848 passing** (+7: retry-then-succeed, retries-exhausted short
 message, dump retries, ambiguous-error-never-retried, slippage/non-
 slippage rejection classification, compact generic RPC error).
+## 2026-07-20 — Wallet tracking restored as a DORMANT kit (operator request, paid-Helius plan)
+
+Operator: "create the wallet tracking with Helius paid membership but
+don't actually enable it or touch or interfere with the bot and its
+thinking and scanning. Just build it, keep it aside and add simple
+instructions on the read me on how to enable it and add the keys."
+
+Done by reverting the 2026-07-18 revert (`aa3be05`), which restores the
+already-reviewed credit-gated wallet intelligence build (`1ac5774` +
+review fixes `a5691a4`) — Rule 18, extend rather than rewrite — with two
+deliberate default changes so TODAY'S behavior is untouched:
+
+1. `opportunity_max_age_hours` stays **1.0** (the restored commit had
+   widened it to 3.0; the operator kept the 1h window when he reverted
+   on 2026-07-18, so the 1h default stands).
+2. `momentum_min_security_score` default **0 = off** (was 50 in the
+   restored commit). The floor is part of the wallet-tracking kit: the
+   enable script sets it to 50 together with the monitor flag, keeping
+   it aligned with the credit gate's floor — but until then momentum
+   alerts behave exactly as they do today.
+
+What is now sitting ready, all dormant behind
+`MEMEINTEL_WALLET_ENABLE_IN_MONITOR=false`: the pipeline credit gate
+(`_worth_wallet_lookup`: lookups only on candidates that could still
+earn a buy-side alert), spend bounds (200 lookups/UTC-day budget,
+60-min per-token cooldown), and forced-lookup bypasses (holdings,
+/check, plan/report always check).
+
+New: `deploy/enable-wallet-tracking.sh` (on: takes the paid Helius key,
+updates .env in place — the loader keeps the FIRST occurrence of a key,
+so appending duplicates would silently do nothing — sets the monitor
+flag + momentum floor 50, restarts the service; off: reverses both
+flags). README gained a "Wallet tracking (smart money)" section with
+the plain-language enable/disable steps. The trading account
+(`MEMEINTEL_EXECUTION_HELIUS_API_KEY`) is never touched by the script —
+the money path keeps its own credit budget.
+
+Suite: **865 passing** (848 + 17 restored gate/floor tests, updated to
+the dormant defaults).

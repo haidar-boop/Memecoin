@@ -461,6 +461,10 @@ async def _gather_assessments(args, settings):
             result = await pipeline.analyze_pair(
                 pair, regime=regime,
                 research_mode=ResearchMode(getattr(args, "ai_mode", "standard")),
+                # Operator-initiated deep research (plan/report): always the
+                # deliberate, rare spend the credit gate must not block
+                # (2026-07-17 review finding — mirrors /check).
+                force_wallet_check=True,
             )
     finally:
         if wallet_service is not None:

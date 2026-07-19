@@ -120,6 +120,58 @@ Configuration is entirely environment-driven — see `.env.example` for every
 variable and its default. Secrets (API keys) are only ever read from the
 environment.
 
+## Wallet tracking (smart money) — built, OFF by default
+
+Wallet tracking looks at **who** holds and trades each candidate coin:
+whale concentration, wallets accumulating vs dumping, and the purpose-built
+bot-chart detectors (many identical-size trades, one wallet driving most of
+the buy volume). When enabled it feeds the on-chain score, adds
+smart-money/whale alert types, and screens out robot-painted charts.
+
+It is fully built and tested but **disabled by default**, because every
+lookup spends metered Helius API credits — the free tier was exhausted in
+about 3 days the one time it ran unrestricted. It is now protected by a
+credit gate: a lookup is only spent on a coin that could still earn a
+buy-side alert (not a rug, security score ≥ 50, tradeable, young enough to
+alert on), capped at 200 lookups per day with a 60-minute per-coin
+cooldown. Operator-initiated checks (`/check`, holdings, `plan`/`report`)
+always bypass the gate.
+
+**To enable it (needs a PAID Helius plan — do not enable on a free key):**
+
+1. Buy a paid plan at https://dashboard.helius.dev and copy the API key
+   from the dashboard.
+2. On the droplet, run:
+
+   ```bash
+   cd ~/meme-intelligence
+   git pull
+   bash deploy/enable-wallet-tracking.sh PASTE_YOUR_PAID_HELIUS_KEY_HERE
+   ```
+
+   That's it — the script updates `.env`, turns the monitor flag on, and
+   restarts the service. It does NOT touch the trading key
+   (`MEMEINTEL_EXECUTION_HELIUS_API_KEY`) — trading keeps its own separate
+   Helius account on purpose, so a busy scanner can never rate-limit a
+   trade.
+
+3. Check it's working: `sudo journalctl -u meme-intelligence | grep -i
+   wallet | tail` should show wallet lookups within an hour or two, and
+   alerts start including smart-money detail.
+
+**To turn it off again:**
+
+```bash
+cd ~/meme-intelligence
+bash deploy/enable-wallet-tracking.sh off
+```
+
+Optional tuning in `.env` (defaults are sensible — only touch if asked to):
+`MEMEINTEL_WALLET_CREDIT_GATE_MAX_LOOKUPS_PER_DAY` (default 200, 0 =
+unlimited), `MEMEINTEL_WALLET_CREDIT_GATE_COOLDOWN_MINUTES` (default 60),
+`MEMEINTEL_WALLET_CREDIT_GATE_MIN_SECURITY_SCORE` (default 50). An optional
+`MEMEINTEL_BIRDEYE_API_KEY` adds Birdeye as a second wallet-data source.
+
 ## Key architectural decisions
 
 - **Python 3.11 + asyncio.** The workload is I/O-bound API fan-out; async

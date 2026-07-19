@@ -16,7 +16,7 @@
   Telegram control + copy-address button), **Project 3** (mind-layer P(rug)
   veto — built, veto flag off until authority is earned), and **Project 6**
   (live buy/dump from Telegram — see below).
-- **848 tests passing** (`python -m pytest tests/ -q`).
+- **865 tests passing** (`python -m pytest tests/ -q`).
 - **Live in production**: 24/7 on the operator's $6/mo DigitalOcean droplet
   (systemd service `meme-intelligence`, repo at `~/meme-intelligence`),
   Telegram alerts arriving on his phone.
@@ -33,7 +33,11 @@
   (`MEMEINTEL_WALLET_ENABLE_IN_MONITOR=false`): it exhausted the main
   Helius account's monthly free credits and produced only 429 noise.
   Deliberate operator decision — see "Money & keys" below and
-  DECISIONS_LOG 2026-07-11. Do not "fix" it back on.
+  DECISIONS_LOG 2026-07-11. Do not "fix" it back on. **2026-07-20:** the
+  credit-gated build is restored and sitting DORMANT (operator request —
+  he plans a paid Helius plan). Enable ONLY when he says go:
+  `bash deploy/enable-wallet-tracking.sh <paid-key>` (see README
+  "Wallet tracking" section; DECISIONS_LOG 2026-07-20).
 - **Anthropic AI layer is ON** — the operator turned it back on overnight
   (2026-07-11) after keeping it off to save credits since 2026-07-10. The
   free deterministic screens still run FIRST (credit gate); watch the spend
