@@ -27,7 +27,6 @@ decoupled and testable (Rule 4).
 
 from __future__ import annotations
 
-import contextlib
 import os
 from datetime import datetime, timezone
 from typing import Callable, Sequence
@@ -119,20 +118,6 @@ class LearningService:
         # predictions are marked scored durably, those grades could never be
         # regenerated (bug-hunt finding).
         self._ensemble_dirty = False
-        # Deferred-persist state (see deferred_persist): depth supports
-        # nesting; writes/flush_every drive the mid-block flush cadence.
-        self._defer_depth = 0
-        self._deferred_writes = 0
-        self._defer_flush_every = 0
-        # Model-artifact ownership (see _persist_now): True only once THIS
-        # process has mutated the scaler/analog/classifier/archetypes.
-        self._models_dirty = False
-        # mtime of the analog index as last loaded/saved by this process —
-        # drives the cross-process reload in _maybe_reload_analog.
-        self._analog_mtime_ns: int | None = None
-        # False after a feature-version mismatch: the on-disk index is in an
-        # OLD feature space and must never be reloaded into this process.
-        self._analog_reload_ok = True
 
         self._load_artifacts()
 
@@ -173,7 +158,6 @@ class LearningService:
                         stored_version, FEATURE_VERSION)
                 self._last_retrain_count = 0
                 self._scaler_fit_count = 0
-                self._analog_reload_ok = False
                 return
 
             if os.path.exists(self._path("scaler.joblib")):
@@ -182,7 +166,6 @@ class LearningService:
                 self._analog = AnalogMemory.load(
                     self._path("index.faiss"), self._path("index_meta.joblib"),
                     now_func=self._now)
-                self._analog_mtime_ns = self._index_mtime_ns()
             if os.path.exists(self._path("classifier.txt")):
                 self._classifier.load_model(self._path("classifier.txt"))
             if os.path.exists(self._path("archetypes.joblib")):
@@ -191,126 +174,29 @@ class LearningService:
             self._logger.error("failed to load learning artifacts (%s); cold start", exc)
 
     def persist(self) -> None:
-        """Persist all mutable artifacts. Called after learning updates.
-
-        Inside a :meth:`deferred_persist` block the write is BATCHED instead
-        of immediate (2026-07-19, "store everything faster"): resolving a
-        coin calls persist(), and an outcome-refresh run resolves thousands —
-        each write rewrites the full analog index (~3.4MB), so per-coin
-        persistence turned one cron run into gigabytes of redundant disk
-        writes. Deferred, the artifacts are flushed every ``flush_every``
-        resolutions and once at block exit. Outside a deferral block the
-        behavior is exactly as before (immediate write, Rule 18).
-        """
-        if self._defer_depth > 0:
-            self._deferred_writes += 1
-            if (self._defer_flush_every > 0
-                    and self._deferred_writes >= self._defer_flush_every):
-                self._deferred_writes = 0
-                self._persist_now()
-            return
-        self._persist_now()
-
-    @contextlib.contextmanager
-    def deferred_persist(self, *, flush_every: int = 0):
-        """Batch persist() calls inside the block; flush on exit.
-
-        ``flush_every`` > 0 additionally flushes mid-block every that many
-        deferred writes, bounding how much instant-learning progress a crash
-        could lose (measured outcome labels are always durable in SQLite the
-        moment they are recorded — this only affects the model artifacts).
-        Re-entrant: nested blocks flush once, at the outermost exit.
-        """
-        self._defer_depth += 1
-        if self._defer_depth == 1:
-            self._defer_flush_every = max(0, int(flush_every))
-            self._deferred_writes = 0
-        try:
-            yield self
-        finally:
-            self._defer_depth -= 1
-            if self._defer_depth == 0:
-                had_writes = self._deferred_writes > 0
-                self._deferred_writes = 0
-                self._defer_flush_every = 0
-                if had_writes:
-                    self._persist_now()
-
-    def _persist_now(self) -> None:
-        """The real artifact write — see :meth:`persist` for the contract.
-
-        OWNERSHIP GUARD (2026-07-19 — the "memory stuck at exactly 5000"
-        bug): the monitor and the backtest cron share this state dir, but
-        only the CRON ever mutates the models (it resolves coins; the
-        monitor only reads). The monitor's shutdown persist used to write
-        its BOOT-TIME in-memory copy of the analog index over everything
-        the cron had appended since — so every restart reset the memory
-        file to whatever the monitor loaded at its previous boot, forever.
-        Model artifacts are now written only by a process that actually
-        mutated them (``_models_dirty``), exactly like the pre-existing
-        ``_ensemble_dirty`` guard for the ensemble's accuracy history.
-        """
+        """Persist all mutable artifacts. Called after learning updates."""
         if self._state_dir == ":memory:":
             return
         os.makedirs(self._state_dir, exist_ok=True)
         try:
-            if self._models_dirty:
-                if self._scaler.is_fitted:
-                    self._scaler.save(self._path("scaler.joblib"))
-                if self._analog.size > 0:
-                    self._analog.save(self._path("index.faiss"),
-                                      self._path("index_meta.joblib"))
-                    self._analog_mtime_ns = self._index_mtime_ns()
-                if self._classifier.is_ready:
-                    self._classifier.save(self._path("classifier.txt"))
-                if self._archetypes.is_fitted:
-                    self._archetypes.save(self._path("archetypes.joblib"))
-                import joblib
-
-                joblib.dump({"last_retrain_count": self._last_retrain_count,
-                             "scaler_fit_count": self._scaler_fit_count,
-                             "feature_version": FEATURE_VERSION},
-                            self._path("state.joblib"))
+            if self._scaler.is_fitted:
+                self._scaler.save(self._path("scaler.joblib"))
+            if self._analog.size > 0:
+                self._analog.save(self._path("index.faiss"), self._path("index_meta.joblib"))
+            if self._classifier.is_ready:
+                self._classifier.save(self._path("classifier.txt"))
+            if self._archetypes.is_fitted:
+                self._archetypes.save(self._path("archetypes.joblib"))
             if self._ensemble_dirty or not os.path.exists(self._path("ensemble.joblib")):
                 self._ensemble.save(self._path("ensemble.joblib"))
+            import joblib
+
+            joblib.dump({"last_retrain_count": self._last_retrain_count,
+                         "scaler_fit_count": self._scaler_fit_count,
+                         "feature_version": FEATURE_VERSION},
+                        self._path("state.joblib"))
         except Exception as exc:
             self._logger.error("failed to persist learning artifacts: %s", exc)
-
-    def _index_mtime_ns(self) -> int | None:
-        try:
-            return os.stat(self._path("index.faiss")).st_mtime_ns
-        except OSError:
-            return None
-
-    def _maybe_reload_analog(self) -> None:
-        """Pick up analog-index growth written by the OTHER process.
-
-        The cron grows the memory file hourly; the monitor used to hold its
-        boot-time copy until the next restart, so /mind showed a stale count
-        (and fresh analogs were invisible to live verdicts). A cheap mtime
-        check reloads the index when the file changed. Never runs in a
-        process that owns un-flushed mutations of its own (dirty or inside a
-        deferred-persist block) — its in-memory copy is ahead of the file.
-        Best-effort: a torn or mid-write file keeps the current copy and
-        retries on the next call (Rule 7).
-        """
-        if (self._state_dir == ":memory:" or not self._analog_reload_ok
-                or self._models_dirty or self._defer_depth > 0):
-            return
-        mtime = self._index_mtime_ns()
-        if mtime is None or mtime == self._analog_mtime_ns:
-            return
-        try:
-            reloaded = AnalogMemory.load(self._path("index.faiss"),
-                                         self._path("index_meta.joblib"),
-                                         now_func=self._now)
-        except Exception as exc:  # noqa: BLE001 — mid-write file: retry next call
-            self._logger.warning("analog reload failed (keeping current copy): %s", exc)
-            return
-        self._analog = reloaded
-        self._analog_mtime_ns = mtime
-        self._logger.info("analog memory reloaded from disk: %d coins",
-                          self._analog.size)
 
     # ---- Lifecycle (Section 1 / Section 10) ----
 
@@ -349,7 +235,6 @@ class LearningService:
         creator: str | None = None,
     ) -> dict:
         """The full verdict for a live coin (Section 10 — the public contract)."""
-        self._maybe_reload_analog()
         snaps = [CoinSnapshot.from_dict(s) for s in snapshot_series]
         fingerprint = self._extractor.extract(snaps)
         scaled = self._scaler.transform(fingerprint.vector)
@@ -501,7 +386,6 @@ class LearningService:
                             bucket=bucket, resolved_at=_resolution_time(record)),
                 scaled,
             )
-            self._models_dirty = True
         else:
             self._logger.info("analog insert skipped for %s: empty trajectory",
                               record.token.address)
@@ -572,7 +456,6 @@ class LearningService:
                             resolved_at=_resolution_time(record)),
                 scaled,
             )
-            self._models_dirty = True
         self.persist()
 
     # ---- Learning loops (Section 4 / Section 7) ----
@@ -611,7 +494,6 @@ class LearningService:
                 self._ensemble.final_accuracy() or 0.0,
                 self._ls.drift_accuracy_floor, self._ensemble.final_samples)
         self._rebuild(full=needs_scaler)
-        self._models_dirty = True
         self._last_retrain_count = resolved
         if needs_scaler:
             self._scaler_fit_count = resolved
@@ -662,7 +544,6 @@ class LearningService:
         buckets = [r.final_bucket for r in records]
         n = self._archetypes.fit(scaled, buckets,
                                  min_cluster_size=self._ls.archetype_min_cluster_size)
-        self._models_dirty = True
         self.persist()
         return n
 
@@ -670,7 +551,6 @@ class LearningService:
 
     def get_learning_metrics(self, *, persist: bool = True) -> dict:
         """Compute the self-evaluation metrics over resolved predictions."""
-        self._maybe_reload_analog()
         records: list[PredictionRecord] = []
         for record in self._store.resolved_records():
             coin_id = self._store.coin_id(record.token)

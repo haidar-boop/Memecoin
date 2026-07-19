@@ -4,11 +4,7 @@
 #   * daily routine  (Part 11) — market regime check, watchlist deep
 #     review, daily report — once a day at 13:05 UTC
 #   * backtest --refresh (Part 24) — measure prediction outcomes so the
-#     self-improvement metrics accumulate — every hour (was every 6h;
-#     2026-07-19 operator request: grade coins as soon as their windows
-#     come due instead of waiting for the next 6-hour slot — same total
-#     work, spread over smaller, quicker runs; flock still prevents
-#     overlap if a run is slow)
+#     self-improvement metrics accumulate — every 6 hours
 #
 # Both share the monitor's SQLite database; storage runs in WAL mode
 # with a busy timeout so concurrent access is safe. flock prevents a
@@ -29,7 +25,7 @@ fi
 mkdir -p "$REPO_DIR/logs"
 
 DAILY="5 13 * * * cd $REPO_DIR && flock -n /tmp/memeintel-daily.lock $PYTHON -m meme_intelligence daily >> logs/cron-daily.log 2>&1"
-BACKTEST="15 * * * * cd $REPO_DIR && flock -n /tmp/memeintel-backtest.lock $PYTHON -m meme_intelligence backtest --refresh >> logs/cron-backtest.log 2>&1"
+BACKTEST="15 */6 * * * cd $REPO_DIR && flock -n /tmp/memeintel-backtest.lock $PYTHON -m meme_intelligence backtest --refresh >> logs/cron-backtest.log 2>&1"
 BACKUP="45 13 * * * cd $REPO_DIR && flock -n /tmp/memeintel-backup.lock $PYTHON deploy/backup_db.py >> logs/cron-backup.log 2>&1"
 
 # Replace any previous block we installed, keep everything else.
