@@ -241,6 +241,7 @@ def build_executor(
             max_buy_sol=ex.max_buy_sol, slippage_bps=ex.slippage_bps,
             priority_fee_max_lamports=ex.priority_fee_max_lamports,
             confirm_timeout_seconds=ex.confirm_timeout_seconds,
+            preflight_retries=ex.preflight_retries,
         )
     except Exception as exc:  # noqa: BLE001 — bad key OR missing/broken solders (ImportError)
         # A broken trading layer must degrade to dry-run, never crash the

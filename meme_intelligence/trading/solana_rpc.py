@@ -19,6 +19,18 @@ from meme_intelligence.core.errors import CollectorError
 # SPL token program (owner of every token account).
 _TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 
+# Jupiter aggregator custom program error 6001 — the swap's price moved past
+# the slippage allowance between quote and landing. The single most common
+# rejection on fresh meme pools (seen live 2026-07-19).
+_SLIPPAGE_PROGRAM_ERROR = "0x1771"
+
+
+class TransactionRejectedError(CollectorError):
+    """sendTransaction's preflight simulation definitively REJECTED the
+    transaction: the node never broadcast it, so nothing was spent and it is
+    safe to rebuild (fresh quote) and retry. Distinct from an ambiguous
+    submission error, where the transaction may have reached the network."""
+
 
 class SolanaRpcClient(BaseCollector):
     """Thin JSON-RPC client over a Solana RPC endpoint (Helius)."""
@@ -42,8 +54,48 @@ class SolanaRpcClient(BaseCollector):
         if not isinstance(payload, dict):
             raise CollectorError(f"{self.name}: expected JSON object from RPC")
         if "error" in payload:
-            raise CollectorError(f"{self.name}: RPC error on {method}: {payload['error']}")
+            error = payload["error"]
+            # Full detail (program logs and all) goes to the LOG only — the
+            # raised message must stay short enough to read on a phone, never
+            # the multi-KB 'data' dump (operator complaint, 2026-07-19).
+            self._logger.warning("%s: RPC error on %s: %s", self.name, method, error)
+            if method == "sendTransaction":
+                rejection = self._describe_send_rejection(error)
+                if rejection is not None:
+                    raise TransactionRejectedError(f"{self.name}: {rejection}")
+            raise CollectorError(
+                f"{self.name}: RPC error on {method}: {self._brief_error(error)}")
         return payload.get("result")
+
+    @staticmethod
+    def _brief_error(error: Any) -> str:
+        """Code + message only, truncated — never the 'data' field, which
+        carries the full simulation log dump."""
+        if isinstance(error, dict):
+            code = error.get("code")
+            message = str(error.get("message", ""))[:200]
+            return f"code {code}: {message}" if code is not None else message
+        return str(error)[:200]
+
+    @staticmethod
+    def _describe_send_rejection(error: Any) -> str | None:
+        """Short human explanation when preflight simulation definitively
+        rejected the transaction (it was never broadcast), else ``None``.
+
+        RPC code -32002 ("Transaction simulation failed") means the node
+        simulated the transaction, it failed, and the node did NOT forward it
+        to the network — nothing was spent, and retrying with a fresh quote
+        is safe."""
+        if not isinstance(error, dict):
+            return None
+        message = str(error.get("message", ""))
+        if error.get("code") != -32002 and "simulation failed" not in message.lower():
+            return None
+        if _SLIPPAGE_PROGRAM_ERROR in message:
+            return ("the price moved beyond the slippage allowance before the "
+                    "trade could land (rejected pre-send, nothing was spent)")
+        return (f"the network's pre-send check rejected it, nothing was spent "
+                f"({message[:160]})")
 
     async def get_sol_balance_lamports(self, owner: str) -> int:
         """Wallet SOL balance in lamports."""

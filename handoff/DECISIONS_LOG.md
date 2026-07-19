@@ -1500,3 +1500,50 @@ guard with the cap off. Startup log now prints "Per-trade cap NONE
 disabled.
 
 Suite: **841 passing** (+1).
+
+## 2026-07-20 — Fast movers unbuyable: preflight-rejection retries + short trade errors
+
+Operator, after removing the cap, still could not buy: every tap on a
+fresh pump.fun coin came back as a wall of raw RPC JSON ("big text") and
+"Do NOT retry blindly." Root cause, from the pasted live error: RPC
+-32002, Jupiter custom program error 0x1771 = **slippage tolerance
+exceeded** — the coin's price moved past the 5% allowance in the seconds
+between quote and landing, so the node's preflight simulation refused
+the transaction. Two distinct defects:
+
+1. **Misclassification.** A -32002 preflight rejection means the node
+   NEVER broadcast the transaction — definitively nothing spent — but
+   the executor lumped it in with ambiguous submission errors ("may
+   have gone through... do NOT retry"), so the one failure mode that IS
+   safe to retry was the one being frozen.
+2. **Unreadable errors.** `SolanaRpcClient._rpc` stringified the whole
+   RPC error object, including the multi-KB `data` program-log dump,
+   straight into the operator's Telegram reply.
+
+Fixes:
+
+* `SolanaRpcClient` now classifies sendTransaction errors: -32002 /
+  "simulation failed" raises the new `TransactionRejectedError`
+  (subclass of CollectorError) with a one-line plain-English message
+  (0x1771 mapped to "price moved beyond the slippage allowance");
+  every other RPC error raises a compact code+message string (~200
+  chars, `data` never included). Full error detail still goes to the
+  log (Rule 13).
+* `LiveExecutor` buy AND dump paths now retry a preflight rejection
+  with a **fresh quote** — up to `preflight_retries` extra attempts
+  (new `ExecutionSettings` field, `MEMEINTEL_EXECUTION_PREFLIGHT_RETRIES`,
+  default 2, range 0-10; Rule 17). A fresh quote re-centers the
+  slippage allowance on the CURRENT price, which is how a fast mover
+  actually gets caught. This is NOT auto-trading: it is the same
+  operator-initiated intent, and it only ever re-runs when the network
+  provably discarded the previous attempt. Ambiguous submission errors
+  (tx may have reached the network) are still never auto-retried — the
+  double-spend guard from 2026-07-10 stands untouched.
+* Retries exhausted → one short reply: nothing was spent, the coin is
+  moving faster than the configured slippage, raise
+  `MEMEINTEL_EXECUTION_SLIPPAGE_BPS` if it keeps happening. Jupiter's
+  own `simulationError` string is truncated to 200 chars too.
+
+Suite: **848 passing** (+7: retry-then-succeed, retries-exhausted short
+message, dump retries, ambiguous-error-never-retried, slippage/non-
+slippage rejection classification, compact generic RPC error).

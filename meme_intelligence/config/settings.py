@@ -1310,6 +1310,12 @@ class ExecutionSettings:
     slippage_bps: int = 500           # base slippage for trade quotes (dynamic on top)
     priority_fee_max_lamports: int = 1_000_000   # cap on priority fee per trade (0.001 SOL)
     confirm_timeout_seconds: float = 45.0        # how long to wait for on-chain confirmation
+    # Extra attempts (each with a FRESH quote) when the network's preflight
+    # simulation definitively rejects a trade before broadcast — nothing was
+    # spent, so a re-quote at the current price is safe and is how a
+    # fast-moving coin gets caught (slippage kept tripping live, 2026-07-19).
+    # 0 = never retry. Ambiguous submission errors are NEVER auto-retried.
+    preflight_retries: int = 2
     # One-tap buy buttons on alerts, sized as a PERCENT of the trading wallet's
     # current spendable balance (2026-07-18, operator request — replaces the
     # old fixed-SOL-amount presets: "0.01/0.04 SOL" buttons didn't scale with
@@ -1338,6 +1344,10 @@ class ExecutionSettings:
             raise ConfigurationError(
                 "execution confirm_timeout_seconds must be positive, got "
                 f"{self.confirm_timeout_seconds}")
+        if not (0 <= self.preflight_retries <= 10):
+            raise ConfigurationError(
+                f"execution preflight_retries must be within [0, 10], got "
+                f"{self.preflight_retries}")
         self.buy_percent_list()  # validates as a side effect
 
     def buy_percent_list(self) -> tuple[float, ...]:

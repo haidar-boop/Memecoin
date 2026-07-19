@@ -63,13 +63,16 @@ class FakeJupiter:
 
 class FakeRpc:
     def __init__(self, *, sol=0, token=0, sig="SIG123", status="confirmed",
-                 send_raises=False, confirm_raises=False):
+                 send_raises=False, confirm_raises=False, send_errors=None):
         self.sol = sol
         self.token = token
         self.sig = sig
         self.status = status
         self.send_raises = send_raises
         self.confirm_raises = confirm_raises
+        # Ordered exceptions raised by successive send calls; once exhausted,
+        # sends succeed. Lets a test model "rejected, rejected, then landed".
+        self.send_errors = list(send_errors or [])
         self.sent = []
 
     async def get_sol_balance_lamports(self, owner):
@@ -85,6 +88,8 @@ class FakeRpc:
         from meme_intelligence.core.errors import CollectorError
         if self.send_raises:
             raise CollectorError("send rpc error")
+        if self.send_errors:
+            raise self.send_errors.pop(0)
         self.sent.append(signed_base64)
         return self.sig
 
@@ -242,6 +247,75 @@ async def test_submission_error_warns_it_may_have_gone_through():
         assert "may not have gone through" in msg and "Do NOT retry blindly" in msg
 
 
+# ---- Preflight-rejection retries (2026-07-19, "still not working" fix) ----
+
+def _rejection():
+    from meme_intelligence.trading.solana_rpc import TransactionRejectedError
+    return TransactionRejectedError(
+        "solana_rpc: the price moved beyond the slippage allowance before the "
+        "trade could land (rejected pre-send, nothing was spent)")
+
+
+async def test_buy_retries_preflight_rejection_with_fresh_quote_then_succeeds():
+    """A preflight rejection (tx never broadcast, nothing spent) is retried
+    with a FRESH quote — the fix for fast movers tripping slippage."""
+    kp = new_keypair()
+    jup = FakeJupiter(quote={"outAmount": "500000", "routePlan": []}, swap_b64=swap_tx_b64(kp))
+    rpc = FakeRpc(sol=5 * LAMPORTS, sig="RETRYSIG", status="confirmed",
+                  send_errors=[_rejection()])
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        ex = make_live(storage, kp, jupiter=jup, rpc=rpc)
+        msg = await ex.execute_buy(intent(0.1))
+        assert "BUY confirmed" in msg and "RETRYSIG" in msg
+        # Two attempts -> two FRESH quotes, and exactly one tx actually landed.
+        assert len([c for c in jup.calls if c[0] == "quote"]) == 2
+        assert len(rpc.sent) == 1
+
+
+async def test_buy_all_rejections_gives_short_slippage_message():
+    """Retries exhausted -> a SHORT plain-language reply (never the raw RPC
+    dump), saying nothing was spent and pointing at the slippage setting."""
+    kp = new_keypair()
+    jup = FakeJupiter(quote={"outAmount": "500000", "routePlan": []}, swap_b64=swap_tx_b64(kp))
+    rpc = FakeRpc(sol=5 * LAMPORTS, send_errors=[_rejection()] * 3)
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        ex = make_live(storage, kp, jupiter=jup, rpc=rpc)
+        msg = await ex.execute_buy(intent(0.1))
+        assert "nothing was spent" in msg
+        assert "slippage" in msg and "MEMEINTEL_EXECUTION_SLIPPAGE_BPS" in msg
+        assert "Do NOT retry" not in msg          # this failure is safe to re-tap
+        assert len(msg) < 500                     # phone-readable, not a JSON wall
+        assert rpc.sent == []                     # nothing was ever broadcast
+        # Default preflight_retries=2 -> 3 attempts, each with a fresh quote.
+        assert len([c for c in jup.calls if c[0] == "quote"]) == 3
+
+
+async def test_dump_retries_preflight_rejection_too():
+    kp = new_keypair()
+    jup = FakeJupiter(quote={"outAmount": str(2 * LAMPORTS)}, swap_b64=swap_tx_b64(kp))
+    rpc = FakeRpc(token=750_000, sig="DUMPRETRY", status="finalized",
+                  send_errors=[_rejection()])
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        ex = make_live(storage, kp, jupiter=jup, rpc=rpc)
+        msg = await ex.execute_sell_all(MINT)
+        assert "DUMP confirmed" in msg
+        assert len([c for c in jup.calls if c[0] == "quote"]) == 2
+
+
+async def test_ambiguous_send_error_is_never_auto_retried():
+    """Only a DEFINITIVE pre-broadcast rejection retries. A generic send error
+    (the tx may have reached the network) must stay one-attempt-and-warn —
+    auto-retrying it could double-spend."""
+    kp = new_keypair()
+    jup = FakeJupiter(quote={"outAmount": "500000"}, swap_b64=swap_tx_b64(kp))
+    rpc = FakeRpc(sol=5 * LAMPORTS, send_raises=True)
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        ex = make_live(storage, kp, jupiter=jup, rpc=rpc)
+        msg = await ex.execute_buy(intent(0.1))
+        assert "Do NOT retry blindly" in msg
+        assert len([c for c in jup.calls if c[0] == "quote"]) == 1
+
+
 async def test_live_trade_bounds_slippage_to_configured_cap():
     kp = new_keypair()
     jup = FakeJupiter(quote={"outAmount": "500000"}, swap_b64=swap_tx_b64(kp))
@@ -307,7 +381,10 @@ def make_rpc_client(monkeypatch, responses):
 
     async def fake_get_json(path, params=None, *, cache_key=None, cache_ttl=None,
                             headers=None, json_body=None, error_status_as_json=frozenset()):
-        return {"jsonrpc": "2.0", "id": 1, "result": seq.pop(0)}
+        item = seq.pop(0)
+        if isinstance(item, dict) and "__error__" in item:
+            return {"jsonrpc": "2.0", "id": 1, "error": item["__error__"]}
+        return {"jsonrpc": "2.0", "id": 1, "result": item}
 
     monkeypatch.setattr(client, "_get_json", fake_get_json)
     return client
@@ -341,6 +418,58 @@ async def test_rpc_send_with_no_signature_raises(monkeypatch):
     client = make_rpc_client(monkeypatch, [None])
     with pytest.raises(CollectorError):
         await client.send_raw_transaction("b64tx")
+
+
+async def test_rpc_preflight_slippage_rejection_is_classified_and_short(monkeypatch):
+    """The live failure of 2026-07-19: sendTransaction preflight fails with
+    Jupiter's 0x1771 (slippage). Must raise TransactionRejectedError (nothing
+    was broadcast -> safe to re-quote and retry) with a SHORT message that
+    never includes the multi-KB 'data' program-log dump."""
+    from meme_intelligence.trading.solana_rpc import TransactionRejectedError
+
+    huge_logs = {"logs": ["Program log: ..."] * 200}
+    client = make_rpc_client(monkeypatch, [{"__error__": {
+        "code": -32002,
+        "message": ("Transaction simulation failed: Error processing "
+                    "Instruction 6: custom program error: 0x1771"),
+        "data": huge_logs,
+    }}])
+    with pytest.raises(TransactionRejectedError) as exc_info:
+        await client.send_raw_transaction("b64tx")
+    text = str(exc_info.value)
+    assert "slippage" in text and "nothing was spent" in text
+    assert "Program log" not in text and len(text) < 300
+
+
+async def test_rpc_preflight_non_slippage_rejection_still_rejects_short(monkeypatch):
+    from meme_intelligence.trading.solana_rpc import TransactionRejectedError
+
+    client = make_rpc_client(monkeypatch, [{"__error__": {
+        "code": -32002,
+        "message": "Transaction simulation failed: Blockhash not found",
+        "data": {"logs": []},
+    }}])
+    with pytest.raises(TransactionRejectedError) as exc_info:
+        await client.send_raw_transaction("b64tx")
+    assert "nothing was spent" in str(exc_info.value)
+
+
+async def test_rpc_generic_error_is_compact_and_not_a_rejection(monkeypatch):
+    """A non-preflight RPC error stays a plain CollectorError (the executor
+    treats it as ambiguous — never auto-retried) and is truncated: code +
+    message only, no 'data' dump."""
+    from meme_intelligence.core.errors import CollectorError
+    from meme_intelligence.trading.solana_rpc import TransactionRejectedError
+
+    client = make_rpc_client(monkeypatch, [{"__error__": {
+        "code": -32005, "message": "Node is behind by 100 slots",
+        "data": {"detail": "x" * 5000},
+    }}])
+    with pytest.raises(CollectorError) as exc_info:
+        await client.send_raw_transaction("b64tx")
+    assert not isinstance(exc_info.value, TransactionRejectedError)
+    text = str(exc_info.value)
+    assert "code -32005" in text and len(text) < 300
 
 
 # ---- Dedicated trading Helius key (build_executor wiring) ----

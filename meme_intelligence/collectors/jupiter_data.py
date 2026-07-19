@@ -142,8 +142,11 @@ class JupiterClient(BaseCollector):
         if not isinstance(payload, dict):
             raise CollectorError(f"{self.name}: expected JSON object from swap endpoint")
         if payload.get("simulationError"):
+            # Truncate: the simulation error can carry a multi-KB program-log
+            # dump, and this string reaches the operator's phone (2026-07-19).
             raise CollectorError(
-                f"{self.name}: swap simulation failed: {payload['simulationError']}")
+                f"{self.name}: swap simulation failed: "
+                f"{str(payload['simulationError'])[:200]}")
         swap_tx = payload.get("swapTransaction")
         if not isinstance(swap_tx, str) or not swap_tx:
             raise CollectorError(f"{self.name}: swap endpoint returned no transaction")

@@ -257,6 +257,13 @@ def test_execution_settings_validation_and_defaults():
         ExecutionSettings(max_buy_sol=-0.01)
     with pytest.raises(ConfigurationError, match="slippage_bps"):
         ExecutionSettings(slippage_bps=0)
+    # Preflight retries: 0 (never retry) is fine; negative or absurd rejected.
+    assert defaults.preflight_retries == 2
+    assert ExecutionSettings(preflight_retries=0).preflight_retries == 0
+    with pytest.raises(ConfigurationError, match="preflight_retries"):
+        ExecutionSettings(preflight_retries=-1)
+    with pytest.raises(ConfigurationError, match="preflight_retries"):
+        ExecutionSettings(preflight_retries=11)
     # Percent buttons are sized against the LIVE balance at tap time, not a
     # fixed SOL amount, so there is no "preset exceeds max_buy_sol" case
     # left to reject at config time — max_buy_sol is enforced at execution.

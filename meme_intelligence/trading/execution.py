@@ -37,6 +37,7 @@ from meme_intelligence.collectors.jupiter_data import SOL_MINT
 from meme_intelligence.core.errors import CollectorError, MemeIntelError
 from meme_intelligence.core.logging_setup import get_logger
 from meme_intelligence.core.models import TokenIdentity
+from meme_intelligence.trading.solana_rpc import TransactionRejectedError
 
 _LAMPORTS_PER_SOL = 1_000_000_000
 # Leave headroom for the transaction fee + priority fee + temporary wSOL rent
@@ -119,6 +120,7 @@ class LiveExecutor:
         slippage_bps: int = 500,
         priority_fee_max_lamports: int = 1_000_000,
         confirm_timeout_seconds: float = 45.0,
+        preflight_retries: int = 2,
         sleep_func: Callable[[float], Awaitable[None]] = asyncio.sleep,
         time_func: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -140,6 +142,7 @@ class LiveExecutor:
         self._slippage_bps = slippage_bps
         self._priority_fee_max = priority_fee_max_lamports
         self._confirm_timeout = confirm_timeout_seconds
+        self._preflight_retries = max(0, int(preflight_retries))
         self._sleep = sleep_func
         self._time = time_func
         self._lock = asyncio.Lock()  # one trade at a time per wallet
@@ -191,19 +194,13 @@ class LiveExecutor:
                 return (f"Refused: wallet holds {balance / _LAMPORTS_PER_SOL:.4f} SOL, "
                         f"not enough for {intent.sol_amount:g} SOL + fees. Fund the "
                         "trading wallet or lower the amount.")
-            try:
-                quote = await self._jupiter.get_quote(
-                    SOL_MINT, intent.token_address, lamports, self._slippage_bps,
-                    use_cache=False)
-            except CollectorError as exc:
-                return ("Buy aborted — could not get a fresh quote "
-                        f"({self._safe(str(exc))}). Nothing was spent.")
-            if quote is None:
-                return ("No route to buy this token right now (Jupiter found no "
-                        "swap path). Nothing was spent.")
-            return await self._execute_swap(
-                quote, mint=intent.token_address, kind="trade_buy", action="BUY",
-                detail=f"{intent.sol_amount:g} SOL via {intent.source}")
+            return await self._quote_and_swap(
+                input_mint=SOL_MINT, output_mint=intent.token_address,
+                amount=lamports, mint=intent.token_address, kind="trade_buy",
+                action="BUY", detail=f"{intent.sol_amount:g} SOL via {intent.source}",
+                no_route_msg=("No route to buy this token right now (Jupiter found "
+                              "no swap path). Nothing was spent."),
+                spent_noun="spent")
 
     async def execute_sell_all(self, mint: str, chain: str = "solana") -> str:
         if chain not in ("solana", "sol"):
@@ -216,20 +213,58 @@ class LiveExecutor:
                         f"({self._safe(str(exc))}). Nothing was sold.")
             if raw <= 0:
                 return "Nothing to dump — the trading wallet holds none of this token."
-            try:
-                quote = await self._jupiter.get_quote(
-                    mint, SOL_MINT, raw, self._slippage_bps, use_cache=False)
-            except CollectorError as exc:
-                return ("Dump aborted — could not get a fresh quote "
-                        f"({self._safe(str(exc))}). Nothing was sold.")
-            if quote is None:
-                return ("No route to sell this token right now (Jupiter found no "
-                        "swap path). Nothing was sold — try again shortly.")
-            return await self._execute_swap(
-                quote, mint=mint, kind="trade_sell", action="DUMP",
-                detail="100% of position")
+            return await self._quote_and_swap(
+                input_mint=mint, output_mint=SOL_MINT, amount=raw, mint=mint,
+                kind="trade_sell", action="DUMP", detail="100% of position",
+                no_route_msg=("No route to sell this token right now (Jupiter found "
+                              "no swap path). Nothing was sold — try again shortly."),
+                spent_noun="sold")
 
     # ---- internals ----
+
+    async def _quote_and_swap(self, *, input_mint: str, output_mint: str,
+                              amount: int, mint: str, kind: str, action: str,
+                              detail: str, no_route_msg: str,
+                              spent_noun: str) -> str:
+        """Quote fresh, then swap — retrying with a NEW quote when the network
+        definitively rejects the transaction pre-broadcast.
+
+        A :class:`TransactionRejectedError` means the node's preflight
+        simulation refused the transaction and never forwarded it — nothing
+        was spent, so retrying is safe and is not a second trade: it is the
+        SAME operator-initiated intent, re-quoted at the current price. This
+        is how a fast-moving meme coin gets caught: the first quote is stale
+        by the time the transaction lands, so slippage trips; a fresh quote
+        re-centers the slippage allowance on the price as it is NOW
+        (operator-reported failure, 2026-07-19). Ambiguous submission errors
+        (the tx MAY have reached the network) are never retried — that path
+        still reports 'check Solscan, do NOT retry blindly'.
+        """
+        attempts = self._preflight_retries + 1
+        reason = ""
+        for attempt in range(1, attempts + 1):
+            try:
+                quote = await self._jupiter.get_quote(
+                    input_mint, output_mint, amount, self._slippage_bps,
+                    use_cache=False)
+            except CollectorError as exc:
+                return (f"{action} aborted — could not get a fresh quote "
+                        f"({self._safe(str(exc))}). Nothing was {spent_noun}.")
+            if quote is None:
+                return no_route_msg
+            try:
+                return await self._execute_swap(
+                    quote, mint=mint, kind=kind, action=action, detail=detail)
+            except TransactionRejectedError as exc:
+                reason = self._safe(str(exc))
+                self._logger.warning(
+                    "%s attempt %d/%d rejected pre-broadcast for %s: %s",
+                    action, attempt, attempts, mint, reason)
+        return (f"{action} failed — nothing was {spent_noun}. The network rejected "
+                f"it before sending, {attempts} times with fresh quotes: {reason}. "
+                f"The coin is likely moving faster than your "
+                f"{self._slippage_bps / 100:g}% slippage allowance — try again, or "
+                "raise MEMEINTEL_EXECUTION_SLIPPAGE_BPS in .env.")
 
     async def _execute_swap(self, quote: dict, *, mint: str, kind: str,
                             action: str, detail: str) -> str:
@@ -274,6 +309,11 @@ class LiveExecutor:
                 "%s for %s cancelled during send — may already be broadcast; "
                 "verify on-chain, do NOT re-tap: %s%s",
                 action, mint, _SOLSCAN_TX, expected_sig)
+            raise
+        except TransactionRejectedError:
+            # Preflight simulation definitively refused it — the node never
+            # broadcast the tx, nothing was spent. Propagate so the caller's
+            # retry loop can re-quote at the current price (2026-07-19).
             raise
         except CollectorError as exc:
             self._logger.error("%s submission error for %s: %s", action, mint,
