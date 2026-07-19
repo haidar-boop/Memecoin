@@ -926,6 +926,71 @@ async def test_metered_services_run_when_opted_in():
         assert ai.judge_calls == 1
 
 
+class RecordingSocialClient:
+    """Social-client double: records get_community_profile() calls, returns
+    no profile — mirrors RecordingWalletService."""
+
+    def __init__(self):
+        self.calls: list[str] = []
+        self.closed = False
+
+    async def get_community_profile(self, token):
+        self.calls.append(token.address)
+        return None
+
+    async def close(self):
+        self.closed = True
+
+
+def make_scanner_with_social(storage, pools, profiles, *, social=None, settings=None):
+    async def fake_sleep(seconds):
+        pass
+
+    notifier = NotificationEngine([RecordingSink()], AlertEngineSettings(),
+                                  time_func=lambda: 0.0)
+    return ContinuousScanner(
+        settings or SETTINGS, storage, notifier,
+        gecko_client=FakeGecko(pools),
+        goplus_client=FakeGoPlus(profiles),
+        social_client=social,
+        now_func=lambda: NOW,
+        sleep_func=fake_sleep,
+    )
+
+
+async def test_social_service_off_by_default_even_when_wired():
+    """Rule 10/11: a social client never runs in the loop without explicit
+    opt-in — MEMEINTEL_SOCIAL_ENABLE_IN_MONITOR is authoritative over what
+    the caller wired in."""
+    pair = make_pair()
+    social = RecordingSocialClient()
+    settings = Settings.from_env(env={})  # social.enable_in_monitor defaults False
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner = make_scanner_with_social(
+            storage, [pair], {pair.base_token.address: clean_profile(pair.base_token)},
+            social=social, settings=settings,
+        )
+        assert scanner._layers["social_intel"] is False   # dropped by the guard
+        history = await scanner.run(max_cycles=1)
+        assert history[0].analyzed == 1
+        assert social.calls == []
+
+
+async def test_social_service_runs_when_opted_in():
+    pair = make_pair()
+    social = RecordingSocialClient()
+    settings = Settings.from_env(env={"MEMEINTEL_SOCIAL_ENABLE_IN_MONITOR": "true"})
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner = make_scanner_with_social(
+            storage, [pair], {pair.base_token.address: clean_profile(pair.base_token)},
+            social=social, settings=settings,
+        )
+        assert scanner._layers["social_intel"] is True
+        history = await scanner.run(max_cycles=1)
+        assert history[0].analyzed == 1
+        assert social.calls == [pair.base_token.address]
+
+
 async def test_security_change_triggers_critical_alert_on_recheck():
     """Part 18 Section 10 end-to-end: a token turning honeypot between
     analyses produces a CRITICAL security_change alert."""

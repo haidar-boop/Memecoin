@@ -44,6 +44,7 @@ from meme_intelligence.collectors.wallet_data import (
     HeliusClient,
     WalletDataService,
 )
+from meme_intelligence.collectors.social_data import LunarCrushClient
 from meme_intelligence.core.enums import AlertPriority, MarketRegime, ResearchMode
 from meme_intelligence.database.storage import Storage
 from meme_intelligence.trading.trade_planner import TradePlanner
@@ -164,6 +165,20 @@ def build_wallet_service(
         helius, birdeye,
         top_holders_limit=settings.wallet.top_holders_limit,
         recent_trades_limit=settings.wallet.recent_trades_limit,
+    )
+
+
+def build_social_service(settings: Settings) -> LunarCrushClient | None:
+    """X/Twitter-adjacent social intelligence client, or None when no
+    LunarCrush key is configured (Roadmap item 5)."""
+    if not settings.lunarcrush_api_key:
+        return None
+    return LunarCrushClient(
+        settings.lunarcrush_api_key,
+        base_url=settings.providers.lunarcrush_base_url,
+        rate_limiter=RateLimiter.per_minute(
+            settings.providers.lunarcrush_requests_per_minute),
+        **_shared_collector_kwargs(settings),
     )
 
 
@@ -437,6 +452,7 @@ async def _gather_assessments(args, settings):
     """Shared research pass (via the pipeline) used by plan and report commands."""
     regime = MarketRegime(args.regime)
     wallet_service = build_wallet_service(settings)
+    social_client = build_social_service(settings)
     jupiter_client = build_jupiter(settings)
     ai_service = None
     if getattr(args, "ai", False):
@@ -457,18 +473,23 @@ async def _gather_assessments(args, settings):
                 return None, f"No trading pairs found for {args.address}."
             pipeline = ResearchPipeline(settings, goplus, wallet_service=wallet_service,
                                         jupiter_client=jupiter_client,
-                                        community_client=coingecko, ai_service=ai_service)
+                                        community_client=coingecko,
+                                        social_client=social_client, ai_service=ai_service)
             result = await pipeline.analyze_pair(
                 pair, regime=regime,
                 research_mode=ResearchMode(getattr(args, "ai_mode", "standard")),
                 # Operator-initiated deep research (plan/report): always the
                 # deliberate, rare spend the credit gate must not block
-                # (2026-07-17 review finding — mirrors /check).
+                # (2026-07-17 review finding — mirrors /check; same for the
+                # social gate, Roadmap item 5).
                 force_wallet_check=True,
+                force_social_check=True,
             )
     finally:
         if wallet_service is not None:
             await wallet_service.close()
+        if social_client is not None:
+            await social_client.close()
         if jupiter_client is not None:
             await jupiter_client.close()
         if ai_service is not None:
@@ -995,6 +1016,15 @@ async def _cmd_monitor(args, settings) -> int:
                       "smart-money analysis stays off.")
             else:
                 stack.push_async_callback(wallet_service.close)
+        social_client = None
+        if settings.social.enable_in_monitor:
+            social_client = build_social_service(settings)
+            if social_client is None:
+                print("Note: MEMEINTEL_SOCIAL_ENABLE_IN_MONITOR is on but no "
+                      "MEMEINTEL_LUNARCRUSH_API_KEY is set — "
+                      "X/Twitter social intelligence stays off.")
+            else:
+                stack.push_async_callback(social_client.close)
         if settings.ai.enable_in_monitor or settings.ai.verify_opportunities:
             ai_service = build_judgment_service(settings)
             if ai_service is None and settings.ai.enable_in_monitor:
@@ -1042,6 +1072,7 @@ async def _cmd_monitor(args, settings) -> int:
                 pumpportal_client=pumpportal,
                 pumpfun_client=pumpfun,
                 wallet_service=wallet_service,
+                social_client=social_client,
                 ai_service=ai_service,
                 learning_service=learning_service,
                 regime=MarketRegime(args.regime),

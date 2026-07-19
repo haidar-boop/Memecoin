@@ -290,6 +290,63 @@ def test_execution_live_env_overrides():
     assert Settings.from_env(env={}).trading_helius_api_key == ""
 
 
+# ---- Roadmap item 5: X/Twitter social intelligence (LunarCrush) ----
+
+def test_social_intel_settings_defaults_and_validation():
+    from meme_intelligence.config.settings import SocialIntelSettings
+
+    defaults = SocialIntelSettings()
+    assert defaults.enable_in_monitor is False        # dormant by default
+    assert defaults.credit_gate_min_security_score == 50.0
+    assert defaults.credit_gate_max_lookups_per_day == 200
+    assert defaults.credit_gate_cooldown_minutes == 60.0
+
+    with pytest.raises(ConfigurationError, match="credit_gate_min_security_score"):
+        SocialIntelSettings(credit_gate_min_security_score=101.0)
+    with pytest.raises(ConfigurationError, match="credit_gate_min_security_score"):
+        SocialIntelSettings(credit_gate_min_security_score=-1.0)
+    with pytest.raises(ConfigurationError, match="credit_gate_max_lookups_per_day"):
+        SocialIntelSettings(credit_gate_max_lookups_per_day=-1)
+    with pytest.raises(ConfigurationError, match="credit_gate_cooldown_minutes"):
+        SocialIntelSettings(credit_gate_cooldown_minutes=-5.0)
+    # 0 = unlimited/off, explicitly allowed for both spend bounds.
+    assert SocialIntelSettings(credit_gate_max_lookups_per_day=0).credit_gate_max_lookups_per_day == 0
+    assert SocialIntelSettings(credit_gate_cooldown_minutes=0.0).credit_gate_cooldown_minutes == 0.0
+
+
+def test_social_intel_env_override_round_trip():
+    settings = Settings.from_env(env={
+        "MEMEINTEL_SOCIAL_ENABLE_IN_MONITOR": "true",
+        "MEMEINTEL_SOCIAL_CREDIT_GATE_MIN_SECURITY_SCORE": "70",
+        "MEMEINTEL_SOCIAL_CREDIT_GATE_MAX_LOOKUPS_PER_DAY": "50",
+        "MEMEINTEL_SOCIAL_CREDIT_GATE_COOLDOWN_MINUTES": "30",
+        "MEMEINTEL_LUNARCRUSH_API_KEY": "test-lunarcrush-key",
+        "MEMEINTEL_PROVIDERS_LUNARCRUSH_BASE_URL": "https://example.test/api4",
+        "MEMEINTEL_PROVIDERS_LUNARCRUSH_REQUESTS_PER_MINUTE": "5",
+    })
+    assert settings.social.enable_in_monitor is True
+    assert settings.social.credit_gate_min_security_score == 70.0
+    assert settings.social.credit_gate_max_lookups_per_day == 50
+    assert settings.social.credit_gate_cooldown_minutes == 30.0
+    assert settings.lunarcrush_api_key == "test-lunarcrush-key"
+    assert settings.providers.lunarcrush_base_url == "https://example.test/api4"
+    assert settings.providers.lunarcrush_requests_per_minute == 5.0
+
+    # Default: fully dormant, empty key (Rule 16 "empty = off" convention).
+    off = Settings.from_env(env={})
+    assert off.social.enable_in_monitor is False
+    assert off.lunarcrush_api_key == ""
+    assert off.providers.lunarcrush_base_url == "https://lunarcrush.com/api4"
+    assert off.providers.lunarcrush_requests_per_minute == 10.0
+
+
+def test_provider_lunarcrush_rate_now_validated():
+    from meme_intelligence.config.settings import ProviderSettings
+
+    with pytest.raises(ConfigurationError, match="lunarcrush_requests_per_minute"):
+        ProviderSettings(lunarcrush_requests_per_minute=0.0)
+
+
 def test_project2_env_overrides_load():
     settings = Settings.from_env(env={
         "MEMEINTEL_TELEGRAM_COMMANDS_ENABLED": "true",

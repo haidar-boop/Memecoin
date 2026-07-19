@@ -222,6 +222,7 @@ class ContinuousScanner:
         pumpportal_client=None,  # PumpPortalClient-compatible launch stream (Part 32.5)
         pumpfun_client=None,     # PumpFunFrontendClient-compatible traction rechecks
         wallet_service=None,     # WalletDataService (Part 17); metered credits
+        social_client=None,      # LunarCrushClient (Roadmap item 5); metered credits
         ai_service=None,         # AIJudgmentService (Part 23); costs API tokens
         learning_service=None,   # LearningService (mind layer, Section 10); off by default
         regime: MarketRegime = MarketRegime.UNKNOWN,
@@ -276,6 +277,11 @@ class ContinuousScanner:
                 "wallet service wired but MEMEINTEL_WALLET_ENABLE_IN_MONITOR is off; "
                 "smart-money analysis stays out of the scan loop")
             wallet_service = None
+        if social_client is not None and not settings.social.enable_in_monitor:
+            self._logger.info(
+                "social client wired but MEMEINTEL_SOCIAL_ENABLE_IN_MONITOR is off; "
+                "X/Twitter social intelligence stays out of the scan loop")
+            social_client = None
         # Two INDEPENDENT AI modes (Part 23 + Part 32.5 Section 8) — neither
         # flag implies the other. enable_in_monitor judges every analyzed
         # token (expensive — the pipeline gets the service);
@@ -325,6 +331,7 @@ class ContinuousScanner:
         # surfaced by /status on Telegram (Project 2).
         self._layers = {
             "wallet_intel": wallet_service is not None,
+            "social_intel": social_client is not None,
             "ai": ai_service is not None or self._ai_verifier is not None,
             "learning": learning_service is not None,
             "learning_veto": learning_service is not None and settings.learning.veto_enabled,
@@ -336,6 +343,7 @@ class ContinuousScanner:
         self._pipeline = ResearchPipeline(settings, goplus_client,
                                           community_client=community_client,
                                           wallet_service=wallet_service,
+                                          social_client=social_client,
                                           ai_service=ai_service,
                                           jupiter_client=jupiter_client,
                                           now_func=now_func)
@@ -417,7 +425,7 @@ class ContinuousScanner:
         # A manual, operator-initiated lookup is exactly the deliberate,
         # rare spend the credit gate is not meant to block (2026-07-17).
         return await self._pipeline.analyze_pair(
-            pair, regime=self._regime, force_wallet_check=True)
+            pair, regime=self._regime, force_wallet_check=True, force_social_check=True)
 
     async def run(self, max_cycles: int | None = None) -> list[CycleStats]:
         """Run scan cycles until stopped or ``max_cycles`` is reached."""
@@ -515,7 +523,8 @@ class ContinuousScanner:
 
             result = await self._pipeline.analyze_pair(
                 candidate.pair, regime=self._regime,
-                force_wallet_check=self._storage.is_holding(candidate.pair.base_token))
+                force_wallet_check=self._storage.is_holding(candidate.pair.base_token),
+                force_social_check=self._storage.is_holding(candidate.pair.base_token))
             if result is None:
                 # Security data not indexed yet — do NOT mark as seen: a
                 # never-actually-analyzed token must stay a live candidate
@@ -604,7 +613,8 @@ class ContinuousScanner:
             stats.candidates += 1
             result = await self._pipeline.analyze_pair(
                 pair, regime=self._regime,
-                force_wallet_check=self._storage.is_holding(pair.base_token))
+                force_wallet_check=self._storage.is_holding(pair.base_token),
+                force_social_check=self._storage.is_holding(pair.base_token))
             if result is None:
                 # Security data not indexed yet — retry rather than losing
                 # the candidate (fresh launches lag the security providers).
@@ -1088,7 +1098,8 @@ class ContinuousScanner:
             pair = max(pairs, key=lambda p: p.liquidity_usd or 0.0)
             result = await self._pipeline.analyze_pair(
                 pair, regime=self._regime,
-                force_wallet_check=self._storage.is_holding(pair.base_token))
+                force_wallet_check=self._storage.is_holding(pair.base_token),
+                force_social_check=self._storage.is_holding(pair.base_token))
             if result is None:
                 continue
             rechecked += 1
@@ -1189,7 +1200,8 @@ class ContinuousScanner:
             pair = max(pairs, key=lambda p: p.liquidity_usd or 0.0)
             result = await self._pipeline.analyze_pair(
                 pair, regime=self._regime,
-                force_wallet_check=self._storage.is_holding(pair.base_token))
+                force_wallet_check=self._storage.is_holding(pair.base_token),
+                force_social_check=self._storage.is_holding(pair.base_token))
             if result is None:
                 # Security data still not indexed — re-pace (do NOT leave it
                 # due, which re-hammered the failing provider every cycle).

@@ -82,6 +82,33 @@ class CommunityAssessment:
         return "\n".join(lines)
 
 
+def merge_community_profiles(
+    primary: CommunityProfile, secondary: CommunityProfile | None
+) -> CommunityProfile:
+    """Combine two :class:`CommunityProfile` snapshots, primary's data winning.
+
+    Lets the pipeline layer a paid source (e.g. LunarCrush) on top of a free
+    one (CoinGecko) without ever regressing the free source's coverage: every
+    field ``primary`` already has a value for is kept as-is; ``secondary``
+    only fills fields ``primary`` left ``None`` (Rule 9 — multi-source
+    intelligence degrades gracefully, it never overwrites a known fact with
+    an unknown one). ``secondary=None`` (the source wasn't wired, or it had
+    no data for this token) returns ``primary`` unchanged.
+    """
+    if secondary is None:
+        return primary
+    updates: dict = {}
+    for f in dataclasses.fields(primary):
+        if f.name in ("token", "source"):
+            continue
+        if getattr(primary, f.name) is None:
+            secondary_value = getattr(secondary, f.name)
+            if secondary_value is not None:
+                updates[f.name] = secondary_value
+    updates["source"] = f"{primary.source}+{secondary.source}"
+    return dataclasses.replace(primary, **updates)
+
+
 class CommunityAnalyzer:
     """Scores community strength per the Part 5 framework."""
 

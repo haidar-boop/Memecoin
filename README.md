@@ -172,6 +172,67 @@ unlimited), `MEMEINTEL_WALLET_CREDIT_GATE_COOLDOWN_MINUTES` (default 60),
 `MEMEINTEL_WALLET_CREDIT_GATE_MIN_SECURITY_SCORE` (default 50). An optional
 `MEMEINTEL_BIRDEYE_API_KEY` adds Birdeye as a second wallet-data source.
 
+## X/Twitter community tracking — built, OFF by default
+
+X/Twitter community tracking reads aggregate social-conversation signal for
+each candidate coin from LunarCrush (a paid social-data aggregator) and
+merges it into the existing community score alongside CoinGecko's free
+data: overall and X-specific sentiment, how much content people are
+actively posting about the coin on X, social dominance, "galaxy score",
+and rank. When enabled it improves the sentiment and content-volume
+signals already feeding the community category and the narrative layer.
+
+**Be clear about what it does NOT do:** LunarCrush's public API does not
+expose per-account follower counts, engagement rates, or bot-follower
+percentages for a coin's X conversation — only for one specific named
+creator/account, which is a different thing. This feature never invents
+those numbers; it leaves them unset exactly as they are today. It improves
+the signals it honestly can, not everything the original roadmap imagined.
+
+It is fully built and tested but **disabled by default**, because every
+lookup spends metered LunarCrush API credits. It is protected by the same
+credit gate the wallet-tracking layer uses: a lookup is only spent on a
+coin that could still earn a buy-side alert (not a rug, security score ≥
+50, tradeable, young enough to alert on), capped at 200 lookups per day
+with a 60-minute per-coin cooldown. Operator-initiated checks (`/check`,
+holdings, `plan`/`report`) always bypass the gate.
+
+**To enable it (needs a PAID LunarCrush plan):**
+
+1. Buy a paid plan at https://lunarcrush.com and copy the API key from the
+   dashboard.
+2. On the droplet, run:
+
+   ```bash
+   cd ~/meme-intelligence
+   git pull
+   bash deploy/enable-x-community-tracking.sh PASTE_YOUR_PAID_LUNARCRUSH_KEY_HERE
+   ```
+
+   That's it — the script updates `.env`, turns the monitor flag on, and
+   restarts the service.
+
+3. Check it's working: `sudo journalctl -u meme-intelligence | grep -i
+   social | tail` should show social lookups within an hour or two, and
+   community assessments start including LunarCrush's sentiment/content
+   detail alongside CoinGecko's.
+
+**To turn it off again:**
+
+```bash
+cd ~/meme-intelligence
+bash deploy/enable-x-community-tracking.sh off
+```
+
+Optional tuning in `.env` (defaults are sensible — only touch if asked to):
+`MEMEINTEL_SOCIAL_CREDIT_GATE_MAX_LOOKUPS_PER_DAY` (default 200, 0 =
+unlimited), `MEMEINTEL_SOCIAL_CREDIT_GATE_COOLDOWN_MINUTES` (default 60),
+`MEMEINTEL_SOCIAL_CREDIT_GATE_MIN_SECURITY_SCORE` (default 50),
+`MEMEINTEL_PROVIDERS_LUNARCRUSH_BASE_URL`,
+`MEMEINTEL_PROVIDERS_LUNARCRUSH_REQUESTS_PER_MINUTE` (default 10 — a
+conservative starting point; raise it once you see your plan's actual
+quota).
+
 ## Key architectural decisions
 
 - **Python 3.11 + asyncio.** The workload is I/O-bound API fan-out; async

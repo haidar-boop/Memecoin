@@ -358,12 +358,17 @@ class ProviderSettings:
     pumpportal_ws_url: str = "wss://pumpportal.fun/api/data"  # free data WS (Part 32.5 S3)
     pumpfun_base_url: str = "https://frontend-api-v3.pump.fun"  # unofficial; can change
     pumpfun_requests_per_minute: float = 30.0         # no documented limit; stay conservative
+    lunarcrush_base_url: str = "https://lunarcrush.com/api4"
+    # LunarCrush's real per-plan limits aren't publicly documented; this is a
+    # conservative default the operator can raise once he sees his plan's
+    # actual quota (Roadmap item 5, 2026-07-20).
+    lunarcrush_requests_per_minute: float = 10.0
     failure_threshold: int = 3      # consecutive failures before a provider cools down
     cooldown_seconds: float = 60.0  # how long an unhealthy provider is skipped
 
     def __post_init__(self) -> None:
         for name in ("dexscreener", "geckoterminal", "goplus", "coingecko",
-                     "helius", "birdeye", "jupiter", "pumpfun"):
+                     "helius", "birdeye", "jupiter", "pumpfun", "lunarcrush"):
             value = getattr(self, f"{name}_requests_per_minute")
             if not math.isfinite(value) or value <= 0:
                 raise ConfigurationError(f"{name}_requests_per_minute must be positive")
@@ -849,6 +854,37 @@ class WalletIntelSettings:
             raise ConfigurationError(
                 "wallet setting 'min_buy_volume_for_dominance_usd' must be positive, "
                 f"got {self.min_buy_volume_for_dominance_usd}")
+
+
+@dataclass(frozen=True)
+class SocialIntelSettings:
+    """X/Twitter-adjacent social intelligence via LunarCrush (Roadmap item 5).
+
+    Same credit-gate shape as :class:`WalletIntelSettings` (Part 17): a
+    LunarCrush lookup spends real, metered API credits, so it stays out of
+    the continuous scanner unless explicitly enabled, and is protected by
+    the same daily-budget + per-token-cooldown bounds once it is. Built
+    2026-07-20 at the operator's request, kept OFF until he supplies a paid
+    LunarCrush key and runs deploy/enable-x-community-tracking.sh.
+    """
+
+    enable_in_monitor: bool = False       # LunarCrush calls in the continuous scanner
+    credit_gate_min_security_score: float = 50.0
+    credit_gate_max_lookups_per_day: int = 200
+    credit_gate_cooldown_minutes: float = 60.0
+
+    def __post_init__(self) -> None:
+        _check_range("social credit_gate_min_security_score",
+                     self.credit_gate_min_security_score, 0.0, 100.0)
+        if self.credit_gate_max_lookups_per_day < 0:
+            raise ConfigurationError(
+                "social credit_gate_max_lookups_per_day must be >= 0 (0 = unlimited), "
+                f"got {self.credit_gate_max_lookups_per_day}")
+        if (not math.isfinite(self.credit_gate_cooldown_minutes)
+                or self.credit_gate_cooldown_minutes < 0):
+            raise ConfigurationError(
+                "social credit_gate_cooldown_minutes must be >= 0 (0 = off), "
+                f"got {self.credit_gate_cooldown_minutes}")
 
 
 @dataclass(frozen=True)
@@ -1526,6 +1562,7 @@ class Settings:
     telegram_commands: TelegramCommandSettings = field(default_factory=TelegramCommandSettings)
     execution: ExecutionSettings = field(default_factory=ExecutionSettings)
     wallet: WalletIntelSettings = field(default_factory=WalletIntelSettings)
+    social: SocialIntelSettings = field(default_factory=SocialIntelSettings)
     smart_money_weights: SmartMoneySubWeights = field(default_factory=SmartMoneySubWeights)
     liquidity_probe: LiquidityProbeSettings = field(default_factory=LiquidityProbeSettings)
     ai: AISettings = field(default_factory=AISettings)
@@ -1541,6 +1578,10 @@ class Settings:
     # .env). Empty string = that layer stays off.
     helius_api_key: str = ""
     birdeye_api_key: str = ""
+    # LunarCrush (Roadmap item 5, X/Twitter-adjacent social intelligence):
+    # empty = the social layer stays off, same "empty key = off" convention
+    # as every other API key here.
+    lunarcrush_api_key: str = ""
     anthropic_api_key: str = ""
     jupiter_api_key: str = ""
     # Optional free demo key: raises CoinGecko's rate limit for community data.
@@ -1601,6 +1642,7 @@ class Settings:
             telegram_commands=_load_group(TelegramCommandSettings, "TELEGRAM_COMMANDS", env),
             execution=_load_group(ExecutionSettings, "EXECUTION", env),
             wallet=_load_group(WalletIntelSettings, "WALLET", env),
+            social=_load_group(SocialIntelSettings, "SOCIAL", env),
             smart_money_weights=_load_group(SmartMoneySubWeights, "SMART_MONEY_WEIGHTS", env),
             liquidity_probe=_load_group(LiquidityProbeSettings, "LIQUIDITY_PROBE", env),
             ai=_load_group(AISettings, "AI", env),
@@ -1613,6 +1655,7 @@ class Settings:
             log_dir=env.get(f"{_ENV_PREFIX}_LOG_DIR", "logs"),
             helius_api_key=env.get(f"{_ENV_PREFIX}_HELIUS_API_KEY", ""),
             birdeye_api_key=env.get(f"{_ENV_PREFIX}_BIRDEYE_API_KEY", ""),
+            lunarcrush_api_key=env.get(f"{_ENV_PREFIX}_LUNARCRUSH_API_KEY", ""),
             jupiter_api_key=env.get(f"{_ENV_PREFIX}_JUPITER_API_KEY", ""),
             anthropic_api_key=env.get(f"{_ENV_PREFIX}_ANTHROPIC_API_KEY", ""),
             coingecko_api_key=env.get(f"{_ENV_PREFIX}_COINGECKO_API_KEY", ""),

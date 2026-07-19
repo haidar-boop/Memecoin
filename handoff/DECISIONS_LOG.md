@@ -1657,3 +1657,112 @@ the money path keeps its own credit budget.
 
 Suite: **865 passing** (848 + 17 restored gate/floor tests, updated to
 the dormant defaults).
+
+## 2026-07-20 — X/Twitter community tracking built as a DORMANT kit (Roadmap item 5, LunarCrush)
+
+Operator: "build the thing for the X community, turn it off, add
+instructions [to the README]." Roadmap item 5 ("Real social intelligence
+(Twitter/X via paid aggregator)") was previously parked (see "Deferred,
+with reasons" above); this builds it, mirroring the wallet-tracking kit's
+shape exactly (Rule 18, extend rather than rewrite) — a paid, metered data
+source wired behind its own credit gate, off by default, with a README
+section and an enable/disable shell script.
+
+**New collector**: `meme_intelligence/collectors/social_data.py` —
+`LunarCrushClient(BaseCollector)`, talking to LunarCrush's public API v4
+(`coins/list/v1` for a 4h-cached full coin directory, `topic/{topic}/v1`
+for 15-min-cached per-coin platform detail). Matches a token to a
+LunarCrush coin ONLY via `blockchains[].address` on the matching chain —
+never via symbol/name, since meme coins routinely share tickers across
+unrelated chains and a symbol match could silently attribute one coin's
+social data to a different coin (a Rule-8 fabrication bug, not just an
+inefficiency; the collector's test suite includes a same-symbol,
+wrong-chain regression case for exactly this).
+
+**The Rule-8 decision this build hinges on**: LunarCrush's public v4 API
+exposes aggregate, coin-level social-conversation metrics (overall and
+X-specific sentiment, unique X-post counts, social dominance, "galaxy
+score", rank, trend) — nothing per-account. It has NO follower count,
+engagement-rate, or bot-follower-percentage data for a coin's Twitter/X
+conversation anywhere in the coins/topic endpoints; those only exist for
+one specific named creator under a completely different endpoint
+(`/public/creator/:network/:id/v1`), out of scope. So this client maps
+LunarCrush data into exactly two fields `CommunityProfile` already had
+(`positive_sentiment_percent` preferring X-specific sentiment over the
+coin-level fallback, `user_content_per_day` from unique X-post counts) plus
+five new, honestly-scoped fields (`social_volume_24h`,
+`social_dominance_percent`, `galaxy_score`, `alt_rank`, `social_trend`) —
+and it deliberately NEVER sets `twitter_followers`,
+`twitter_engagement_rate_percent`, `twitter_growth_rate_7d_percent`, or
+`bot_follower_percent`. Populating those four from data that doesn't
+describe them would be fabrication, not a coverage improvement. This is
+tested explicitly (`test_never_sets_per_account_fields`) as the single
+most important test in the new suite.
+
+**Merging, not replacing**: a new `merge_community_profiles(primary,
+secondary)` helper in `analyzers/community_analyzer.py` lets the pipeline
+layer LunarCrush on top of CoinGecko's existing free profile —
+CoinGecko's non-`None` fields always win, LunarCrush only fills gaps,
+`source` becomes `"coingecko+lunarcrush"`. CoinGecko's coverage can only
+ever improve from this, never regress (Rule 9). `CommunityAnalyzer`'s
+scoring logic is untouched — it already reads every field this merge can
+populate.
+
+**Same credit-gate shape as the wallet layer, copied not shared** (Rule
+21 — this codebase prefers duplicated-but-simple over premature
+abstraction, and the wallet gate is tested/deployed and must not be
+touched, Rule 3): new `SocialIntelSettings` (`enable_in_monitor`,
+`credit_gate_min_security_score` 50.0, `credit_gate_max_lookups_per_day`
+200, `credit_gate_cooldown_minutes` 60.0 — identical defaults to
+`WalletIntelSettings`'s equivalents), and a direct copy of
+`ResearchPipeline`'s `_gate_allows`/`_worth_wallet_lookup`/
+`_note_wallet_lookup`/`_roll_wallet_budget_day` quartet renamed with a
+`_social_` prefix. One deliberate difference from the wallet gate: NOT
+restricted to Solana — LunarCrush covers multiple chains, and the
+collector's own chain-normalization table already safely returns `None`
+for unmapped chains, so no chain restriction is needed at the pipeline
+level. `force_social_check` (mirroring `force_wallet_check`) bypasses the
+gate at every site `force_wallet_check=True` or
+`force_wallet_check=self._storage.is_holding(...)` already appears
+(`ContinuousScanner.check_token`, the three `analyze_pair` call sites in
+`_run_cycle`/`_process_launches`/`_recheck_watchlist`/
+`_retry_insufficient_data`, and `__main__.py`'s shared plan/report
+builder) — operator holdings and manual `/check`/`plan`/`report` always
+get social data.
+
+**Wiring**: `ResearchPipeline` gains `social_client=None`;
+`ContinuousScanner` gains `social_client=None` behind the same
+"metered-layer-off-unless-`enable_in_monitor`" guard `wallet_service`
+already gets, and a new `self._layers["social_intel"]` entry for
+`/status`. `__main__.py` gains `build_social_service()` (mirrors
+`build_wallet_service()`: returns `None` when
+`MEMEINTEL_LUNARCRUSH_API_KEY` is empty) wired into both the monitor
+command and the shared plan/report path.
+
+**Deploy + docs**: new `deploy/enable-x-community-tracking.sh` (on/off,
+same in-place `.env` editing as `enable-wallet-tracking.sh`), a new
+".env.example" block, and a README "X/Twitter community tracking — built,
+OFF by default" section modeled on the wallet-tracking one — explicit
+that LunarCrush's public API does not expose per-account follower/
+engagement/bot-detection data, so the feature improves the sentiment and
+content-volume signals it honestly can, not everything the original
+roadmap imagined (Rule 8 applies to what the operator is told, not just
+to what's read from providers).
+
+**Fully dormant by default, verified explicitly**:
+`SocialIntelSettings.enable_in_monitor` defaults to `False`,
+`Settings.lunarcrush_api_key` defaults to `""`, so with no `.env` changes
+`build_social_service()` returns `None`, `ContinuousScanner` strips a
+wired-but-disabled `social_client` exactly like it already does for
+`wallet_service`, and the pipeline's new social block never fires. Proven
+by `test_social_layer_is_a_complete_no_op_with_default_settings` (default
+settings, no client wired, `force_social_check=True` — still no
+community data) and `test_social_service_off_by_default_even_when_wired`
+(a real social client wired into the scanner, flag off — zero calls,
+`_layers["social_intel"]` is `False`).
+
+Suite: **900 passing** (865 + 35: collector matching/mapping/degrade
+tests, settings defaults/validation/env round-trip, pipeline gate/budget/
+cooldown/force-bypass tests, a full merged-profile integration test, a
+LunarCrush-failure-preserves-CoinGecko test, the dormancy no-op test,
+controller wiring tests, and `merge_community_profiles` unit tests).

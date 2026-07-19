@@ -2,7 +2,10 @@
 
 import pytest
 
-from meme_intelligence.analyzers.community_analyzer import CommunityAnalyzer
+from meme_intelligence.analyzers.community_analyzer import (
+    CommunityAnalyzer,
+    merge_community_profiles,
+)
 from meme_intelligence.config.settings import CommunitySubWeights, CommunityThresholds
 from meme_intelligence.core.enums import CommunityRating, ConfidenceLevel
 from meme_intelligence.core.errors import InsufficientDataError
@@ -132,3 +135,61 @@ def test_active_ratio_computes_when_both_known():
 def test_summary_renders():
     text = make_analyzer().assess(healthy_profile()).summary()
     assert "MEME" in text and "Overall" in text
+
+
+# ---- merge_community_profiles (Roadmap item 5 pipeline helper) ----
+
+def test_merge_with_none_secondary_returns_primary_unchanged():
+    primary = CommunityProfile(token=TOKEN, source="coingecko", telegram_members=5000)
+    assert merge_community_profiles(primary, None) is primary
+
+
+def test_merge_primary_non_none_fields_always_win():
+    primary = CommunityProfile(
+        token=TOKEN, source="coingecko",
+        positive_sentiment_percent=80.0, user_content_per_day=18.0,
+    )
+    secondary = CommunityProfile(
+        token=TOKEN, source="lunarcrush",
+        positive_sentiment_percent=91.0, user_content_per_day=47.0,
+    )
+    merged = merge_community_profiles(primary, secondary)
+    assert merged.positive_sentiment_percent == pytest.approx(80.0)
+    assert merged.user_content_per_day == pytest.approx(18.0)
+
+
+def test_merge_secondary_fills_gaps():
+    primary = CommunityProfile(
+        token=TOKEN, source="coingecko",
+        telegram_members=94_142, reddit_subscribers=12_000,
+    )
+    secondary = CommunityProfile(
+        token=TOKEN, source="lunarcrush",
+        social_volume_24h=7000, social_dominance_percent=3.2,
+        galaxy_score=64.0, alt_rank=88, social_trend="up",
+    )
+    merged = merge_community_profiles(primary, secondary)
+    # Primary's own fields untouched.
+    assert merged.telegram_members == 94_142
+    assert merged.reddit_subscribers == 12_000
+    # Gaps primary never had are filled from secondary.
+    assert merged.social_volume_24h == 7000
+    assert merged.social_dominance_percent == pytest.approx(3.2)
+    assert merged.galaxy_score == pytest.approx(64.0)
+    assert merged.alt_rank == 88
+    assert merged.social_trend == "up"
+
+
+def test_merge_source_string_concatenation():
+    primary = CommunityProfile(token=TOKEN, source="coingecko")
+    secondary = CommunityProfile(token=TOKEN, source="lunarcrush")
+    merged = merge_community_profiles(primary, secondary)
+    assert merged.source == "coingecko+lunarcrush"
+
+
+def test_merge_leaves_token_untouched():
+    other_token = TokenIdentity(chain="ethereum", address="0xShouldNeverAppear")
+    primary = CommunityProfile(token=TOKEN, source="coingecko")
+    secondary = CommunityProfile(token=other_token, source="lunarcrush", telegram_members=1)
+    merged = merge_community_profiles(primary, secondary)
+    assert merged.token is TOKEN

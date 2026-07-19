@@ -282,3 +282,206 @@ def test_spend_bound_settings_validated():
         WalletIntelSettings(credit_gate_max_lookups_per_day=-1)
     with pytest.raises(ConfigurationError, match="cooldown_minutes"):
         WalletIntelSettings(credit_gate_cooldown_minutes=-5.0)
+
+
+# ---- Social-intelligence credit gate (Roadmap item 5; direct copy of the
+# wallet-intelligence gate tests above) ----
+
+from meme_intelligence.core.errors import CollectorError  # noqa: E402
+from meme_intelligence.core.models import CommunityProfile  # noqa: E402
+
+
+class RecordingSocial:
+    """LunarCrushClient stand-in that records whether it was asked to spend."""
+
+    def __init__(self, profile=None):
+        self.calls: list[str] = []
+        self._profile = profile
+
+    async def get_community_profile(self, token):
+        self.calls.append(token.address)
+        if self._profile is None:
+            raise CollectorError("no real data in tests")
+        return self._profile
+
+
+def social_gate_pipeline(profile=None, env=None, social_profile=None):
+    social = RecordingSocial(social_profile)
+    settings = Settings.from_env(env=env or {})
+    pipeline = ResearchPipeline(settings, FakeGoPlus(profile or make_profile()),
+                                social_client=social, now_func=lambda: NOW)
+    return pipeline, social
+
+
+async def test_social_lookup_runs_for_a_small_fresh_clean_candidate():
+    pipeline, social = social_gate_pipeline()
+    result = await pipeline.analyze_pair(DexPair(**GOOD_PAIR_KWARGS))
+    assert result is not None
+    assert social.calls == [TOKEN.address]
+
+
+async def test_social_lookup_skipped_when_too_old():
+    pipeline, social = social_gate_pipeline()
+    stale = dict(GOOD_PAIR_KWARGS, pair_created_at=NOW - timedelta(hours=5))
+    result = await pipeline.analyze_pair(DexPair(**stale))
+    assert result is not None
+    assert social.calls == []
+
+
+async def test_social_lookup_skipped_when_untradeable():
+    pipeline, social = social_gate_pipeline()
+    dead = dict(GOOD_PAIR_KWARGS, liquidity_usd=None, market_cap=None)
+    await pipeline.analyze_pair(DexPair(**dead))
+    assert social.calls == []
+
+
+async def test_social_lookup_skipped_below_security_score_floor():
+    pipeline, social = social_gate_pipeline(profile=SecurityProfile(**WEAK_PROFILE_KWARGS))
+    result = await pipeline.analyze_pair(DexPair(**GOOD_PAIR_KWARGS))
+    assert result is not None
+    assert not result.security.is_destructive
+    assert result.security.overall_score < 50.0
+    assert social.calls == []
+
+
+async def test_social_lookup_skipped_when_destructive():
+    pipeline, social = social_gate_pipeline(profile=make_profile(is_honeypot=True))
+    await pipeline.analyze_pair(DexPair(**GOOD_PAIR_KWARGS))
+    assert social.calls == []
+
+
+async def test_force_social_check_bypasses_the_gate():
+    pipeline, social = social_gate_pipeline(profile=SecurityProfile(**WEAK_PROFILE_KWARGS))
+    stale = dict(GOOD_PAIR_KWARGS, pair_created_at=NOW - timedelta(days=2))
+    await pipeline.analyze_pair(DexPair(**stale), force_social_check=True)
+    assert social.calls == [TOKEN.address]
+
+
+def social_gate_pipeline_with_clock(env=None, social_profile=None):
+    clock = {"now": NOW}
+    social = RecordingSocial(social_profile)
+    settings = Settings.from_env(env=env or {})
+    pipeline = ResearchPipeline(settings, FakeGoPlus(make_profile()),
+                                social_client=social,
+                                now_func=lambda: clock["now"])
+    return pipeline, social, clock
+
+
+async def test_social_daily_budget_caps_gated_lookups_but_not_forced():
+    env = {"MEMEINTEL_SOCIAL_CREDIT_GATE_MAX_LOOKUPS_PER_DAY": "2",
+           "MEMEINTEL_SOCIAL_CREDIT_GATE_COOLDOWN_MINUTES": "0"}
+    pipeline, social, clock = social_gate_pipeline_with_clock(env=env)
+    for i in range(4):
+        await pipeline.analyze_pair(fresh_pair(f"STok{i}"))
+    assert len(social.calls) == 2
+    await pipeline.analyze_pair(fresh_pair("SHeld1"), force_social_check=True)
+    assert social.calls[-1] == "SHeld1"
+
+
+async def test_social_cooldown_skips_repeat_lookup_on_the_same_token():
+    env = {"MEMEINTEL_SOCIAL_CREDIT_GATE_COOLDOWN_MINUTES": "60"}
+    pipeline, social, clock = social_gate_pipeline_with_clock(env=env)
+    await pipeline.analyze_pair(fresh_pair("SHot1"))
+    await pipeline.analyze_pair(fresh_pair("SHot1"))
+    assert social.calls == ["SHot1"]
+    clock["now"] = NOW + timedelta(minutes=61)
+    await pipeline.analyze_pair(fresh_pair("SHot1", clock_now=clock["now"]))
+    assert social.calls == ["SHot1", "SHot1"]
+
+
+# ---- Full-chain integration: merged CoinGecko + LunarCrush profile ----
+
+COINGECKO_PROFILE = CommunityProfile(
+    token=TOKEN, source="coingecko",
+    telegram_members=94_142,
+    reddit_subscribers=12_000,
+    reddit_posts_per_day=3.0,
+    user_content_per_day=18.0,
+    positive_sentiment_percent=80.0,
+)
+
+LUNARCRUSH_PROFILE = CommunityProfile(
+    token=TOKEN, source="lunarcrush",
+    positive_sentiment_percent=91.0,  # would be ignored: CoinGecko's wins
+    user_content_per_day=None,        # CoinGecko's 18.0 wins regardless
+    social_volume_24h=7000,
+    social_dominance_percent=3.2,
+    galaxy_score=64.0,
+    alt_rank=88,
+    social_trend="up",
+)
+
+
+class FakeCoinGeckoLikeClient:
+    async def get_community_profile(self, token):
+        return COINGECKO_PROFILE
+
+
+async def test_merged_coingecko_and_lunarcrush_profile_reflects_both_sources():
+    import pytest
+    social = RecordingSocial(LUNARCRUSH_PROFILE)
+    pipeline = ResearchPipeline(Settings.from_env(env={}), FakeGoPlus(make_profile()),
+                                community_client=FakeCoinGeckoLikeClient(),
+                                social_client=social, now_func=lambda: NOW,
+                                )
+    result = await pipeline.analyze_pair(DexPair(**GOOD_PAIR_KWARGS),
+                                         force_social_check=True)
+    assert result is not None
+    assert result.community is not None
+    # CoinGecko-only fields untouched.
+    assert result.community_profile.telegram_members == 94_142
+    assert result.community_profile.reddit_subscribers == 12_000
+    # CoinGecko's value wins where both sources have data.
+    assert result.community_profile.positive_sentiment_percent == pytest.approx(80.0)
+    assert result.community_profile.user_content_per_day == pytest.approx(18.0)
+    # LunarCrush fills the gaps CoinGecko never had.
+    assert result.community_profile.social_volume_24h == 7000
+    assert result.community_profile.social_dominance_percent == pytest.approx(3.2)
+    assert result.community_profile.galaxy_score == pytest.approx(64.0)
+    assert result.community_profile.alt_rank == 88
+    assert result.community_profile.social_trend == "up"
+    assert result.community_profile.source == "coingecko+lunarcrush"
+
+
+async def test_lunarcrush_failure_never_breaks_the_coingecko_only_path():
+    """Rule 9: a LunarCrush error must not erase or block CoinGecko's
+    already-successful community data."""
+    social = RecordingSocial(None)  # raises CollectorError on every call
+    pipeline = ResearchPipeline(Settings.from_env(env={}), FakeGoPlus(make_profile()),
+                                community_client=FakeCoinGeckoLikeClient(),
+                                social_client=social, now_func=lambda: NOW)
+    result = await pipeline.analyze_pair(DexPair(**GOOD_PAIR_KWARGS),
+                                         force_social_check=True)
+    assert result is not None
+    assert result.community is not None
+    assert result.community_profile.source == "coingecko"  # unmerged, CoinGecko-only
+    assert result.community_profile.telegram_members == 94_142
+
+
+def test_social_spend_bound_settings_validated():
+    import pytest as _pytest
+    from meme_intelligence.config.settings import SocialIntelSettings
+    from meme_intelligence.core.errors import ConfigurationError
+
+    assert SocialIntelSettings().credit_gate_max_lookups_per_day == 200
+    assert SocialIntelSettings().credit_gate_cooldown_minutes == 60.0
+    with _pytest.raises(ConfigurationError, match="max_lookups_per_day"):
+        SocialIntelSettings(credit_gate_max_lookups_per_day=-1)
+    with _pytest.raises(ConfigurationError, match="cooldown_minutes"):
+        SocialIntelSettings(credit_gate_cooldown_minutes=-5.0)
+
+
+# ---- The single hardest requirement: fully dormant by default ----
+
+async def test_social_layer_is_a_complete_no_op_with_default_settings():
+    """With no social_client wired (the default construction, matching what
+    build_social_service() returns when MEMEINTEL_LUNARCRUSH_API_KEY is
+    empty), the social block must never fire — not even for a candidate
+    that would otherwise clear every gate."""
+    settings = Settings.from_env(env={})
+    assert settings.social.enable_in_monitor is False
+    pipeline = ResearchPipeline(settings, FakeGoPlus(make_profile()), now_func=lambda: NOW)
+    result = await pipeline.analyze_pair(DexPair(**GOOD_PAIR_KWARGS), force_social_check=True)
+    assert result is not None
+    assert result.community is None
+    assert result.community_profile is None

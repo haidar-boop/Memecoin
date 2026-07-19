@@ -225,6 +225,29 @@ class CommunityProfile:
     dev_responds_to_community: bool | None = None
     dev_appears_only_on_pumps: bool | None = None
 
+    # LunarCrush aggregate social-conversation metrics (Roadmap item 5, paid
+    # X/Twitter-adjacent aggregator; dormant until MEMEINTEL_SOCIAL_ENABLE_IN_
+    # MONITOR is on). These describe the WHOLE token's social conversation
+    # across platforms, not one account, so they get their own fields rather
+    # than reusing the Twitter-account fields above.
+    social_volume_24h: int | None = None
+    social_dominance_percent: float | None = None
+    galaxy_score: float | None = None
+    alt_rank: int | None = None
+    social_trend: str | None = None
+    # Rule 8 (never fabricate data): this source deliberately never sets
+    # twitter_followers, twitter_engagement_rate_percent,
+    # twitter_growth_rate_7d_percent, or bot_follower_percent above.
+    # LunarCrush's public v4 API (coins/list, topic detail) exposes
+    # aggregate, coin-level social metrics — sentiment, content volume,
+    # dominance, rank — not per-account follower counts, engagement rates,
+    # or bot-follower percentages. Those only exist for a specific named
+    # creator/account under a different endpoint (one account, not "the
+    # whole token's conversation") and are out of scope. Populating those
+    # four fields from data that doesn't map to them would be fabrication,
+    # not a coverage improvement — they stay whatever an earlier/different
+    # source (or nothing) set them to.
+
 
 @dataclass(frozen=True)
 class OnChainProfile:

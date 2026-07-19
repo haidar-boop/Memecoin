@@ -20,6 +20,7 @@ from meme_intelligence.ai.reasoning import AIJudgment, AIJudgmentService
 from meme_intelligence.analyzers.community_analyzer import (
     CommunityAnalyzer,
     CommunityAssessment,
+    merge_community_profiles,
 )
 from meme_intelligence.analyzers.foundation_analyzer import (
     FoundationAnalyzer,
@@ -89,6 +90,7 @@ class ResearchPipeline:
         wallet_service=None,  # WalletDataService (Solana); costs metered credits
         jupiter_client=None,  # JupiterClient-compatible (check_round_trip_liquidity)
         community_client=None,  # CoinGeckoClient-compatible (get_community_profile)
+        social_client=None,  # LunarCrushClient-compatible (get_community_profile); costs metered credits
         ai_service: AIJudgmentService | None = None,  # Part 23 reasoning layer
         now_func: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ) -> None:
@@ -108,6 +110,16 @@ class ResearchPipeline:
         self._jupiter = jupiter_client
         self._liquidity_probe = settings.liquidity_probe
         self._community_client = community_client
+        self._social_client = social_client
+        self._social_settings = settings.social
+        # Social credit-gate bookkeeping: a direct copy of the wallet gate's
+        # bookkeeping shape above (Rule 21 — this codebase prefers duplicated-
+        # but-simple over premature abstraction; the wallet gate is already
+        # tested/deployed and must not be touched, Rule 3).
+        self._social_lookup_day: str | None = None
+        self._social_lookups_today = 0
+        self._social_budget_warned_day: str | None = None
+        self._social_last_lookup: "OrderedDict[tuple[str, str], datetime]" = OrderedDict()
         self._ai = ai_service
         self._now = now_func
         self._logger = get_logger("workflow.pipeline")
@@ -134,6 +146,7 @@ class ResearchPipeline:
         narrative_inputs: NarrativeInputs | None = None,
         research_mode: ResearchMode = ResearchMode.STANDARD,
         force_wallet_check: bool = False,
+        force_social_check: bool = False,
     ) -> PipelineResult | None:
         """Full chain for one pair; ``None`` when security data is unavailable
         (a token that cannot be security-screened is not analyzable — Part 4).
@@ -219,6 +232,33 @@ class ResearchPipeline:
                 self._logger.info("community data unavailable for %s: %s",
                                   pair.base_token.address, exc)
             if community_profile is not None:
+                try:
+                    community = self._community.assess(community_profile)
+                except InsufficientDataError:
+                    pass
+
+        # Social intelligence (Roadmap item 5): paid LunarCrush aggregator,
+        # costs metered credits, dormant unless MEMEINTEL_SOCIAL_ENABLE_IN_
+        # MONITOR is on — same shape as the wallet-intelligence gate above
+        # (Rule 10/11). Merges into whatever CoinGecko already found rather
+        # than replacing it, so CoinGecko's free coverage never regresses
+        # (Rule 9). Runs before the narrative_inputs block below, which reads
+        # community/community_profile.
+        if self._social_client is not None and (
+            force_social_check or self._social_gate_allows(pair, security)
+        ):
+            self._note_social_lookup(pair, forced=force_social_check)
+            try:
+                social_profile = await self._social_client.get_community_profile(
+                    pair.base_token)
+            except CollectorError as exc:
+                self._logger.info("social data unavailable for %s: %s",
+                                  pair.base_token.address, exc)
+                social_profile = None
+            if social_profile is not None:
+                community_profile = (
+                    merge_community_profiles(community_profile, social_profile)
+                    if community_profile is not None else social_profile)
                 try:
                     community = self._community.assess(community_profile)
                 except InsufficientDataError:
@@ -370,6 +410,80 @@ class ResearchPipeline:
             return (self._now() - created).total_seconds() / 3600.0
         except Exception:  # noqa: BLE001 — a bad timestamp must never break analysis
             return None
+
+    # ---- Social-intelligence credit gate (Roadmap item 5; direct copy of the
+    # wallet-intelligence gate above — Rule 21, no shared abstraction) ----
+
+    def _social_gate_allows(self, pair: DexPair, security) -> bool:
+        """Full gate for a NON-forced lookup: candidate quality, then the
+        per-token cooldown, then the daily spend budget — mirrors
+        :meth:`_gate_allows`. Forced lookups (holdings, /check, plan/report)
+        skip this entirely."""
+        if not self._social_worth_lookup(pair, security):
+            return False
+        ss = self._social_settings
+        if ss.credit_gate_cooldown_minutes > 0:
+            last = self._social_last_lookup.get(self._lookup_key(pair))
+            if (last is not None and (self._now() - last).total_seconds()
+                    < ss.credit_gate_cooldown_minutes * 60.0):
+                return False
+        if ss.credit_gate_max_lookups_per_day > 0:
+            self._roll_social_budget_day()
+            if self._social_lookups_today >= ss.credit_gate_max_lookups_per_day:
+                if self._social_budget_warned_day != self._social_lookup_day:
+                    self._social_budget_warned_day = self._social_lookup_day
+                    self._logger.warning(
+                        "social credit-gate daily budget exhausted (%d lookups) — "
+                        "further gated lookups wait for the next UTC day; "
+                        "holdings//check/plan lookups are unaffected",
+                        ss.credit_gate_max_lookups_per_day)
+                return False
+        return True
+
+    def _roll_social_budget_day(self) -> None:
+        today = self._now().date().isoformat()
+        if today != self._social_lookup_day:
+            self._social_lookup_day = today
+            self._social_lookups_today = 0
+
+    def _note_social_lookup(self, pair: DexPair, *, forced: bool) -> None:
+        """Record a lookup that is about to run: stamp the cooldown (forced
+        ones too) and count NON-forced ones against the daily budget —
+        mirrors :meth:`_note_wallet_lookup`."""
+        self._social_last_lookup[self._lookup_key(pair)] = self._now()
+        self._social_last_lookup.move_to_end(self._lookup_key(pair))
+        while len(self._social_last_lookup) > 4096:  # bounded like the scanner caches
+            self._social_last_lookup.popitem(last=False)
+        if not forced:
+            self._roll_social_budget_day()
+            self._social_lookups_today += 1
+
+    def _social_worth_lookup(self, pair: DexPair, security) -> bool:
+        """Is this candidate worth spending metered social credits on?
+        Mirrors :meth:`_worth_wallet_lookup`. Unlike the wallet gate, this is
+        NOT restricted to Solana — LunarCrush covers multiple chains, and the
+        collector itself already safely returns None for chains outside its
+        normalization table, so no chain restriction is needed here."""
+        if security.is_destructive:
+            return False
+        if security.overall_score < self._social_settings.credit_gate_min_security_score:
+            return False
+        liq, mcap = pair.liquidity_usd, pair.market_cap
+        if liq is None or not math.isfinite(liq) or liq <= 0.0:
+            return False
+        if mcap is None or not math.isfinite(mcap) or mcap <= 0.0:
+            return False
+        t = self._alert_thresholds
+        if t.opportunity_max_liquidity_usd > 0.0 and liq > t.opportunity_max_liquidity_usd:
+            return False
+        if t.opportunity_max_market_cap_usd > 0.0 and mcap > t.opportunity_max_market_cap_usd:
+            return False
+        max_age = t.opportunity_max_age_hours
+        if max_age > 0.0:
+            age = self._pair_age_hours(pair)
+            if age is not None and age > max_age:
+                return False
+        return True
 
     # ---- AI enrichment (Part 23) ----
 
