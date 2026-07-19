@@ -209,8 +209,6 @@ def test_credit_gate_floor_configurable_and_validated():
 # ---- Credit-gate spend bounds (2026-07-17 review fixes) ----
 
 def gate_pipeline_with_clock(env=None):
-    from datetime import timedelta as _td
-
     clock = {"now": NOW}
     wallet = RecordingWallet()
     settings = Settings.from_env(env=env or {})

@@ -2,7 +2,7 @@
 
 import pytest
 
-from meme_intelligence.collectors.security_data import GoPlusClient
+from meme_intelligence.collectors.security_data import GoPlusClient, _flag, _is_burn_address
 from meme_intelligence.core.cache import TTLCache
 from meme_intelligence.core.errors import CollectorError
 from meme_intelligence.core.rate_limiter import RateLimiter
@@ -42,7 +42,7 @@ EVM_FIXTURE = {
             "creator_address": "0xdeployer1",
             "owner_percent": "0.01",
             "holders": [
-                {"address": "0xdead000000000000000000000000000000000000", "percent": "0.5", "is_locked": 0},
+                {"address": "0x000000000000000000000000000000000000dead", "percent": "0.5", "is_locked": 0},
                 {"address": "0xaaa1", "percent": "0.12", "is_locked": 0},
                 {"address": "0xaaa2", "percent": "0.06", "is_locked": 0},
                 {"address": "0xaaa3", "percent": "0.04", "is_locked": 1},
@@ -170,3 +170,81 @@ async def test_missing_result_returns_none(monkeypatch):
     client = make_client()
     patch_payload(monkeypatch, client, {"code": 1, "message": "OK", "result": {}})
     assert await client.get_token_security("ethereum", EVM_ADDRESS) is None
+
+
+# --- Bug 1 regression: _flag() must not silently map unrecognized values to False ---
+
+@pytest.mark.parametrize("value", ["true", "yes", "2", "unknown", "01", "1.0", "no"])
+def test_flag_unrecognized_value_is_unknown_not_false(value):
+    assert _flag(value) is None
+
+
+@pytest.mark.parametrize("value", ["1", 1, True])
+def test_flag_recognized_true_values(value):
+    assert _flag(value) is True
+
+
+@pytest.mark.parametrize("value", ["0", 0, False])
+def test_flag_recognized_false_values(value):
+    assert _flag(value) is False
+
+
+async def test_get_token_security_unusual_flag_value_stays_unknown(monkeypatch):
+    """A malformed is_honeypot value from GoPlus must not read as "safe" (Rule 8)."""
+    fixture = {
+        "code": 1,
+        "message": "OK",
+        "result": {
+            EVM_ADDRESS.lower(): {
+                "is_honeypot": "maybe",  # unrecognized -- not "1", not "0"
+            }
+        },
+    }
+    client = make_client()
+    patch_payload(monkeypatch, client, fixture)
+    profile = await client.get_token_security("ethereum", EVM_ADDRESS)
+    assert profile.is_honeypot is None
+
+
+# --- Bug 2 regression: burn-address matching must be exact, not substring ---
+
+def test_is_burn_address_rejects_incidental_dead_substring():
+    # Valid-looking EVM/Solana-shaped addresses that merely contain "dead"
+    # as a substring must NOT be treated as burn addresses.
+    assert _is_burn_address("0xdeadbeef00000000000000000000000000000001") is False
+    assert _is_burn_address("Fdead1111111111111111111111111111111111111") is False
+
+
+def test_is_burn_address_accepts_canonical_addresses():
+    assert _is_burn_address("0x0000000000000000000000000000000000000000") is True
+    assert _is_burn_address("0x000000000000000000000000000000000000dEaD") is True  # case-insensitive
+    assert _is_burn_address("1nc1nerator11111111111111111111111111111111") is True
+    assert _is_burn_address("11111111111111111111111111111111") is True
+
+
+async def test_holder_percents_excludes_only_canonical_burn_addresses(monkeypatch):
+    """A non-burn holder address containing "dead" must stay in the concentration calc,
+    while the real burn address is still excluded."""
+    fixture = {
+        "code": 1,
+        "message": "OK",
+        "result": {
+            EVM_ADDRESS.lower(): {
+                "holders": [
+                    # Not a burn address -- just happens to contain "dead".
+                    {"address": "0xdeadbeef00000000000000000000000000000001", "percent": "0.20", "is_locked": 0},
+                    # Canonical EVM burn address -- excluded.
+                    {"address": "0x000000000000000000000000000000000000dead", "percent": "0.50", "is_locked": 0},
+                    {"address": "0xaaa1", "percent": "0.10", "is_locked": 0},
+                ],
+            }
+        },
+    }
+    client = make_client()
+    patch_payload(monkeypatch, client, fixture)
+    profile = await client.get_token_security("ethereum", EVM_ADDRESS)
+
+    # The "deadbeef..." holder must be counted (not excluded as a burn address),
+    # so it should be the top holder at 20%.
+    assert profile.top_holder_percent == pytest.approx(20.0)
+    assert profile.top10_holder_percent == pytest.approx(30.0)  # 20 + 10, canonical burn (50%) excluded

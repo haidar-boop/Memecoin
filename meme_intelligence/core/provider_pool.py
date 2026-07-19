@@ -101,6 +101,17 @@ class ProviderPool:
             name = self._name_of(provider)
             state = self._states[name]
             if state.cooldown_until > now:
+                # Still record *why* this provider didn't get tried so the
+                # final AllProvidersFailedError stays diagnostic even when
+                # the whole pool is cooling down (bug-hunt finding — the
+                # loop body below never ran, so causes[name] would
+                # otherwise stay unset and the error message would read
+                # "no providers available", hiding the real cause).
+                causes[name] = CollectorError(
+                    f"'{name}' is on cooldown for another "
+                    f"{state.cooldown_until - now:.0f}s after "
+                    f"{state.consecutive_failures} consecutive failures"
+                )
                 continue
 
             try:
@@ -123,6 +134,26 @@ class ProviderPool:
                 state.total_failures += 1
                 self._logger.info("provider '%s' has no data for '%s': %s",
                                   name, method, exc)
+                continue
+            except Exception as exc:  # noqa: BLE001 - deliberate: a provider
+                # must never be able to kill the whole failover loop (module
+                # docstring, Rule 9 — "continue with the rest"). This is a
+                # genuine code defect surfacing (bug in a provider
+                # implementation, not routine provider trouble), so it is
+                # logged at ERROR with a traceback to make that distinction
+                # obvious, and still counts toward the failure threshold so
+                # a provider that is actually broken eventually cools down
+                # instead of being retried forever. asyncio.CancelledError,
+                # KeyboardInterrupt and SystemExit derive from BaseException,
+                # not Exception, so they are never caught here and still
+                # propagate immediately.
+                causes[name] = exc
+                self._logger.error(
+                    "provider '%s' raised an unexpected %s on '%s' "
+                    "(this looks like a provider bug, not routine failure): %s",
+                    name, type(exc).__name__, method, exc, exc_info=True,
+                )
+                self._record_failure(name, state, method, exc)
                 continue
 
             if state.consecutive_failures:

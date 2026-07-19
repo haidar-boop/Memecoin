@@ -32,6 +32,14 @@ from meme_intelligence.scanners.launch_monitor import (
     collect_launch_candidates,
 )
 from meme_intelligence.workflow.controller import ContinuousScanner
+from tests.test_controller import (  # reuse the established scanner harness
+    FakeGecko,
+    FakeGoPlus,
+    FakeMarketService,
+    RecordingSink,
+    clean_profile,
+    make_pair,
+)
 
 NOW = datetime(2026, 7, 8, 12, 0, tzinfo=timezone.utc)
 SETTINGS = Settings.from_env(env={})
@@ -631,15 +639,6 @@ async def test_collect_launch_candidates_full_pass():
 
 
 # ---- ContinuousScanner wiring (Part 32.5 Sections 2/7 end-to-end) ----
-
-from tests.test_controller import (  # reuse the established scanner harness
-    FakeGecko,
-    FakeGoPlus,
-    FakeMarketService,
-    RecordingSink,
-    clean_profile,
-    make_pair,
-)
 
 
 def pumpfun_scanner(storage, *, stream, frontend, market, profiles, sink=None,

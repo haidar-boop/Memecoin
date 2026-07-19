@@ -3,13 +3,22 @@
 import dataclasses as _dc
 from datetime import datetime, timedelta, timezone
 
+from meme_intelligence.ai.reasoning import AIJudgment
 from meme_intelligence.alerts.notification_engine import (
     _BUY_SIDE_ALERT_TYPES,
     NotificationEngine,
 )
+from meme_intelligence.analyzers.foundation_analyzer import FoundationInputs
+from meme_intelligence.analyzers.narrative_analyzer import NarrativeInputs
 from meme_intelligence.config.settings import AlertEngineSettings, Settings
+from meme_intelligence.core.enums import AlertPriority, ResearchMode, WatchlistTier
 from meme_intelligence.core.errors import TransientCollectorError
-from meme_intelligence.core.models import DexPair, SecurityProfile, TokenIdentity
+from meme_intelligence.core.models import (
+    CommunityProfile,
+    DexPair,
+    SecurityProfile,
+    TokenIdentity,
+)
 from meme_intelligence.database.storage import Storage
 from meme_intelligence.workflow.controller import ContinuousScanner
 
@@ -238,9 +247,6 @@ async def test_unindexed_tokens_skipped():
 
 # ---- Part 15: watchlist recheck cadence + multi-source verification ----
 
-from meme_intelligence.core.enums import AlertPriority, WatchlistTier
-from meme_intelligence.core.models import TokenIdentity
-
 
 class FakeMarketService:
     """Market service double: serves best pairs and a fixed verification verdict."""
@@ -408,12 +414,6 @@ async def test_strong_fresh_token_reaches_sink_at_high_priority():
 
 
 # ---- Part 32.5 S8: AI verification of gate-passing opportunities ----
-
-from meme_intelligence.ai.reasoning import AIJudgment
-from meme_intelligence.analyzers.foundation_analyzer import FoundationInputs
-from meme_intelligence.analyzers.narrative_analyzer import NarrativeInputs
-from meme_intelligence.core.enums import ResearchMode
-from meme_intelligence.core.models import CommunityProfile
 
 
 class FakeCommunity:

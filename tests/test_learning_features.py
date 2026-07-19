@@ -18,15 +18,15 @@ def _series(prices, liqs, *, holders=None, step_seconds=60):
         CoinSnapshot(
             age_seconds=i * step_seconds,
             price_usd=p,
-            liquidity_usd=l,
-            market_cap_usd=(l * 4 if l is not None else None),
-            volume_1h_usd=(l * 2 if l is not None else None),
+            liquidity_usd=liq,
+            market_cap_usd=(liq * 4 if liq is not None else None),
+            volume_1h_usd=(liq * 2 if liq is not None else None),
             holder_count=h,
             buys=10,
             sells=5,
             top10_holder_percent=40.0,
         )
-        for i, (p, l, h) in enumerate(zip(prices, liqs, holders, strict=True))
+        for i, (p, liq, h) in enumerate(zip(prices, liqs, holders, strict=True))
     ]
 
 

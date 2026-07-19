@@ -47,11 +47,11 @@ from meme_intelligence.collectors.wallet_data import (
 from meme_intelligence.collectors.social_data import LunarCrushClient
 from meme_intelligence.core.enums import AlertPriority, MarketRegime, ResearchMode
 from meme_intelligence.database.storage import Storage
-from meme_intelligence.trading.trade_planner import TradePlanner
+from meme_intelligence.trading.trade_planner import TradePlan, TradePlanner
 from meme_intelligence.workflow.boost_watcher import BoostWatcher
 from meme_intelligence.workflow.controller import ContinuousScanner
 from meme_intelligence.workflow.daily_routine import DailyRoutine
-from meme_intelligence.workflow.pipeline import ResearchPipeline
+from meme_intelligence.workflow.pipeline import PipelineResult, ResearchPipeline
 from meme_intelligence.workflow.watchlist_review import review_entries
 from meme_intelligence.collectors.market_data import DexScreenerClient, GeckoTerminalClient
 from meme_intelligence.collectors.pumpfun import PumpFunFrontendClient, PumpPortalClient
@@ -437,6 +437,7 @@ async def _cmd_plan(args, settings) -> int:
     if error:
         print(error)
         return 1
+    assert gathered is not None
     result, plan = gathered
 
     for section in (result.security, result.onchain, result.token, result.foundation,
@@ -448,7 +449,9 @@ async def _cmd_plan(args, settings) -> int:
     return 0 if not result.security.is_destructive else 2
 
 
-async def _gather_assessments(args, settings):
+async def _gather_assessments(
+    args, settings,
+) -> tuple[tuple[PipelineResult, TradePlan] | None, str | None]:
     """Shared research pass (via the pipeline) used by plan and report commands."""
     regime = MarketRegime(args.regime)
     wallet_service = build_wallet_service(settings)
@@ -514,6 +517,7 @@ async def _cmd_report(args, settings) -> int:
     if error:
         print(error)
         return 1
+    assert gathered is not None
     result, plan = gathered
 
     report = build_report(
@@ -582,6 +586,7 @@ async def _cmd_quick(args, settings) -> int:
     if error:
         print(error)
         return 1
+    assert gathered is not None
     result, plan = gathered
     pair, security, master = result.pair, result.security, result.master
 

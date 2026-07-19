@@ -263,7 +263,7 @@ def test_format_alert_sanitizes_injection_in_token_name():
     evil = TokenIdentity(chain="solana", address="Mint1",
                          name="```@everyone\nCLICK", symbol="p\u200bump\n`x`")
     text = format_alert(make_event(token=evil))
-    name_line = next(l for l in text.splitlines() if l.strip().startswith("Name:"))
+    name_line = next(line for line in text.splitlines() if line.strip().startswith("Name:"))
     assert "```" not in name_line
     assert "\n" not in name_line.replace("Name:", "")
     assert "@everyone" in name_line  # kept as inert text, just defanged of markdown

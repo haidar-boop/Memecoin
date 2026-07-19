@@ -42,16 +42,44 @@ _RENOUNCED_OWNERS = {
     "0x000000000000000000000000000000000000dead",
 }
 
-_BURN_ADDRESS_MARKERS = ("0x0000000000000000000000000000000000000000", "dead")
+# Well-known burn/incinerator addresses (exact match only, lower-cased).
+# GoPlus holder data can come from either the EVM or the Solana endpoint
+# (see _parse_evm / _parse_solana below), so this set covers both chains'
+# canonical burn addresses rather than being chain-specific. Exact match is
+# required -- a substring check like "dead" in address would false-positive
+# on any ordinary EVM (hex) or Solana (base58) address that merely happens
+# to contain those characters, which would silently understate holder
+# concentration / overstate LP lock (Rule 8: never let unrecognized or
+# incidental data read as reassuring).
+_EVM_BURN_ADDRESSES = {
+    "0x0000000000000000000000000000000000000000",
+    "0x000000000000000000000000000000000000dead",
+}
+_SOLANA_BURN_ADDRESSES = {
+    "1nc1nerator11111111111111111111111111111111",
+    "11111111111111111111111111111111",
+}
+_BURN_ADDRESSES = _EVM_BURN_ADDRESSES | _SOLANA_BURN_ADDRESSES
 
 
 def _flag(value: Any) -> bool | None:
-    """Parse a GoPlus boolean: "1"/"0" strings (or ints); empty/missing -> unknown."""
+    """Parse a GoPlus boolean: "1"/"0" strings (or ints); anything else -> unknown.
+
+    Only an exact "1"/True or "0"/False is a confirmed value. A typo, a new
+    API value, or a malformed response is unrecognized data, not evidence of
+    "not a risk" -- Rule 8 requires it reduce confidence (None) rather than
+    silently read as False.
+    """
     if value is None or value == "":
         return None
     if isinstance(value, bool):
         return value
-    return str(value).strip() == "1"
+    text = str(value).strip()
+    if text == "1":
+        return True
+    if text == "0":
+        return False
+    return None
 
 
 def _fraction_to_percent(value: Any) -> float | None:
@@ -74,8 +102,8 @@ def _to_int(value: Any) -> int | None:
 
 
 def _is_burn_address(address: str) -> bool:
-    lowered = address.lower()
-    return any(marker in lowered for marker in _BURN_ADDRESS_MARKERS)
+    """Exact-match check against known burn/incinerator addresses (EVM + Solana)."""
+    return address.lower() in _BURN_ADDRESSES
 
 
 def _holder_percents(holders: Any) -> list[float]:

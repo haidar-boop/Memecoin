@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import ssl
-from typing import Any, Mapping
+from typing import Any, Mapping, Self
 
 import aiohttp
 
@@ -89,7 +89,7 @@ class BaseCollector:
         if self._session is not None and self._owns_session and not self._session.closed:
             await self._session.close()
 
-    async def __aenter__(self) -> "BaseCollector":
+    async def __aenter__(self) -> Self:
         return self
 
     async def __aexit__(self, *exc_info: Any) -> None:
