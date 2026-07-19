@@ -1510,3 +1510,38 @@ gets reverted (git revert + crontab back to */6).
 Suite: **849 passing** (+9: 6 deferral-semantics tests incl. reentrancy
 and immediate-outside-block, 2 refresh wiring tests incl. the Rule 18
 fallback, 1 settings validation).
+
+### Same day — found and fixed the real "memory stuck at exactly 5000" bug
+
+Operator kept reporting memory pinned at 5000 across days and restarts;
+droplet evidence nailed the mechanism: index.faiss held 7,908 coins at
+00:25 (cron growth working), then snapped back to EXACTLY 5000 at 04:31 —
+the minute of the service restart. Root cause: `__main__` registers
+`learning_service.persist` as a monitor shutdown callback (exit-stack,
+line ~1010), and `persist()` unconditionally wrote every artifact — so the
+monitor's shutdown wrote its BOOT-TIME in-memory analog index (the stale
+5,000-coin copy it loaded at startup) over everything the cron had
+appended since. Every restart resurrected the same 5,000-coin file; the
+memory could never escape it. (This is the cross-process artifact
+clobbering the 2026-07-16 audit flagged; that fix was content-deleted by
+the snapshot restore. Re-fixed here on the restored tree, scoped
+tighter.)
+
+Fix, two parts, both in learning/service.py:
+1. **Ownership guard** (`_models_dirty`): scaler/index/classifier/
+   archetypes/state are written only by a process that actually MUTATED
+   them (instant-learning append, rug upgrade, retrain, archetype
+   refresh) — mirrors the pre-existing `_ensemble_dirty` guard. The
+   monitor mutates nothing, so its shutdown persist (and the CLI `mind`
+   command's post-evaluate persist) now write nothing model-side.
+2. **Cross-process reload** (`_maybe_reload_analog`): evaluate_coin and
+   get_learning_metrics stat index.faiss (ns mtime) and reload it when
+   the OTHER process grew it — /mind now shows the real count within an
+   hour, no restart needed, and live verdicts see fresh analogs. Guarded:
+   never reloads over its own un-flushed appends (dirty / deferred
+   block), never after a feature-version mismatch (old-space index), and
+   a torn mid-write file keeps the current copy and retries (Rule 7).
+
+Suite: **854 passing** (+5: clobber regression, live reload, mutating
+process still persists, evaluate-only CLI persist untouched, no reload
+over own unflushed appends).

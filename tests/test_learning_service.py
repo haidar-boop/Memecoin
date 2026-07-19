@@ -462,3 +462,96 @@ def test_resolve_outcome_inside_deferral_still_learns_instantly():
         service.resolve_outcome("d1", "solana", 24.0, -95.0, is_rug=True)
         metrics = service.get_learning_metrics(persist=False)
         assert metrics["analog_memory_size"] == 1   # learned before any flush
+
+
+# ---- The "memory stuck at exactly 5000" clobber bug (2026-07-19) ----
+
+def _disk_service(tmp_path):
+    env = dict(_ENV)
+    env["MEMEINTEL_LEARNING_STATE_DIR"] = str(tmp_path)
+    settings = Settings.from_env(env=env)
+    return LearningService(settings, now_func=lambda: NOW)
+
+
+def _resolve_one(svc, addr):
+    svc.evaluate_coin(addr, "solana", _rug_series())
+    svc.resolve_outcome(addr, "solana", 24.0, -95.0, is_rug=True)
+
+
+def _file_index_size(tmp_path) -> int:
+    from meme_intelligence.learning.analog import AnalogMemory
+    return AnalogMemory.load(str(tmp_path / "index.faiss"),
+                             str(tmp_path / "index_meta.joblib")).size
+
+
+def test_reader_process_shutdown_persist_never_clobbers_grown_memory(tmp_path):
+    """THE bug: the monitor (read-only user of the models) persisted its
+    boot-time analog index on shutdown, overwriting every coin the cron had
+    appended since — the memory file was reset to the monitor's stale copy
+    on every restart, pinning it at the same count forever."""
+    cron1 = _disk_service(tmp_path)          # cron-like: resolves coins
+    _resolve_one(cron1, "c1")
+    _resolve_one(cron1, "c2")
+    assert _file_index_size(tmp_path) == 2
+
+    monitor = _disk_service(tmp_path)        # monitor-like: loads 2, mutates nothing
+
+    cron2 = _disk_service(tmp_path)          # next cron run grows the file
+    _resolve_one(cron2, "c3")
+    assert _file_index_size(tmp_path) == 3
+
+    monitor.persist()                        # the shutdown hook (__main__:1010)
+    assert _file_index_size(tmp_path) == 3   # was 2 before the fix: clobbered
+
+
+def test_reader_process_sees_growth_without_restart(tmp_path):
+    """/mind live-reload: the monitor picks up the cron's appended coins the
+    next time metrics or a verdict are computed — no restart needed."""
+    cron1 = _disk_service(tmp_path)
+    _resolve_one(cron1, "c1")
+
+    monitor = _disk_service(tmp_path)        # loaded with 1 coin
+    assert monitor.get_learning_metrics(persist=False)["analog_memory_size"] == 1
+
+    cron2 = _disk_service(tmp_path)
+    _resolve_one(cron2, "c2")                # file grows to 2 behind monitor's back
+    metrics = monitor.get_learning_metrics(persist=False)
+    assert metrics["analog_memory_size"] == 2   # reloaded, not stale
+
+
+def test_mutating_process_still_persists_its_growth(tmp_path):
+    cron1 = _disk_service(tmp_path)
+    _resolve_one(cron1, "c1")
+    later = _disk_service(tmp_path)
+    _resolve_one(later, "c2")                # this process DOES mutate
+    assert _file_index_size(tmp_path) == 2   # its persist went through
+
+
+def test_evaluate_only_cli_persist_does_not_clobber(tmp_path):
+    """The `mind <address>` CLI evaluates one coin then persists; evaluation
+    mutates no models, so that persist must not rewrite (or shrink) them."""
+    cron1 = _disk_service(tmp_path)
+    _resolve_one(cron1, "c1")
+    _resolve_one(cron1, "c2")
+
+    cli = _disk_service(tmp_path)
+    cli.evaluate_coin("lookonly", "solana", _pump_series())
+    cli.persist()                            # __main__:915
+    assert _file_index_size(tmp_path) == 2   # untouched
+
+
+def test_no_reload_over_own_unflushed_appends(tmp_path):
+    """A process holding un-flushed instant-learning appends (deferred
+    persist) must NOT reload the older on-disk file over them."""
+    cron1 = _disk_service(tmp_path)
+    _resolve_one(cron1, "c1")
+
+    batching = _disk_service(tmp_path)       # loads 1
+    with batching.deferred_persist(flush_every=0):
+        _resolve_one(batching, "c2")         # in-memory 2, file still 1
+        other = _disk_service(tmp_path)
+        _resolve_one(other, "c3")            # file now 2 (c1+c3)
+        metrics = batching.get_learning_metrics(persist=False)
+        assert metrics["analog_memory_size"] == 2   # its OWN copy (c1+c2), no reload
+    # After the block flushes, its appends are on disk.
+    assert _file_index_size(tmp_path) >= 2
