@@ -1822,3 +1822,53 @@ separate runs, `ruff check .` clean, pyright 0 errors on the two typing
 fix files, and every diff read line-by-line against what was promised.
 
 Suite: **921 passing** (900 + 21).
+
+## 2026-07-20 — Fixed mind "memory" frozen (cross-process analog reload), take 2
+
+Operator screenshots: /mind "memory: 5815 coins" identical across 8+ hours
+of ONE continuous monitor run (uptime 3h22m and 11h42m share a start), while
+resolved (30066->31870), graded (29568->31372) and authority graded-rug-calls
+(22620->24200) all grew. "Something isn't right, fix it."
+
+Root-caused directly in code: "memory" = self._analog.size (the FAISS analog
+index). It only grows via resolve_outcome, which runs in the backtest CRON,
+never the monitor. resolved/graded/hit-rate read live from the shared SQLite
+store (so they grow cross-process), but the analog index is loaded once at
+monitor boot and never reloaded -> frozen for the run. Worse, the monitor's
+unconditional shutdown persist() wrote that stale boot copy back over the
+cron's grown file, pinning it permanently. Functional, not cosmetic: the
+monitor's live p(rug) analog vote ran on a stale fraction of what the bot had
+actually learned.
+
+This is the same failure the reverted 58611d7 addressed (reverted as
+collateral in the earlier frustration-driven "reverse everything", which was
+really about the freshness-gate zero-alerts day, not this fix). Re-landed
+cleanly against the moved tree and HARDENED after review.
+
+First attempt reproduced a CRITICAL a review caught: a single _models_dirty
+flag was latched by the monitor's own retrain_if_due (the monitor DOES retrain
+every cycle -- warm-start), which re-froze the reload AND re-armed the clobber.
+Final design splits ownership:
+- _analog_dirty (index) vs _models_dirty (scaler/classifier/archetypes/state)
+  vs the pre-existing _ensemble_dirty -- three independent guards.
+- _analog_dirty set only by instant-learning inserts and a FULL rebuild; a
+  warm-start leaves it untouched; persist() resets it after flushing so the
+  reload re-arms.
+- _maybe_reload_analog (top of evaluate_coin + get_learning_metrics) reloads a
+  peer-grown index on mtime change, keyed to index_meta.joblib (written last)
+  to avoid a torn view; refuses a feature-version-mismatched index (split
+  deploy) and latches off; swallows torn/corrupt reads (Rule 7).
+- AnalogMemory.save now atomic (tmp + os.replace) with feature_version in the
+  metadata.
+- Drift branch no longer force-sets _ensemble_dirty (the monitor never grades,
+  so persisting its reset would clobber the cron's accuracy window).
+
+Reviewed across security/data-integrity + concurrency-correctness; the
+critical was fixed and every invariant re-verified against the resolved file.
+Scope held to the learning layer (service.py + analog.py + tests) -- no
+controller/__main__/cron/deploy changes; the shutdown callback stays as-is,
+made safe by the ownership guard. NOTE: the FIRST monitor restart after
+deploy still writes/uses the stale value once (old code runs that shutdown),
+then it grows correctly from then on -- a one-time reset, not a failure.
+
+Suite: **930 passing** (921 + 9).
