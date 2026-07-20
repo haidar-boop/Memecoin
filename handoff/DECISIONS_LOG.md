@@ -1872,3 +1872,34 @@ deploy still writes/uses the stale value once (old code runs that shutdown),
 then it grows correctly from then on -- a one-time reset, not a failure.
 
 Suite: **930 passing** (921 + 9).
+
+## 2026-07-20 (later) — /check lifecycle banner (RUGGED/DEAD)
+
+Operator: /check on an already-rugged or dead coin answered "zone=early"
+with nothing indicating the pool was gone. Root cause understood, not a
+bug: MomentumAnalyzer._entry_zone only knows age + 24h pump extension, so
+a young corpse classifies as EARLY. Constraint from the operator: "don't
+want it to interfere with it sending me the coins" -> display-only change
+in telegram_commands._format_check_card (nothing in the scan/alert path
+imports it).
+
+New _lifecycle_line reuses the alert engine's dead floor
+(alert_engine.dead_liquidity_usd — the same rule as _token_death_rule, so
+/check and death alerts can never disagree): finite liquidity below the
+floor => "STATUS: DEAD" as the card's second line; "STATUS: RUGGED" only
+when a destructive finding or failed live sell probe confirms a blocked
+exit (Rule 8 — no invented cause); unknown/NaN liquidity => no banner.
+Momentum line on a dead pool annotated "(stale — pool is dead)".
+
+Suite: **934 passing** (930 + 4).
+
+Same day, earlier: the "zero coins since deploy" scare resolved as NOT a
+regression — the 1h buy-side freshness gate is the operator's own choice
+(see 2026-07-17/07-18 entries), the memory fix (823f22d) is isolated to
+the learning layer, and the scanner funnel was healthy in his journal
+(17-20 pools/cycle). An earlier suggestion this session to widen the gate
+to 24h was WRONG and retracted before he applied it. Alert-type breakdown
+grep (sinks.py "telegram alert sent" line) offered for confirming what
+the delivered alerts actually are; operator moved on. /mind + /status
+verified healthy post-deploy: memory growing (7633), rug precision 0.96
+over 25,527 graded calls, veto EARNED+ON.
