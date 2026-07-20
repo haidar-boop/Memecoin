@@ -609,14 +609,39 @@ class TelegramCommandListener(BaseCollector):
             self._check_cache.popitem(last=False)
         return card, copy_keyboard(result.pair.base_token.address)
 
-    @staticmethod
-    def _format_check_card(result) -> str:
+    def _lifecycle_line(self, result) -> str | None:
+        """Display-only life status for the /check card (operator request,
+        2026-07-20: a rugged/dead coin was answering ``zone=early``).
+
+        Mirrors ``_token_death_rule``'s canonical dead floor
+        (``alert_engine.dead_liquidity_usd``): a known-finite liquidity below
+        the floor means the pool is gone. "RUGGED" only when a destructive
+        security finding or a failed live sell probe confirms the exit was
+        blocked/pulled — otherwise the honest label is "DEAD" with no invented
+        cause, and unknown/NaN liquidity gets no label at all (Rule 8).
+        Formatting only: the alert pipeline never reads this."""
+        liq = result.pair.liquidity_usd
+        floor = self._ctx.settings.alert_engine.dead_liquidity_usd
+        if liq is None or not math.isfinite(liq) or liq >= floor:
+            return None
+        profile = getattr(result, "security_profile", None)
+        destructive = bool(getattr(result.security, "destructive_findings", ()))
+        sell_blocked = (profile is not None
+                        and getattr(profile, "live_sell_route_found", None) is False)
+        if destructive or sell_blocked:
+            return (f"STATUS: RUGGED — liquidity {_money(liq)} below the "
+                    f"{_money(floor)} dead floor + exit blocked/red flag")
+        return (f"STATUS: DEAD — liquidity {_money(liq)} collapsed below the "
+                f"{_money(floor)} dead floor")
+
+    def _format_check_card(self, result) -> str:
         """Phone-sized card mirroring the `quick` CLI output (Part 16 S6)."""
         pair = result.pair
         token = pair.base_token
         symbol = _sanitize_identity(token.symbol or token.address[:8])
         security, master = result.security, result.master
         price = f"${pair.price_usd:.8f}" if pair.price_usd is not None else "unknown"
+        lifecycle = self._lifecycle_line(result)
         lines = [
             f"CHECK — {symbol} ({token.chain})",
             f"price {price} | liq {_money(pair.liquidity_usd)} | "
@@ -624,6 +649,8 @@ class TelegramCommandListener(BaseCollector):
             f"security {security.overall_score:.0f}/100 [{security.band}] "
             f"tier={security.tier.value}",
         ]
+        if lifecycle is not None:
+            lines.insert(1, lifecycle)
         # Red flags are NEVER skipped for speed (Part 16, Section 6).
         if security.destructive_findings:
             lines += [f"RED FLAG: {f.message}" for f in security.destructive_findings[:4]]
@@ -634,8 +661,11 @@ class TelegramCommandListener(BaseCollector):
                      f"{master.classification.value} (coverage {master.coverage:.0%})")
         momentum = result.momentum
         if momentum is not None:
+            # A dead pool's entry zone is an artifact of its age, not an
+            # entry signal — say so next to it (operator confusion 2026-07-20).
+            zone_note = " (stale — pool is dead)" if lifecycle is not None else ""
             lines.append(f"momentum {momentum.overall_score:.0f}/100 "
-                         f"zone={momentum.entry_zone.value}")
+                         f"zone={momentum.entry_zone.value}{zone_note}")
         lines.append("(quick screen — run a full report before acting)")
         return "\n".join(lines)
 

@@ -188,7 +188,60 @@ async def test_check_runs_pipeline_and_attaches_copy_button():
     assert "CHECK — MEMA" in body["text"]
     assert "security 82/100" in body["text"]
     assert "watchlist" in body["text"]
+    # A healthy pool carries no lifecycle banner.
+    assert "STATUS:" not in body["text"]
     assert body["reply_markup"]["inline_keyboard"][0][0]["copy_text"]["text"] == SOL_ADDR
+
+
+# ---- /check lifecycle banner (operator request 2026-07-20: a rugged/dead
+# coin was answering zone=early with no hint the pool was already gone) ----
+
+async def test_check_dead_pool_shows_dead_status():
+    result = make_check_result()
+    result.pair.liquidity_usd = 200.0  # below the $500 dead floor
+    result.momentum = SimpleNamespace(
+        overall_score=38.0, entry_zone=SimpleNamespace(value="early"))
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage, check_result=result)
+        await listener._handle_update(message_update(f"/check {SOL_ADDR}"))
+    text = sent_messages(calls)[0]["text"]
+    assert "STATUS: DEAD" in text
+    # No destructive finding -> no invented rug cause (Rule 8).
+    assert "RUGGED" not in text
+    # The entry zone is annotated so "early" can't read as an entry signal.
+    assert "zone=early (stale — pool is dead)" in text
+
+
+async def test_check_dead_pool_with_blocked_exit_shows_rugged():
+    result = make_check_result()
+    result.pair.liquidity_usd = 12.0
+    result.security_profile = SimpleNamespace(live_sell_route_found=False)
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage, check_result=result)
+        await listener._handle_update(message_update(f"/check {SOL_ADDR}"))
+    assert "STATUS: RUGGED" in sent_messages(calls)[0]["text"]
+
+
+async def test_check_dead_pool_with_destructive_finding_shows_rugged():
+    result = make_check_result()
+    result.pair.liquidity_usd = 12.0
+    result.security = SimpleNamespace(
+        overall_score=5.0, band="Critical", tier=SimpleNamespace(value="high_danger"),
+        destructive_findings=(SimpleNamespace(message="honeypot: cannot sell"),),
+        unknown_fields=())
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage, check_result=result)
+        await listener._handle_update(message_update(f"/check {SOL_ADDR}"))
+    assert "STATUS: RUGGED" in sent_messages(calls)[0]["text"]
+
+
+async def test_check_unknown_liquidity_gets_no_lifecycle_banner():
+    result = make_check_result()
+    result.pair.liquidity_usd = None  # absent data is never a conclusion (Rule 8)
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage, check_result=result)
+        await listener._handle_update(message_update(f"/check {SOL_ADDR}"))
+    assert "STATUS:" not in sent_messages(calls)[0]["text"]
 
 
 async def test_check_none_result_reports_no_data():
