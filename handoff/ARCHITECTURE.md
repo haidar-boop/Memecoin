@@ -22,17 +22,17 @@ mind`).
 | Package | Job | Key files |
 |---|---|---|
 | `core/` | Plumbing: models, enums, errors, rate limiter, TTL cache, retry w/ backoff, provider failover pool, logging | `models.py`, `provider_pool.py`, `retry.py`, `errors.py` |
-| `collectors/` | HTTP clients, all built on `BaseCollector` (rate limit + cache + retry + redaction for free) | `market_data.py` (DexScreener, GeckoTerminal, CoinGecko), `security_data.py` (GoPlus), `wallet_data.py` (Helius/Birdeye), `market_service.py` (failover pool + cross-check + search), `pumpfun_data.py` |
+| `collectors/` | HTTP clients, all built on `BaseCollector` (rate limit + cache + retry + redaction for free) | `market_data.py` (DexScreener, GeckoTerminal, CoinGecko), `security_data.py` (GoPlus), `wallet_data.py` (Helius/Birdeye — dormant, see COMPLETE_SYSTEM_REFERENCE.md §9), `social_data.py` (LunarCrush — dormant kit, built 2026-07-20), `market_service.py` (failover pool + cross-check + search), `pumpfun.py`, `jupiter_data.py` (swap quotes + live round-trip liquidity probe) |
 | `scanners/` | Discovery filtering + pump.fun launch funnel | `discovery.py`, `launch_monitor.py` |
-| `analyzers/` | One analyzer per intelligence dimension; all return assessments with `coverage` and honest unknowns | `security_analyzer.py`, `community_analyzer.py`, `onchain_analyzer.py`, `token_analyzer.py`, `risk_analyzer.py`, `momentum_analyzer.py`, `narrative_analyzer.py`, `scoring_engine.py` (the keystone: locked weights + decision tree + red-flag overrides), `security_monitor.py` (fact diffing) |
-| `workflow/` | Orchestration | `pipeline.py` (one token → full result), `controller.py` (the 24/7 loop — **the most important file in the repo**), `daily_routine.py`, `watchlist_review.py` |
-| `alerts/` | Alert rules + dispatch + delivery | `notification_engine.py` (rules, gates, interest gate, engine), `sinks.py` (Telegram/Discord, min-priority, routes, sanitization) |
+| `analyzers/` | One analyzer per intelligence dimension; all return assessments with `coverage` and honest unknowns | `security_analyzer.py`, `community_analyzer.py`, `onchain_analyzer.py`, `token_analyzer.py`, `wallet_intelligence.py` (smart-money, dormant), `risk_analyzer.py`, `momentum_analyzer.py`, `narrative_analyzer.py`, `opportunity_ranker.py`, `scoring_engine.py` (the keystone: locked weights + decision tree + red-flag overrides), `security_monitor.py` (fact diffing) |
+| `workflow/` | Orchestration | `pipeline.py` (one token → full result), `controller.py` (the 24/7 loop — **the most important file in the repo**), `daily_routine.py`, `watchlist_review.py`, `boost_watcher.py` (dormant DexScreener paid-boost radar — has a removal/restoration history, see COMPLETE_SYSTEM_REFERENCE.md §10) |
+| `alerts/` | Alert rules + dispatch + delivery | `notification_engine.py` (rules, gates, interest gate, engine), `sinks.py` (Telegram/Discord, min-priority, routes, sanitization), `telegram_commands.py` (two-way operator control: `/status /check /why /mind /mute /buy /dump ...`) |
 | `ai/` | Anthropic reasoning layer (optional — system fully functional without) | `reasoning.py`, `prompts.py`, `report_generator.py`, `comparison.py` |
 | `learning/` | Self-learning mind layer (Section-10 spec) | see below |
 | `analytics/` | Outcome grading / backtesting | `backtesting.py` |
 | `database/` | SQLite storage (WAL) | `storage.py` |
-| `config/` | Every tunable, env-overridable, validated at construction | `settings.py` (~296 `MEMEINTEL_*` vars, see `.env.example`) |
-| `trading/` | Plans only, never orders | `trade_planner.py` |
+| `config/` | Every tunable, env-overridable, validated at construction | `settings.py` (348 `MEMEINTEL_*` vars across 45 dataclasses as of 2026-07-20 — re-verify with `grep -oE "MEMEINTEL_[A-Z0-9_]+" .env.example \| sort -u \| wc -l`, don't trust this number months later; see `.env.example`) |
+| `trading/` | Operator-tapped live buy/dump execution (Project 6, 2026-07-11) — **never automatic**, dry-run by code default | `trade_planner.py` (plans), `execution.py` (Jupiter quote/swap, dedicated-wallet signing, live vs dry-run executor), `solana_rpc.py` |
 
 ## The monitor loop, end to end (`workflow/controller.py`)
 
@@ -180,4 +180,6 @@ console/history only.
     Telegram/Discord tokens and webhook URLs are scrubbed from every error
     string; alert text sanitizes token names (backticks/newlines/mentions).
 11. **pytest** is configured `-q` (`pytest.ini`); run
-    `python -m pytest tests/` and expect **626 passed** as of 2026-07-10.
+    `python -m pytest tests/` — **938 passed** as of 2026-07-20, but run it
+    yourself rather than trusting this number; it has already drifted three
+    times (626 → 766 → 938) across this folder's history.

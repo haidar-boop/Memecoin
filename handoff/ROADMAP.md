@@ -6,13 +6,14 @@
 > where it hooks into the existing code, and what "done" means. Items 1–4
 > are free; only #5 costs money and it is deliberately last.
 >
-> **Status as of 2026-07-11:** #1 ✅ built · #2 ✅ built · #3 ✅ built
-> (veto flag off until authority is earned) · #4 ❌ **DISCARDED by the
-> operator — do not build** · #5 ⏸ **PARKED by the operator — build later,
-> only with explicit cost approval**. An unplanned **Project 6**
-> (operator-requested live buy/dump from Telegram) was also built, armed,
-> and validated with a first live buy — see STATUS.md and DECISIONS_LOG
-> 2026-07-10/-11.
+> **Status as of 2026-07-20:** #1 ✅ built · #2 ✅ built · #3 ✅ built
+> (veto flag ON, authority EARNED as of 2026-07-20 — 0.96 rug precision
+> over 25,527+ graded calls) · #4 ❌ **DISCARDED by the operator — do not
+> build** · #5 ✅ **BUILT 2026-07-20 as an off-by-default dormant kit**
+> (was parked 2026-07-10; see §5 below for the current enable path). An
+> unplanned **Project 6** (operator-requested live buy/dump from Telegram)
+> was also built, armed, and validated with a live buy+dump round trip —
+> see STATUS.md and DECISIONS_LOG 2026-07-10/-11/-20.
 
 ---
 
@@ -172,14 +173,17 @@ and nothing on the page can mutate state; unauthenticated requests get 401.
 
 ---
 
-## 5. Real social intelligence (Twitter/X via paid aggregator) — PAID — ⏸ PARKED (2026-07-10)
+## 5. Real social intelligence (Twitter/X via paid aggregator) — PAID — ✅ BUILT as a dormant kit (2026-07-20)
 
-> Status: parked by the operator ("honesty scratch the community thing
-> right now well build it later"). He knows meme coins live on Twitter and
-> wants this eventually — but only after the bot makes money, and only
-> with his explicit cost approval. Free/cheap alternatives to the official
-> Twitter API were discussed; nothing free covers engagement/bot-detection
-> usefully. Do not start unasked.
+> Status update 2026-07-20: this was parked 2026-07-10 ("scratch the
+> community thing right now, we'll build it later"), but the operator
+> asked for it to be built anyway — as a dormant, credit-gated kit he can
+> switch on himself, same shape as the wallet-intelligence kit. It is now
+> **built and off by default** (`MEMEINTEL_SOCIAL_ENABLE_IN_MONITOR=false`
+> in `collectors/social_data.py` / `SocialIntelSettings`), not merely
+> planned. Enable with `bash deploy/enable-x-community-tracking.sh` once he
+> supplies a paid LunarCrush key — no further build work needed first. See
+> DECISIONS_LOG 2026-07-20 and COMPLETE_SYSTEM_REFERENCE.md §9.
 
 **What:** Fill the biggest data gap: Twitter/X engagement, growth rates, and
 bot detection for the community/narrative scores, via LunarCrush (or

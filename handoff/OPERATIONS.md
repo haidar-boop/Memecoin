@@ -69,16 +69,25 @@ Set and working:
 - `MEMEINTEL_TELEGRAM_BOT_TOKEN` + `MEMEINTEL_TELEGRAM_CHAT_ID` — alert
   delivery to his phone (working; alerts arrive).
 - `MEMEINTEL_TELEGRAM_COMMANDS_ENABLED=true` — two-way control (Project 2).
-- `MEMEINTEL_ALERT_DELIVERY_EXTERNAL_MIN_PRIORITY=high` — his phone gets
-  HIGH/CRITICAL only. **Do not lower this without asking him.**
+- `MEMEINTEL_ALERT_DELIVERY_EXTERNAL_MIN_PRIORITY` — **this folder has
+  disagreed with itself about the live value** (this doc says `high` as of
+  2026-07-11; `STATUS.md`'s own 2026-07-11 entry says he moved it to
+  `medium` and back at least once while tuning alert volume). Don't trust
+  either — run `grep MEMEINTEL_ALERT_DELIVERY_EXTERNAL_MIN_PRIORITY .env` on
+  the droplet before assuming what his phone currently receives.
 - Learning layer enabled in the monitor (`MEMEINTEL_LEARNING_*` — the mind
   layer accumulated 449 coins on day one and trains as outcomes resolve).
 - **Live trading (Project 6) — ARMED, real money:**
   `MEMEINTEL_EXECUTION_BUY_BUTTON_ENABLED=true`,
   `MEMEINTEL_EXECUTION_LIVE_ENABLED=true`,
   `MEMEINTEL_EXECUTION_PRIVATE_KEY` (dedicated ~$20 Phantom trading
-  wallet — the funding IS the risk cap), plus small
-  `MEMEINTEL_EXECUTION_MAX_BUY_SOL` / `_BUY_PRESETS_SOL` values he set.
+  wallet — the funding IS the risk cap). **Updated 2026-07-20**: the buy
+  buttons are no longer fixed-SOL presets — they're now percent-of-balance
+  (`MEMEINTEL_EXECUTION_BUY_BUTTON_PERCENTS`, e.g. `20,50,75,100`), and the
+  per-trade ceiling (`MEMEINTEL_EXECUTION_MAX_BUY_SOL`) was removed at his
+  request — code default is `0.15` SOL but his `.env` sets it to `0`
+  (= no ceiling). Don't describe either as still using fixed SOL amounts or
+  a 0.15 cap; verify with `grep MEMEINTEL_EXECUTION .env` if in doubt.
 
 - `MEMEINTEL_ANTHROPIC_API_KEY` — **re-enabled by the operator overnight
   2026-07-11** (was removed 2026-07-10 to conserve credits). The credit
@@ -89,10 +98,17 @@ Set and working:
 
 Deliberately OFF:
 - `MEMEINTEL_WALLET_ENABLE_IN_MONITOR=false` — **wallet-intel / smart-money
-  paused by the operator (2026-07-11)**: it exhausted the main Helius
-  account's credits and produced only 429 noise. Do not flip it back on;
-  re-enable criteria (paid plan + credit-gating, together) are in
-  DECISIONS_LOG 2026-07-11.
+  paused 2026-07-11** (exhausted the main Helius account's free-tier
+  credits, produced only 429 noise). **Updated 2026-07-20**: it was
+  rebuilt from scratch behind a credit gate and shipped as a one-command
+  dormant kit — the old "re-enable only once profitable" criterion is
+  retired. Current re-enable path: `bash deploy/enable-wallet-tracking.sh
+  <PAID_HELIUS_KEY>` once he has a paid Helius plan. See
+  `COMPLETE_SYSTEM_REFERENCE.md` §9 for the full dormant-kits table.
+- `MEMEINTEL_SOCIAL_ENABLE_IN_MONITOR=false` — social/LunarCrush
+  intelligence, built 2026-07-20 as a new dormant kit (not a restoration).
+  Enable with `bash deploy/enable-x-community-tracking.sh` once he has a
+  paid LunarCrush key.
 
 Never in git: `.env` is gitignored; secrets exist only on the droplet.
 Editing on the phone: `nano .env` trips him up (two incidents: a

@@ -55,11 +55,11 @@
 
 | Decision | His call | Where recorded |
 |---|---|---|
-| Trading | **Never.** Decision-support only; he makes every call. | Spec + every doc |
-| Phone alerts | HIGH priority and above only (`external_min_priority=high`) | DECISIONS_LOG (strong-candidate tier) |
+| Trading | **Never automatic — every trade is a button he taps.** Live execution has been ARMED since 2026-07-11 (Project 6): the bot can sign/send a real buy or dump from a dedicated low-balance wallet, but only on his explicit tap, never on its own initiative. | Spec + DECISIONS_LOG 2026-07-11 |
+| Phone alerts | HIGH priority and above (`external_min_priority`) — **verify the live value with `grep MEMEINTEL_ALERT_DELIVERY_EXTERNAL_MIN_PRIORITY .env` on the droplet**; this folder has previously disagreed with itself about whether he's currently on HIGH or MEDIUM after live-feedback tuning | DECISIONS_LOG (strong-candidate tier + 2026-07-11 tuning) |
 | Junk warnings | Coins never recommended to him must not buzz his phone | DECISIONS_LOG (interest gate) |
-| AI credits | Free checks first, AI last; key currently off | DECISIONS_LOG (credit gate) |
-| LunarCrush / paid social data | Deferred until the bot proves itself | DECISIONS_LOG, ROADMAP #5 |
+| AI credits | Free deterministic checks first, AI verification last — confirmed ON as of 2026-07-20 (`/status` → `AI ON`); he has toggled the underlying Anthropic key off and back on before and may again — check current state, don't assume | DECISIONS_LOG (credit gate) |
+| LunarCrush / paid social data | Built 2026-07-20 as an off-by-default dormant kit (not deferred anymore) — enable with `deploy/enable-x-community-tracking.sh` once he supplies a paid key | DECISIONS_LOG 2026-07-20, COMPLETE_SYSTEM_REFERENCE.md §9 |
 | Web dashboard | Wanted, but deferred behind detection quality | ROADMAP #4 |
 | Addressing him | Do **not** address him by name in replies (he retracted that) | session history |
 

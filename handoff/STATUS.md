@@ -234,14 +234,16 @@ The classification/scoring framework, config system, and logging.
   `MEMEINTEL_BIRDEYE_API_KEY` (see SETUP.md)
 - **Scope: Solana only.** EVM wallet intelligence (would need Alchemy or
   similar) is not built.
-- **⏳ PAUSED IN THE MONITOR as of 2026-07-11**
-  (`MEMEINTEL_WALLET_ENABLE_IN_MONITOR=false` on the droplet): running it
-  on every analyzed token exhausted the free Helius account's monthly
-  credits, so it produced nothing but 429 retries. Deliberately parked —
-  re-enable ONLY when the bot is profitable, and only together with
-  (a) a paid Helius plan and (b) credit-gating so wallet lookups run only
-  on best/alert-worthy candidates, not every token. The code is built,
-  tested, and untouched. See DECISIONS_LOG 2026-07-11.
+- **⏳ OFF in the monitor by default** (`MEMEINTEL_WALLET_ENABLE_IN_MONITOR
+  =false`) — paused 2026-07-11 after running it on every analyzed token
+  exhausted the free Helius account's monthly credits (429 retries only).
+  **Rebuilt 2026-07-20** as a one-command dormant kit behind a real credit
+  gate (security-score floor, daily lookup budget, per-token cooldown) —
+  the old "only when profitable" criterion is retired; the current bar is
+  just "operator supplies a paid Helius key and runs
+  `bash deploy/enable-wallet-tracking.sh <key>`." See DECISIONS_LOG
+  2026-07-11 and 2026-07-20, and COMPLETE_SYSTEM_REFERENCE.md §9 for the
+  full dormant-kits table.
 
 ## Part 18 — Advanced Rug Detection & Scam Prevention Engine → ✅
 

@@ -36,7 +36,7 @@ committed). The app loads it automatically on startup
 | Telegram bot | 🟡 code ready — create via @BotFather | `MEMEINTEL_TELEGRAM_BOT_TOKEN` + `MEMEINTEL_TELEGRAM_CHAT_ID` | alert delivery (Part 29); test: `alerts --test` |
 | Discord webhook | 🟡 code ready, optional | `MEMEINTEL_DISCORD_WEBHOOK_URL` | alert delivery (Part 29); test: `alerts --test` |
 | CoinGecko community data | ✅ **live** (free; optional demo key raises limits) | `MEMEINTEL_COINGECKO_API_KEY` (optional) | community/narrative scoring (Parts 5, 19) |
-| LunarCrush (upgrade path) | ⏳ deferred — revisit if the bot proves itself (~$5/day) | (not yet defined) | Twitter engagement depth |
+| LunarCrush (upgrade path) | ✅ built as a dormant kit (2026-07-20), off by default | `MEMEINTEL_LUNARCRUSH_API_KEY` + `bash deploy/enable-x-community-tracking.sh` | Twitter engagement depth |
 | Alchemy (EVM wallets) | ⏳ **not set up, optional** | (not yet defined) | EVM wallet intelligence (Part 17 extension) |
 
 Your current working `.env` should contain at minimum:
