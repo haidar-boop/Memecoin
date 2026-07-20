@@ -1903,3 +1903,18 @@ grep (sinks.py "telegram alert sent" line) offered for confirming what
 the delivered alerts actually are; operator moved on. /mind + /status
 verified healthy post-deploy: memory growing (7633), rug precision 0.96
 over 25,527 graded calls, veto EARNED+ON.
+
+## 2026-07-20 (later still) — /check DUMPED banner (the trader's "dead")
+
+Operator tested the fresh lifecycle banner on DrFy…pump and still saw
+plain zone=early. Live DexScreener data explained it: -86% in 24h, $4.3k
+mcap, but $4.9k liquidity still in the pumpswap pool — dead to a trader,
+invisible to the drained-pool DEAD rule ($500 floor), which was working
+as designed. Added the third state rather than bending the floor:
+`AlertThresholds.check_dumped_drop_percent` (default 80, env
+MEMEINTEL_ALERTS_CHECK_DUMPED_DROP_PERCENT, 0=off) → "STATUS: DUMPED —
+price -86% in 24h (pool still holds $4.9K)". Display-only by contract
+(only the /check card reads it — operator constraint: never interfere
+with coin sending). DEAD/RUGGED take precedence on a drained pool;
+unknown change/liquidity trigger nothing (Rule 8). Momentum zone note:
+"(stale — coin already dumped)". Suite: **938 passing** (934 + 4).
