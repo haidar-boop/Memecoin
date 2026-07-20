@@ -618,21 +618,33 @@ class TelegramCommandListener(BaseCollector):
         the floor means the pool is gone. "RUGGED" only when a destructive
         security finding or a failed live sell probe confirms the exit was
         blocked/pulled — otherwise the honest label is "DEAD" with no invented
-        cause, and unknown/NaN liquidity gets no label at all (Rule 8).
+        cause. A pool still holding liquidity whose price collapsed at least
+        ``alerts.check_dumped_drop_percent`` in 24h reads "DUMPED" — the
+        operator's "dead" is the trader's (price cratered), which the
+        drained-pool rule alone missed (2026-07-20, DrFy…pump: -86%% with
+        $4.9K liquidity intact answered zone=early). Unknown/NaN liquidity
+        and unknown 24h change never trigger anything (Rule 8).
         Formatting only: the alert pipeline never reads this."""
         liq = result.pair.liquidity_usd
         floor = self._ctx.settings.alert_engine.dead_liquidity_usd
-        if liq is None or not math.isfinite(liq) or liq >= floor:
-            return None
-        profile = getattr(result, "security_profile", None)
-        destructive = bool(getattr(result.security, "destructive_findings", ()))
-        sell_blocked = (profile is not None
-                        and getattr(profile, "live_sell_route_found", None) is False)
-        if destructive or sell_blocked:
-            return (f"STATUS: RUGGED — liquidity {_money(liq)} below the "
-                    f"{_money(floor)} dead floor + exit blocked/red flag")
-        return (f"STATUS: DEAD — liquidity {_money(liq)} collapsed below the "
-                f"{_money(floor)} dead floor")
+        if liq is not None and math.isfinite(liq) and liq < floor:
+            profile = getattr(result, "security_profile", None)
+            destructive = bool(getattr(result.security, "destructive_findings", ()))
+            sell_blocked = (profile is not None
+                            and getattr(profile, "live_sell_route_found", None) is False)
+            if destructive or sell_blocked:
+                return (f"STATUS: RUGGED — liquidity {_money(liq)} below the "
+                        f"{_money(floor)} dead floor + exit blocked/red flag")
+            return (f"STATUS: DEAD — liquidity {_money(liq)} collapsed below the "
+                    f"{_money(floor)} dead floor")
+        drop = self._ctx.settings.alerts.check_dumped_drop_percent
+        change = getattr(result.pair, "price_change_24h", None)
+        if (drop > 0.0 and change is not None and math.isfinite(change)
+                and change <= -drop):
+            held = (f"pool still holds {_money(liq)}"
+                    if liq is not None and math.isfinite(liq) else "liquidity unknown")
+            return f"STATUS: DUMPED — price {change:+.0f}% in 24h ({held})"
+        return None
 
     def _format_check_card(self, result) -> str:
         """Phone-sized card mirroring the `quick` CLI output (Part 16 S6)."""
@@ -661,9 +673,13 @@ class TelegramCommandListener(BaseCollector):
                      f"{master.classification.value} (coverage {master.coverage:.0%})")
         momentum = result.momentum
         if momentum is not None:
-            # A dead pool's entry zone is an artifact of its age, not an
-            # entry signal — say so next to it (operator confusion 2026-07-20).
-            zone_note = " (stale — pool is dead)" if lifecycle is not None else ""
+            # A dead/dumped coin's entry zone is an artifact of its age, not
+            # an entry signal — say so next to it (operator confusion
+            # 2026-07-20: a corpse answered zone=early).
+            zone_note = ""
+            if lifecycle is not None:
+                gone = "coin already dumped" if "DUMPED" in lifecycle else "pool is dead"
+                zone_note = f" (stale — {gone})"
             lines.append(f"momentum {momentum.overall_score:.0f}/100 "
                          f"zone={momentum.entry_zone.value}{zone_note}")
         lines.append("(quick screen — run a full report before acting)")

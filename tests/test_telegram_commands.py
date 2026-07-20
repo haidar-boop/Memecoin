@@ -244,6 +244,53 @@ async def test_check_unknown_liquidity_gets_no_lifecycle_banner():
     assert "STATUS:" not in sent_messages(calls)[0]["text"]
 
 
+async def test_check_crashed_price_with_intact_pool_shows_dumped():
+    # The operator's live case (DrFy…pump): -86% in 24h, $4.9K liquidity
+    # still in the pool — dead to a trader, invisible to the drained-pool rule.
+    result = make_check_result()
+    result.pair.liquidity_usd = 4_944.0
+    result.pair.price_change_24h = -86.13
+    result.momentum = SimpleNamespace(
+        overall_score=38.0, entry_zone=SimpleNamespace(value="early"))
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage, check_result=result)
+        await listener._handle_update(message_update(f"/check {SOL_ADDR}"))
+    text = sent_messages(calls)[0]["text"]
+    assert "STATUS: DUMPED" in text and "pool still holds" in text
+    assert "zone=early (stale — coin already dumped)" in text
+
+
+async def test_check_moderate_drop_gets_no_dumped_banner():
+    result = make_check_result()
+    result.pair.price_change_24h = -35.0  # a red day, not a corpse
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage, check_result=result)
+        await listener._handle_update(message_update(f"/check {SOL_ADDR}"))
+    assert "STATUS:" not in sent_messages(calls)[0]["text"]
+
+
+async def test_check_dumped_banner_off_when_threshold_zero():
+    result = make_check_result()
+    result.pair.price_change_24h = -99.0
+    settings = make_settings(MEMEINTEL_ALERTS_CHECK_DUMPED_DROP_PERCENT="0")
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage, settings=settings,
+                                        check_result=result)
+        await listener._handle_update(message_update(f"/check {SOL_ADDR}"))
+    assert "STATUS:" not in sent_messages(calls)[0]["text"]
+
+
+async def test_check_dead_floor_takes_precedence_over_dumped():
+    result = make_check_result()
+    result.pair.liquidity_usd = 100.0   # drained pool
+    result.pair.price_change_24h = -99.0
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage, check_result=result)
+        await listener._handle_update(message_update(f"/check {SOL_ADDR}"))
+    text = sent_messages(calls)[0]["text"]
+    assert "STATUS: DEAD" in text and "DUMPED" not in text
+
+
 async def test_check_none_result_reports_no_data():
     with Storage(":memory:", now_func=lambda: NOW) as storage:
         listener, calls = make_listener(storage, check_result=None)

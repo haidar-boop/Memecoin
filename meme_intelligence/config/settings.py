@@ -249,6 +249,14 @@ class AlertThresholds:
     # NOTHING until he enables it, so the README enable steps set this to
     # 50 together with the monitor flag (keeping the two floors aligned).
     momentum_min_security_score: float = 0.0
+    # /check card DUMPED banner (operator request 2026-07-20): a coin whose
+    # price collapsed this many percent in 24h shows "STATUS: DUMPED" on the
+    # /check card even while its pool still holds liquidity — the operator's
+    # "dead" is the trader's (price cratered), not only the drained-pool death
+    # the alert engine tracks. DISPLAY-ONLY: read exclusively by the Telegram
+    # /check card, never by the alert pipeline. 0 = off. Unknown 24h change
+    # never triggers it (Rule 8).
+    check_dumped_drop_percent: float = 80.0
 
     def __post_init__(self) -> None:
         for name in ("security", "community", "liquidity", "onchain", "overall",
@@ -282,6 +290,8 @@ class AlertThresholds:
                     f"alert threshold '{cap}' ({hi}) must be >= '{floor}' ({lo})")
         _check_range("alert threshold 'checklist_sell_tax_max_percent'",
                      self.checklist_sell_tax_max_percent, 0.0, 100.0)
+        _check_range("alert threshold 'check_dumped_drop_percent'",
+                     self.check_dumped_drop_percent, 0.0, 100.0)
         _check_range("alert threshold 'momentum_min_security_score'",
                      self.momentum_min_security_score, 0.0, 100.0)
 
