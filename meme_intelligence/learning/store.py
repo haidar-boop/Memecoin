@@ -126,7 +126,18 @@ class LearningStore:
         self._logger = get_logger("learning.store")
         if path != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(path, timeout=30.0)
+        # check_same_thread=False: retrain_if_due (learning/service.py) is run
+        # via asyncio.to_thread by the controller specifically so the CPU-bound
+        # retrain never blocks the event loop -- but that moves it to a
+        # different OS thread than the one that opened this connection.
+        # sqlite3's default same-thread check has nothing to do with actual
+        # safety here: the system SQLite library is built serialized
+        # (thread-safe internally), which is exactly what this flag is for.
+        # Without it, every retrain raised "SQLite objects created in a
+        # thread can only be used in that same thread" and silently never
+        # ran (bug-hunt finding, 2026-07-21 -- confirmed firing on every
+        # monitor cycle in production logs).
+        self._conn = sqlite3.connect(path, timeout=30.0, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout=30000")

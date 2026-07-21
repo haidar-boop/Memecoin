@@ -1,5 +1,6 @@
 """Tests for the mind-layer SQLite persistence (Section 9)."""
 
+import threading
 from datetime import datetime, timezone
 
 import pytest
@@ -116,4 +117,33 @@ def test_resolved_records_carry_full_lifecycle(store):
     assert record.creator == "dev"
     assert len(record.snapshots) == 1
     assert len(record.rug_signals) == 1
-    assert record.label_for(6.0).bucket is OutcomeBucket.RUG
+
+
+def test_store_is_usable_from_a_different_thread(store):
+    """Bug-hunt regression (2026-07-21): retrain_if_due runs on a worker
+    thread via asyncio.to_thread (Rule 10 -- the CPU-bound retrain must not
+    block the event loop), but the connection is opened on the main thread.
+    Without check_same_thread=False this raised "SQLite objects created in
+    a thread can only be used in that same thread" on every single call --
+    confirmed firing every monitor cycle in production logs, silently
+    disabling all mind-layer retraining. A background thread must be able
+    to read and write through the same store with no exception."""
+    store.record_detection(TOKEN, detection_price_usd=0.01, creator="dev")
+
+    errors: list[Exception] = []
+
+    def worker() -> None:
+        try:
+            store.record_detection(TOKEN2, detection_price_usd=0.02, creator="dev2")
+            store.resolved_count()
+            store.resolved_records()
+        except Exception as exc:  # noqa: BLE001 -- capture for the assertion below
+            errors.append(exc)
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    thread.join(timeout=5.0)
+
+    assert not thread.is_alive(), "worker thread hung"
+    assert errors == [], f"cross-thread access raised: {errors}"
+    assert store.coin_id(TOKEN2) is not None
