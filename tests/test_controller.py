@@ -1451,6 +1451,85 @@ def test_retry_disabled_by_flag_keeps_old_behavior():
         assert key not in scanner._retry_pending
 
 
+# ---- 2026-07-21 fix: a security lookup that returns None outright (never
+# analyzed at all) gets the same bounded, paced retry as a low-coverage
+# AVOID, instead of relying on the pool resurfacing in a later discovery
+# poll -- bug-hunt finding: a fast-churning "new pools" feed pages a missed
+# candidate out before the next scan, so it was silently lost forever. ----
+
+
+def test_unanalyzed_lookup_miss_is_rescheduled_not_dropped():
+    """The core fix: a token whose FIRST analyze_pair() call returned None
+    (no result at all -- security data not indexed yet) is queued for a
+    bounded retry rather than only hoping to be rediscovered."""
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner = make_bare_scanner(storage)
+        pair = _dc.replace(make_pair(address="Fresh2"),
+                           pair_created_at=NOW - timedelta(minutes=2))
+        key = ("solana", "fresh2")
+        scanner._schedule_insufficient_data_retry(key, pair, NOW)
+        assert key not in scanner._seen
+        assert key in scanner._retry_pending
+        due_at, saved_address, giveup_at = scanner._retry_pending.get(key)
+        assert due_at == NOW + timedelta(minutes=SETTINGS.workflow.insufficient_data_retry_minutes)
+        assert saved_address == "Fresh2"  # original case preserved
+        assert giveup_at == (NOW - timedelta(minutes=2)) + timedelta(
+            minutes=SETTINGS.workflow.insufficient_data_max_age_minutes)
+
+
+def test_unanalyzed_lookup_miss_unknown_age_is_not_retried():
+    """Rule 8: without a known pool age there is no way to bound a retry
+    window, so it is left alone (unchanged from before this fix) rather
+    than queued with an unbounded lifetime."""
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner = make_bare_scanner(storage)
+        pair = _dc.replace(make_pair(address="Unk2"), pair_created_at=None)
+        key = ("solana", "unk2")
+        scanner._schedule_insufficient_data_retry(key, pair, NOW)
+        assert key not in scanner._seen
+        assert key not in scanner._retry_pending
+
+
+def test_unanalyzed_lookup_miss_past_max_age_gives_up():
+    """Once the pool itself has already aged past the retry window, another
+    look is not worth scheduling."""
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner = make_bare_scanner(storage)
+        max_age = SETTINGS.workflow.insufficient_data_max_age_minutes
+        pair = _dc.replace(make_pair(address="Old2"),
+                           pair_created_at=NOW - timedelta(minutes=max_age + 5))
+        key = ("solana", "old2")
+        scanner._schedule_insufficient_data_retry(key, pair, NOW)
+        assert key not in scanner._seen
+        assert key not in scanner._retry_pending
+
+
+def test_unanalyzed_lookup_miss_retry_disabled_by_flag():
+    settings = Settings.from_env(env={"MEMEINTEL_WORKFLOW_INSUFFICIENT_DATA_RETRY_ENABLED": "false"})
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner = make_bare_scanner(storage, settings=settings)
+        pair = _dc.replace(make_pair(address="Off2"),
+                           pair_created_at=NOW - timedelta(minutes=1))
+        key = ("solana", "off2")
+        scanner._schedule_insufficient_data_retry(key, pair, NOW)
+        assert key not in scanner._retry_pending
+
+
+async def test_unindexed_tokens_scheduled_for_retry_not_permanently_lost():
+    """End-to-end through the main discovery loop: a candidate GoPlus has no
+    data for yet is not analyzed this cycle, but -- unlike before this fix
+    -- it is queued in _retry_pending rather than only hoping a later
+    discovery poll resurfaces the exact same pool."""
+    pair = make_pair()
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner, _ = make_scanner(storage, [pair], {})  # goplus knows nothing
+        history = await scanner.run(max_cycles=1)
+        assert history[0].analyzed == 0
+        key = ("solana", pair.base_token.address.lower())
+        assert key not in scanner._seen
+        assert key in scanner._retry_pending
+
+
 async def test_main_loop_skips_a_key_pending_retry():
     """A token already scheduled for a later retry must not be re-run by the
     plain discovery loop every cycle it's still 'new' -- only the dedicated
