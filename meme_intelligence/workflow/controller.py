@@ -531,13 +531,7 @@ class ContinuousScanner:
                 # for the pump.fun launch path (or a later cycle) to pick
                 # up, not get silently dropped when it's confirmed there
                 # (bug-hunt finding — _seen previously meant "attempted",
-                # not "analyzed"). Relying purely on a later discovery scan
-                # to resurface the exact same pool is not reliable once
-                # "new pools" is churning fast (bug-hunt finding, 2026-07-21:
-                # a fast-churning feed pages the pool out before the next
-                # poll) — queue the same bounded, paced retry the
-                # low-coverage path already uses, instead of a bare drop.
-                self._schedule_insufficient_data_retry(key, candidate.pair, self._now())
+                # not "analyzed").
                 continue
             self._finalize_or_reschedule(key, result, candidate.pair, self._now())
             stats.analyzed += 1
@@ -1151,29 +1145,6 @@ class ContinuousScanner:
                           pair.base_token.address, giveup_at))
                 return  # NOT marked _seen — eligible for another look later
         self._seen.add(key)
-
-    def _schedule_insufficient_data_retry(self, key: tuple[str, str], pair, now: datetime) -> None:
-        """A candidate's FIRST analysis attempt returned ``None`` outright
-        (security data not indexed yet) rather than a low-coverage result —
-        there is no ``result.master`` to gate on the way
-        ``_finalize_or_reschedule`` does, so this just queues the same
-        bounded, paced ``_retry_pending`` entry unconditionally (subject to
-        the same enable flag and age ceiling). Without this, a security
-        lookup that misses by even a few seconds on a fast-churning "new
-        pools" feed was relying on the exact same pool resurfacing in a
-        later discovery poll — which a feed that pages out dozens of newer
-        pools per cycle does not reliably do (bug-hunt finding, 2026-07-21:
-        traced from a scanner sitting at 0 analyzed/0 alerts for hours
-        despite discovery and GoPlus both being healthy)."""
-        ws = self._settings.workflow
-        if not ws.insufficient_data_retry_enabled or pair.pair_created_at is None:
-            return  # can't safely bound a retry without the pool's age
-        giveup_at = pair.pair_created_at + timedelta(minutes=ws.insufficient_data_max_age_minutes)
-        if now >= giveup_at:
-            return  # already past the window a retry would be worth
-        self._retry_pending.add(
-            key, (now + timedelta(minutes=ws.insufficient_data_retry_minutes),
-                  pair.base_token.address, giveup_at))
 
     def _repace_retry(self, key: tuple[str, str], address: str,
                       giveup_at: datetime, now: datetime) -> None:
