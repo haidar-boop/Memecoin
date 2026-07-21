@@ -638,10 +638,18 @@ class AISettings:
     verify_opportunities: bool = True
     # Credit conservation: a paid verification call is the LAST check, never
     # the first. If the deterministic rug engine scores at/above this before
-    # the call, the call is skipped (the alert is downgraded instead). The
-    # smallest signal weight is 10, so the default means ANY fired rug signal
-    # blocks the spend; raise it to tolerate weak signals.
-    verify_skip_rug_score: float = 10.0
+    # the call, the call is skipped (the alert is downgraded instead). This
+    # is also the buy-side veto floor (controller._deterministic_risk_veto):
+    # a rug is a COMBINED verdict, not one flag (operator rule, 2026-07-12 —
+    # "if just one thing misses the checklist, send it through"). 25 is the
+    # weight of deployer_blacklisted (a confirmed prior rugger), and below
+    # unsellable/liquidity_removed's 30 — so all three of those hard,
+    # already-confirmed signals still veto alone. Every softer, often-
+    # normal-for-a-fresh-launch signal (concentration 15, mint/freeze
+    # authority 20, sell tax 15, dev outflow 20) instead needs a second
+    # corroborating signal to cross this floor, rather than any single one
+    # blocking the alert by itself.
+    verify_skip_rug_score: float = 25.0
 
     def __post_init__(self) -> None:
         if self.model.strip() == "":
