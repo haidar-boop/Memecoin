@@ -483,3 +483,72 @@ async def test_social_layer_is_a_complete_no_op_with_default_settings():
     assert result is not None
     assert result.community is None
     assert result.community_profile is None
+
+
+# ---- 2026-07-21 fix: GoPlus / Jupiter probe / community fetch run concurrently ----
+
+import asyncio  # noqa: E402
+
+
+class SlowFakeGoPlus:
+    def __init__(self, profile: SecurityProfile, delay: float) -> None:
+        self._profile = profile
+        self._delay = delay
+
+    async def get_token_security(self, chain, address):
+        await asyncio.sleep(self._delay)
+        return self._profile
+
+
+class SlowFakeJupiter:
+    def __init__(self, result: LiquidityProbeResult, delay: float) -> None:
+        self._result = result
+        self._delay = delay
+
+    async def check_round_trip_liquidity(self, mint, *, probe_sol_amount, slippage_bps,
+                                         sell_confirm_fraction=0.05):
+        await asyncio.sleep(self._delay)
+        return self._result
+
+
+class SlowFakeCommunity:
+    def __init__(self, delay: float) -> None:
+        self._delay = delay
+
+    async def get_community_profile(self, token):
+        await asyncio.sleep(self._delay)
+        return COINGECKO_PROFILE
+
+
+async def test_goplus_jupiter_and_community_fetch_concurrently_not_sequentially():
+    """The bug this fixes: /check took multiple minutes because GoPlus, the
+    Jupiter probe, and CoinGecko ran one after another, so a slow provider's
+    full latency stacked on top of the other two instead of overlapping.
+    None of the three depend on each other's result, so wall-clock time for
+    this leg of analyze_pair should track the SLOWEST of them, not their
+    sum."""
+    delay = 0.2  # each fake "network call" takes this long
+    goplus = SlowFakeGoPlus(make_profile(), delay)
+    jupiter = SlowFakeJupiter(
+        LiquidityProbeResult(token=TOKEN, source="jupiter",
+                             live_buy_route_found=True, live_sell_route_found=True),
+        delay)
+    community = SlowFakeCommunity(delay)
+    pipeline = ResearchPipeline(Settings.from_env(env={}), goplus,
+                                jupiter_client=jupiter, community_client=community,
+                                now_func=lambda: NOW)
+
+    loop = asyncio.get_event_loop()
+    started = loop.time()
+    result = await pipeline.analyze_pair(DexPair(**GOOD_PAIR_KWARGS))
+    elapsed = loop.time() - started
+
+    assert result is not None
+    assert result.community is not None  # all three results still landed correctly
+    assert result.security_profile.live_buy_route_found is True
+    # Sequential would take >= 3 * delay (0.6s); concurrent should land near
+    # 1 * delay. The 2x margin comfortably separates the two without being a
+    # flaky, tight timing assertion.
+    assert elapsed < delay * 2, (
+        f"expected concurrent fetch near {delay}s, took {elapsed:.2f}s -- "
+        "looks sequential again")

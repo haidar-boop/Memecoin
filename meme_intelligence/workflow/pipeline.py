@@ -9,6 +9,7 @@ per module; Rule 18: extend, don't duplicate).
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import math
 from collections import OrderedDict
@@ -77,6 +78,11 @@ class PipelineResult:
     community_profile: CommunityProfile | None = None
     ai_judgment: AIJudgment | None = None  # Part 23 reasoning-layer output
     opportunity: "OpportunityRank | None" = None  # Part 28 S5 watchlist ranking
+
+
+async def _no_call() -> None:
+    """Filler awaitable for an asyncio.gather() slot that has nothing to run."""
+    return None
 
 
 class ResearchPipeline:
@@ -158,41 +164,71 @@ class ResearchPipeline:
         filtering) and fills whichever judgment slots remain empty; without
         it those categories honestly report "no data" (Rule 8).
         """
-        try:
-            profile = await self._goplus.get_token_security(pair.chain, pair.base_token.address)
-        except CollectorError as exc:
+        # GoPlus, the Jupiter probe, and CoinGecko community data are three
+        # independent network calls -- none of their "should this even run"
+        # conditions depend on another's result, and the probe only merges
+        # its fields into `profile` afterward. They used to run strictly
+        # one after another, so a slow/retrying provider added its full
+        # latency on top of the other two instead of overlapping with them
+        # (bug-hunt finding, 2026-07-21: /check taking several minutes with
+        # no single call actually failing -- their latencies were stacking).
+        # Fetching them concurrently bounds this leg of the pipeline to the
+        # SLOWEST of the three rather than their sum. Purely a concurrency
+        # change: every gate, threshold, and credit-spend decision below is
+        # untouched, and wallet/social (which DO need `security` to decide
+        # whether to run at all in the non-forced path) stay sequential.
+        jupiter_enabled = (
+            self._jupiter is not None
+            and self._liquidity_probe.enabled
+            and pair.chain in ("solana", "sol")
+        )
+        jupiter_coro = (
+            self._jupiter.check_round_trip_liquidity(
+                pair.base_token.address,
+                probe_sol_amount=self._liquidity_probe.probe_sol_amount,
+                slippage_bps=self._liquidity_probe.slippage_bps,
+                sell_confirm_fraction=self._liquidity_probe.sell_confirm_fraction,
+            ) if jupiter_enabled else _no_call()
+        )
+        community_coro = (
+            self._community_client.get_community_profile(pair.base_token)
+            if self._community_client is not None else _no_call()
+        )
+        goplus_outcome, jupiter_outcome, community_outcome = await asyncio.gather(
+            self._goplus.get_token_security(pair.chain, pair.base_token.address),
+            jupiter_coro, community_coro, return_exceptions=True,
+        )
+
+        if isinstance(goplus_outcome, CollectorError):
             self._logger.info("security data unavailable for %s/%s: %s",
-                              pair.chain, pair.base_token.address, exc)
+                              pair.chain, pair.base_token.address, goplus_outcome)
             return None
+        if isinstance(goplus_outcome, BaseException):
+            raise goplus_outcome
+        profile = goplus_outcome
         if profile is None:
             return None
 
         # Live round-trip sell test (Project 1): Solana-only, needs a Jupiter
         # API key, gated by the liquidity-probe config flag -- mirrors the
-        # wallet-intelligence gating below (Rule 10). Runs before scoring so
-        # the merged fields participate in the same destructive-override
-        # logic as GoPlus's static honeypot fields (Rule 9 -- multi-source).
-        if (
-            self._jupiter is not None
-            and self._liquidity_probe.enabled
-            and pair.chain in ("solana", "sol")
-        ):
-            try:
-                probe = await self._jupiter.check_round_trip_liquidity(
-                    pair.base_token.address,
-                    probe_sol_amount=self._liquidity_probe.probe_sol_amount,
-                    slippage_bps=self._liquidity_probe.slippage_bps,
-                    sell_confirm_fraction=self._liquidity_probe.sell_confirm_fraction,
-                )
+        # wallet-intelligence gating below (Rule 10). Merged into `profile`
+        # before scoring so its fields participate in the same destructive-
+        # override logic as GoPlus's static honeypot fields (Rule 9 --
+        # multi-source).
+        if jupiter_enabled:
+            if isinstance(jupiter_outcome, (CollectorError, ValueError)):
+                self._logger.info("Jupiter liquidity probe unavailable for %s: %s",
+                                  pair.base_token.address, jupiter_outcome)
+            elif isinstance(jupiter_outcome, BaseException):
+                raise jupiter_outcome
+            else:
+                probe = jupiter_outcome
                 profile = dataclasses.replace(
                     profile,
                     live_buy_route_found=probe.live_buy_route_found,
                     live_sell_route_found=probe.live_sell_route_found,
                     live_round_trip_loss_percent=probe.live_round_trip_loss_percent,
                 )
-            except (CollectorError, ValueError) as exc:
-                self._logger.info("Jupiter liquidity probe unavailable for %s: %s",
-                                  pair.base_token.address, exc)
 
         try:
             security = self._security.assess(profile, pair)
@@ -222,15 +258,17 @@ class ResearchPipeline:
                                   pair.base_token.address, exc)
 
         # Community data (Part 5): free CoinGecko community facts; a token
-        # not listed there is an honest gap, not a failure (Rule 8).
+        # not listed there is an honest gap, not a failure (Rule 8). Already
+        # fetched concurrently with GoPlus/Jupiter above -- just consume it.
         community = community_profile = None
         if self._community_client is not None:
-            try:
-                community_profile = await self._community_client.get_community_profile(
-                    pair.base_token)
-            except CollectorError as exc:
+            if isinstance(community_outcome, CollectorError):
                 self._logger.info("community data unavailable for %s: %s",
-                                  pair.base_token.address, exc)
+                                  pair.base_token.address, community_outcome)
+            elif isinstance(community_outcome, BaseException):
+                raise community_outcome
+            else:
+                community_profile = community_outcome
             if community_profile is not None:
                 try:
                     community = self._community.assess(community_profile)
