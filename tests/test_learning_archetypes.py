@@ -96,3 +96,26 @@ def test_is_novel_at_threshold():
     model.fit(vectors, buckets, min_cluster_size=10)
     far = model.assign(np.full(8, 100.0))
     assert far.is_novel_at(90.0) is True
+
+
+def test_nearest_distances_matches_naive_broadcast_reference():
+    """Bug-hunt regression (2026-07-24): _nearest_distances used to build the
+    full (N, n_clusters, dim) difference tensor via broadcasting before
+    reducing it -- on the live droplet's 39,570-coin training set this hit
+    "Unable to allocate 6.97 GiB for an array with shape (39570, 221, 107)".
+    The per-centroid loop must produce numerically identical distances to
+    that original broadcast-then-reduce formula at a realistic scale."""
+    rng = np.random.default_rng(3)
+    n, k, dim = 3000, 60, 24
+    matrix = rng.normal(size=(n, dim))
+    centroids = rng.normal(size=(k, dim))
+
+    def naive_broadcast_reference(matrix, centroids):
+        diffs = matrix[:, None, :] - centroids[None, :, :]
+        return np.linalg.norm(diffs, axis=2).min(axis=1)
+
+    model = ArchetypeModel()
+    model._centroids = centroids
+    fixed = model._nearest_distances(matrix)
+    expected = naive_broadcast_reference(matrix, centroids)
+    assert np.allclose(fixed, expected)

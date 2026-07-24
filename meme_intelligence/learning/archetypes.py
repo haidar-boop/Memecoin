@@ -181,9 +181,21 @@ class ArchetypeModel:
         )
 
     def _nearest_distances(self, matrix: np.ndarray) -> np.ndarray:
-        # (N, n_clusters) distances -> min over clusters per point.
-        diffs = matrix[:, None, :] - self._centroids[None, :, :]
-        return np.linalg.norm(diffs, axis=2).min(axis=1)
+        """(N,) distance from every point to its nearest centroid.
+
+        Computed one centroid at a time instead of broadcasting the full
+        (N, n_clusters, dim) difference tensor up front -- that intermediate
+        reached 6.97 GiB on a 39,570-coin training set (OOM: "Unable to
+        allocate 6.97 GiB for an array with shape (39570, 221, 107)",
+        bug-hunt finding 2026-07-24) even though the actual output here is
+        just N floats. Mathematically identical result, same Euclidean
+        distances, only the memory footprint changes.
+        """
+        nearest = None
+        for centroid in self._centroids:
+            distance = np.linalg.norm(matrix - centroid, axis=1)
+            nearest = distance if nearest is None else np.minimum(nearest, distance)
+        return nearest
 
     def _novelty_percentile(self, distance: float) -> float:
         assert self._train_novelty is not None
