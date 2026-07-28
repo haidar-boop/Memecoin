@@ -103,6 +103,7 @@ _HELP_TEXT = "\n".join([
     "/boost <address> [chain] - DexScreener paid-boost amount for a coin",
     "/mind - learning-layer report card + feedback tallies",
     "/winners - what the bot's recorded winners had in common (read-only)",
+    "/dev <address> - the deployer's track record across coins the bot watched",
     "/mute <address> - silence ALL alerts for a token",
     "/unmute <address> - restore alerts for a token",
     "/buy <address> <sol> - buy that many SOL of a token (live if enabled)",
@@ -239,6 +240,7 @@ class TelegramCommandListener(BaseCollector):
             "/boost": self._cmd_boost,
             "/mind": self._cmd_mind,
             "/winners": self._cmd_winners,
+            "/dev": self._cmd_dev,
             "/mute": self._cmd_mute,
             "/unmute": self._cmd_unmute,
             "/buy": self._cmd_buy,
@@ -908,6 +910,79 @@ class TelegramCommandListener(BaseCollector):
                 return "Winners report unavailable right now (see logs) — nothing was changed."
         self._winners_cache = (self._time() + _WINNERS_CACHE_TTL_SECONDS, card)
         return card
+
+    async def _cmd_dev(self, args: list[str]):
+        """Deployer rap sheet (operator request, 2026-07-28): who made this
+        coin, and what happened to the other coins the bot watched from the
+        same wallet. Read-only over the learning store — detection already
+        screens every buy-side alert against this same history (the rug
+        engine's deployer signal); this command just lets the operator run
+        the lookup by hand. Accepts either a COIN address (resolved to its
+        recorded deployer) or a deployer WALLET address directly."""
+        address, error = self._validated_address(args, "/dev <address> [chain]")
+        if error:
+            return error
+        chain = "solana"
+        if len(args) > 1:
+            candidate = args[1].strip().lower()
+            if not (candidate.isalnum() and 1 <= len(candidate) <= 20):
+                return "Invalid chain id. Example: /dev <address> solana"
+            chain = candidate
+        service = self._ctx.learning_service
+        if service is None:
+            return ("Mind layer is off (MEMEINTEL_LEARNING_ENABLE_IN_MONITOR) — "
+                    "no deployer history is being recorded.")
+
+        from meme_intelligence.core.models import TokenIdentity as _TI
+        from meme_intelligence.learning.models import OutcomeBucket
+
+        store = service.store
+        creator = store.creator_of(_TI(chain=chain, address=address))
+        via_coin = creator is not None
+        if creator is None:
+            creator = address  # maybe the operator pasted the wallet itself
+        coins = store.coins_by_creator(creator, chain, limit=30)
+        if not coins:
+            return ("No deployer on record for that address. Either the bot "
+                    "never watched this coin (deployers are captured as coins "
+                    "are scanned), or the data providers did not expose its "
+                    "creator. Try /check on the coin first.")
+
+        counts = {b: 0 for b in OutcomeBucket.training_labels()}
+        unresolved = 0
+        for coin in coins:
+            if coin["final_bucket"] is None:
+                unresolved += 1
+            else:
+                counts[coin["final_bucket"]] = counts.get(coin["final_bucket"], 0) + 1
+
+        short = creator if len(creator) <= 12 else f"{creator[:6]}…{creator[-4:]}"
+        header = (f"DEVELOPER — {short}" + (f" (deployer of {_sanitize_identity(args[0])})"
+                                            if via_coin else ""))
+        lines = [
+            header,
+            f"coins the bot watched from this wallet: {len(coins)}"
+            + (f" ({unresolved} still playing out)" if unresolved else ""),
+            f"  outcomes: {counts[OutcomeBucket.RUG]} rug | "
+            f"{counts[OutcomeBucket.DUMP]} dump | {counts[OutcomeBucket.FLAT]} flat | "
+            f"{counts[OutcomeBucket.PUMP]} pump",
+        ]
+        blacklist = store.blacklist_entry(creator, chain)
+        if blacklist is not None:
+            lines.append(f"confirmed-rug blacklist: {blacklist[0]} rug(s) on record "
+                         f"(last {blacklist[1][:16]})")
+            lines.append("Buy-side alerts from this wallet are auto-vetoed already — "
+                         "this lookup changes nothing, it just shows the record.")
+        else:
+            lines.append("confirmed-rug blacklist: not on it (no confirmed rug "
+                         "resolved against this wallet yet)")
+        recent = [f"  {c['symbol'] or c['address'][:8]}: "
+                  f"{c['final_bucket'].value if c['final_bucket'] else 'unresolved'}"
+                  for c in coins[:5]]
+        if recent:
+            lines.append("latest coins:")
+            lines.extend(recent)
+        return "\n".join(lines)
 
     async def _cmd_mute(self, args: list[str]) -> str:
         address, error = self._validated_address(args, "/mute <address>")

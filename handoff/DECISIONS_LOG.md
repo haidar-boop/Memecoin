@@ -1991,3 +1991,21 @@ now sends exactly ONE full-priority post-mortem (the death rule already
 collapses the warning pair into one event and archives); if that proves
 noisy the set can be narrowed to rug-evidence types. Suite: **950
 passing** (948 + 2).
+
+## 2026-07-28 — /dev: deployer rap-sheet lookup (read-only)
+
+Operator: "is there a way to search the developer of a coin and see if
+he's known for rug pulls." Automatic detection already existed at three
+layers (GoPlus same-creator honeypot count in the security score and
+safety checklist; the learning layer's confirmed-rug deployer blacklist;
+the rug engine's deployer signal vetoing buy-side alerts) — what was
+missing was any operator-facing lookup. New `/dev <address> [chain]`
+Telegram command: resolves a coin to its recorded deployer (or accepts a
+wallet address directly), then renders the bot-witnessed rap sheet —
+coins watched from that wallet with outcome counts (rug/dump/flat/pump,
+unresolved reported honestly), the confirmed-rug blacklist entry with
+last-seen date, and the latest coins. Read-only: three new SELECT-only
+LearningStore methods (creator_of, coins_by_creator, blacklist_entry);
+nothing in the scan/alert/learning path changed. A coin the bot never
+watched reports "no deployer on record" rather than guessing (Rule 8).
+Suite: **954 passing** (950 + 4).

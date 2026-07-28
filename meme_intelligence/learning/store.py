@@ -352,6 +352,50 @@ class LearningStore:
         self._conn.commit()
         return cursor.rowcount > 0
 
+    def creator_of(self, token: TokenIdentity) -> str | None:
+        """The recorded deployer wallet of a coin the bot has seen, if any.
+
+        Read-only lookup for the /dev Telegram command (operator request,
+        2026-07-28) — the creator is captured at detection time from the
+        launch stream / security profile; a coin the bot never watched (or
+        whose creator the providers did not expose) honestly returns None.
+        """
+        row = self._conn.execute(
+            "SELECT creator FROM learning_coins WHERE chain = ? AND address = ?",
+            (token.chain, token.address),
+        ).fetchone()
+        return row["creator"] if row is not None and row["creator"] else None
+
+    def coins_by_creator(self, creator: str, chain: str,
+                         *, limit: int = 30) -> list[dict]:
+        """Every coin the bot watched from one deployer wallet, newest first.
+
+        Lightweight rows (no snapshot loading) for the /dev rap-sheet card:
+        symbol/address, resolved outcome bucket (None = still unresolved),
+        and when the bot first saw it. Read-only.
+        """
+        rows = self._conn.execute(
+            """SELECT address, symbol, final_bucket, detected_at
+               FROM learning_coins WHERE creator = ? AND chain = ?
+               ORDER BY detected_at DESC LIMIT ?""",
+            (creator, chain, int(limit)),
+        ).fetchall()
+        return [{"address": r["address"], "symbol": r["symbol"],
+                 "final_bucket": (OutcomeBucket(r["final_bucket"])
+                                  if r["final_bucket"] else None),
+                 "detected_at": r["detected_at"]} for r in rows]
+
+    def blacklist_entry(self, creator: str, chain: str) -> tuple[int, str] | None:
+        """(rug_count, last_seen) from the confirmed-rug blacklist, or None."""
+        row = self._conn.execute(
+            "SELECT rug_count, last_seen FROM deployer_blacklist "
+            "WHERE creator = ? AND chain = ?",
+            (creator, chain),
+        ).fetchone()
+        if row is None:
+            return None
+        return int(row["rug_count"]), str(row["last_seen"])
+
     def deployer_rug_count(self, creator: str | None, chain: str) -> int:
         """How many confirmed rugs this creator wallet is linked to (0 if clean)."""
         if not creator:

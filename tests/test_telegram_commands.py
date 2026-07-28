@@ -759,6 +759,60 @@ async def test_winners_renders_comparison_and_caches():
         assert len(learning.store.calls) == store_walks
 
 
+def _dev_learning():
+    """Learning double exposing the three /dev store primitives."""
+    from meme_intelligence.learning.models import OutcomeBucket
+
+    class FakeStore:
+        def creator_of(self, token):
+            return "devWallet" if token.address == SOL_ADDR else None
+
+        def coins_by_creator(self, creator, chain, *, limit=30):
+            if creator != "devWallet":
+                return []
+            return [
+                {"address": "CoinA", "symbol": "AAA",
+                 "final_bucket": OutcomeBucket.RUG, "detected_at": "2026-07-27"},
+                {"address": "CoinB", "symbol": "BBB",
+                 "final_bucket": OutcomeBucket.RUG, "detected_at": "2026-07-26"},
+                {"address": "CoinC", "symbol": None,
+                 "final_bucket": None, "detected_at": "2026-07-28"},
+            ]
+
+        def blacklist_entry(self, creator, chain):
+            return (2, "2026-07-27T14:02:00") if creator == "devWallet" else None
+
+    return SimpleNamespace(store=FakeStore())
+
+
+async def test_dev_resolves_coin_to_deployer_rap_sheet():
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage, learning=_dev_learning())
+        await listener._handle_update(message_update(f"/dev {SOL_ADDR}"))
+    text = sent_messages(calls)[0]["text"]
+    assert "DEVELOPER" in text and "deployer of" in text
+    assert "coins the bot watched from this wallet: 3" in text
+    assert "2 rug | 0 dump | 0 flat | 0 pump" in text
+    assert "1 still playing out" in text
+    assert "confirmed-rug blacklist: 2 rug(s) on record" in text
+    assert "auto-vetoed already" in text
+
+
+async def test_dev_unknown_address_reports_honestly():
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage, learning=_dev_learning())
+        await listener._handle_update(message_update(f"/dev {EVM_ADDR} ethereum"))
+    text = sent_messages(calls)[0]["text"]
+    assert "No deployer on record" in text
+
+
+async def test_dev_off_when_learning_disabled():
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage, learning=None)
+        await listener._handle_update(message_update(f"/dev {SOL_ADDR}"))
+    assert "Mind layer is off" in sent_messages(calls)[0]["text"]
+
+
 async def test_winners_failure_degrades_without_crashing():
     class BrokenStore:
         def resolved_records(self, *, limit=None, bucket=None):

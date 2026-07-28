@@ -137,6 +137,29 @@ def test_resolved_records_bucket_filter(store):
     assert len(store.resolved_records()) == 2
 
 
+def test_deployer_rap_sheet_lookups(store):
+    """/dev command primitives (2026-07-28): creator resolution, per-creator
+    coin history with outcomes, and the blacklist entry — all read-only."""
+    cid1 = store.record_detection(TOKEN, detection_price_usd=0.01, creator="devWallet")
+    store.record_label(cid1, OutcomeLabel(horizon_hours=6.0, bucket=OutcomeBucket.RUG,
+                                          forward_return_percent=-95.0))
+    store.record_detection(TOKEN2, detection_price_usd=0.02, creator="devWallet")
+    store.blacklist_deployer("devWallet", "solana")
+
+    assert store.creator_of(TOKEN) == "devWallet"
+    assert store.creator_of(TokenIdentity(chain="solana", address="Unseen")) is None
+
+    coins = store.coins_by_creator("devWallet", "solana")
+    assert len(coins) == 2
+    buckets = {c["address"]: c["final_bucket"] for c in coins}
+    assert buckets[TOKEN.address] is OutcomeBucket.RUG
+    assert buckets[TOKEN2.address] is None  # unresolved, reported honestly
+
+    entry = store.blacklist_entry("devWallet", "solana")
+    assert entry is not None and entry[0] == 1
+    assert store.blacklist_entry("cleanDev", "solana") is None
+
+
 def test_store_is_usable_from_a_different_thread(store):
     """Bug-hunt regression (2026-07-21): retrain_if_due runs on a worker
     thread via asyncio.to_thread (Rule 10 -- the CPU-bound retrain must not
