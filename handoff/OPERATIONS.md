@@ -15,7 +15,7 @@
 | Repo path | `~/meme-intelligence` |
 | Virtualenv | `~/meme-intelligence/.venv` |
 | Service | systemd unit `meme-intelligence` (from `deploy/meme-intelligence.service`, `Restart=always`) |
-| Cron | daily routine + 6-hourly `backtest --refresh` + DB backup (`deploy/install-cron.sh`) |
+| Cron | daily routine 05:05 UTC + `backtest --refresh` 6-hourly at 04:15/10:15/16:15/22:15 UTC + DB backup 05:45 UTC (`deploy/install-cron.sh` — Beirut-morning anchored since 2026-07-24) |
 | Main DB | `data/meme_intelligence.sqlite3` (WAL mode — shared by daemon + cron) |
 | Learning state | `learning_state/` (`learning.db` + model artifacts; gitignored) |
 | Logs | `journalctl -u meme-intelligence` and `logs/meme_intelligence.log` (rotating) |

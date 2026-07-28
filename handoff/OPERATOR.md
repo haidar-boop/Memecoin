@@ -13,6 +13,11 @@
 - **Non-technical.** He does not read code. Explain everything in plain
   language — what it does and why it matters, never how it's implemented,
   unless he asks. No jargon without a one-line translation.
+- **Lives in Lebanon (Asia/Beirut, UTC+3 in summer / UTC+2 in winter)**
+  as of 2026-07-24 — previously North America. The cron schedule in
+  `deploy/install-cron.sh` is anchored to his Beirut mornings; anything
+  time-of-day related (quiet windows, report arrival, "when did X
+  happen") should be reasoned in Beirut time, not the droplet's UTC.
 - **Operates entirely from a phone.** He uses a phone SSH app to reach the
   droplet and Telegram to receive alerts. Consequences:
   - Give commands as small copy-paste blocks, never long one-liners that

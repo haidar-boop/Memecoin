@@ -71,13 +71,20 @@ bash deploy/install-cron.sh
 ```
 
 This installs three cron jobs (idempotent — safe to re-run):
-- **13:05 UTC daily** — `daily` routine: market regime check, watchlist
-  deep review, daily report (alerts go to your Telegram like the monitor's)
-- **every 6 hours** — `backtest --refresh`: measures prediction outcomes
-  so the Part 24 self-improvement metrics accumulate; without this the
-  system never learns
-- **13:45 UTC daily** — consistent online backup of the SQLite database
-  to `data/backups/` (keeps the last 7 days; safe against the live writer)
+- **05:05 UTC daily** (08:05 Beirut) — `daily` routine: market regime
+  check, watchlist deep review, daily report (alerts go to your Telegram
+  like the monitor's)
+- **every 6 hours at 04:15/10:15/16:15/22:15 UTC** — `backtest --refresh`:
+  measures prediction outcomes so the Part 24 self-improvement metrics
+  accumulate; without this the system never learns (the 04:15 run feeds
+  the daily report 50 minutes later)
+- **05:45 UTC daily** (08:45 Beirut) — consistent online backup of the
+  SQLite database to `data/backups/` (keeps the last 7 days; safe against
+  the live writer)
+
+Times are Beirut-morning anchored (operator moved to Lebanon 2026-07-24)
+so the heavy cluster never squeezes the live monitor during his afternoon
+— see the note in `install-cron.sh`.
 
 Job output lands in `logs/cron-*.log`. The database runs in WAL mode
 with a busy timeout, so the monitor and these jobs share it safely.

@@ -1918,3 +1918,24 @@ price -86% in 24h (pool still holds $4.9K)". Display-only by contract
 with coin sending). DEAD/RUGGED take precedence on a drained pool;
 unknown change/liquidity trigger nothing (Rule 8). Momentum zone note:
 "(stale — coin already dumped)". Suite: **938 passing** (934 + 4).
+
+## 2026-07-24 — Cron re-anchored to Beirut mornings (operator moved to Lebanon)
+
+The operator noticed alerts thinning at the same time every day. Traced:
+the three cron jobs clustered 12:15–13:45 UTC (backtest 12:15, daily
+13:05, backup 13:45) — on the 1 GB droplet that cluster briefly starves
+the live monitor, and after his move to Lebanon it landed 15:15–16:45
+Beirut, mid-afternoon. A repo-wide sweep confirmed the ONLY clock anchors
+are the three lines in `deploy/install-cron.sh` (no Python code has any
+hour-of-day behavior; the credit-gate budgets deliberately roll on UTC
+days and are untouched).
+
+New schedule, same cadences, zero behavior change: backtest
+`15 4,10,16,22` (04:15 UTC run feeds the daily report 50 min later,
+preserving the old 12:15→13:05 pairing), daily `5 5` (08:05 Beirut),
+backup `45 5` (08:45 Beirut). The whole cluster now sits 07:15–08:45
+Beirut = midnight–2 AM US Eastern, the deadest meme-market window. Cron
+stays in UTC (Rule 21 — no CRON_TZ); winter DST means everything arrives
+an hour earlier locally, accepted. OPERATOR.md now records the timezone
+so future sessions reason in Beirut time. Applied on the droplet by
+re-running `bash deploy/install-cron.sh` (idempotent). Suite unchanged.
