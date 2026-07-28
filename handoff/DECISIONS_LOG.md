@@ -1962,3 +1962,32 @@ learning path imports the new module; the only store change is a SQL-side
 asyncio.to_thread (safe since the 2026-07-21 cross-thread store fix) with
 a 15-min card cache + in-flight lock so repeated taps never stall the
 event loop or re-walk the table. Suite: **948 passing** (941 + 7).
+
+## 2026-07-28 — Pitched coins now report their outcome (interest widened + ack line)
+
+Operator rule: "When it sends me a coin and it gets rugged I want it to
+acknowledge that it was rugged. I want it to send me an alert and also
+learn from it." The LEARNING half was already automatic (backtest cron ->
+resolve_outcome(is_rug=True) -> RUG label, deployer blacklist, analog
+memory — the 0.96 rug precision is this) — nothing changed there. The
+ALERT half had a real gap: INTEREST_ALERT_TYPES contained only the two
+HIGH tiers, so a coin that reached his phone as a MEDIUM pitch
+(early_opportunity / momentum / smart_money_accumulation — all above his
+medium delivery floor) never counted as "pitched", and its death/rug
+post-mortem was demoted to LOW and filtered off the phone.
+
+Changes (alert routing/rendering only — zero scoring/veto/learning
+changes): (1) INTEREST_ALERT_TYPES widened to every buy-side type — only
+DELIVERED alerts are recorded, so history membership means the pitch
+actually reached him; the old "MEDIUM tiers are provisional research
+notes" exclusion predates his medium delivery floor and is explicitly
+overridden by this operator rule. Same-batch interest likewise now
+accepts any tier. (2) New controller._acknowledge_prior_pitch: a
+full-priority protective alert on a coin with a delivered buy-side alert
+on record gains one reason line — "outcome of the bot's own call: this
+coin reached you as <type> on <time>" — display-only, fails open.
+Accepted tradeoff, stated to the operator: every pitched coin that dies
+now sends exactly ONE full-priority post-mortem (the death rule already
+collapses the warning pair into one event and archives); if that proves
+noisy the set can be narrowed to rug-evidence types. Suite: **950
+passing** (948 + 2).

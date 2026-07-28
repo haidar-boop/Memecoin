@@ -831,6 +831,54 @@ async def test_recommended_token_keeps_full_priority_postmortem():
         assert death.priority is AlertPriority.MEDIUM
 
 
+async def test_medium_pitched_token_gets_full_priority_postmortem_with_ack():
+    """Operator rule (2026-07-28): ANY delivered buy-side alert — including
+    the MEDIUM tiers that reach his medium delivery floor — counts as a
+    pitch. When that coin later dies, the post-mortem must arrive at full
+    priority AND explicitly acknowledge the earlier call."""
+    from meme_intelligence.alerts.notification_engine import AlertEvent
+    from meme_intelligence.core.enums import AlertPriority as _AP
+
+    dying = TokenIdentity(chain="solana", address="TokenDying", symbol="DIE")
+    dead_pair = _dc.replace(make_pair(address="TokenDying", symbol="DIE"),
+                            liquidity_usd=25.0)
+    sink = RecordingSink()
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        storage.update_watchlist(dying, WatchlistTier.TIER_1_HIGH_PRIORITY, score=85.0)
+        storage.record_alert(  # a MEDIUM pitch that reached the phone
+            AlertEvent(_AP.MEDIUM, "momentum", dying, "was moving", ()),
+            source="test")
+        market = FakeMarketService({"TokenDying": dead_pair})
+        scanner = make_scanner_with_market(
+            storage, [], {"TokenDying": clean_profile(dying)},
+            market, settings=fast_recheck_settings(), sink=sink,
+        )
+        await scanner.run(max_cycles=1)
+
+        death = next(e for e in sink.sent if e.alert_type == "token_death")
+        assert death.priority is AlertPriority.MEDIUM  # not demoted to LOW
+        assert any("reached you as momentum" in r for r in death.reasons)
+
+
+def test_same_batch_medium_buy_side_grants_interest():
+    """A surviving buy-side event in the batch is about to be delivered, so
+    protective events in the SAME batch must keep full priority — any tier,
+    not just HIGH (2026-07-28 widening)."""
+    from meme_intelligence.alerts.notification_engine import (
+        AlertEvent,
+        gate_events_by_interest,
+    )
+    from meme_intelligence.core.enums import AlertPriority as _AP
+
+    token = TokenIdentity(chain="solana", address="TokenX", symbol="X")
+    events = [
+        AlertEvent(_AP.MEDIUM, "early_opportunity", token, "pitch", ()),
+        AlertEvent(_AP.HIGH, "security_change", token, "mint flipped", ()),
+    ]
+    gated = gate_events_by_interest(events, operator_interest=False, enabled=True)
+    assert gated[1].priority is _AP.HIGH  # not demoted alongside its own pitch
+
+
 # ---- Parts 17/23 in the monitor: metered layers behind enable_in_monitor ----
 
 

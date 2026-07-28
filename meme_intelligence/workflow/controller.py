@@ -34,6 +34,7 @@ from meme_intelligence.alerts.notification_engine import (
     AutomationRules,
     NotificationEngine,
     _BUY_SIDE_ALERT_TYPES,
+    _PROTECTIVE_ALERT_TYPES,
     events_from_security_changes,
     gate_events_by_interest,
 )
@@ -760,16 +761,19 @@ class ContinuousScanner:
         # Security-change events rest on contract facts, not market data, so
         # they bypass market cross-verification and are appended directly.
         # They pass the same interest gate as the rule-generated events —
-        # a HIGH opportunity firing in THIS batch counts as interest, so
+        # any buy-side alert firing in THIS batch counts as interest (it is
+        # about to be delivered, so the operator IS being pitched), and
         # contradictory signals on a just-recommended token both arrive.
         batch_interest = interest or any(
-            e.alert_type in INTEREST_ALERT_TYPES
-            and e.priority is AlertPriority.HIGH for e in events)
+            e.alert_type in INTEREST_ALERT_TYPES for e in events)
         events.extend(gate_events_by_interest(
             events_from_security_changes(
                 token, changes, master_score=result.master.final_score),
             operator_interest=batch_interest,
             enabled=self._settings.alert_engine.risk_alerts_require_interest))
+        # Operator rule (2026-07-28): a protective alert on a coin the bot
+        # previously SENT HIM must say so — it is the outcome of that call.
+        events = self._acknowledge_prior_pitch(token, events)
         # Operator mute (Project 2, /mute): delivery is suppressed, analysis
         # is not — facts, snapshots, and learning above all still ran. Fails
         # OPEN (an is_muted error must never silently drop alerts — Rule 6).
@@ -799,12 +803,13 @@ class ContinuousScanner:
     def _operator_interest(self, token) -> bool:
         """Was the operator ever POINTED at this token? (interest gate)
 
-        True when a HIGH opportunity alert (high_priority_opportunity /
-        strong_candidate) was previously delivered for it — the only way the
-        operator learns about a token, hence the only way a protective alert
-        can be guarding a real decision. Fails OPEN: if history cannot be
-        read, alerts keep their full priority rather than being silently
-        demoted (Rule 6 — an error must not suppress a warning).
+        True when ANY buy-side alert was previously delivered for it (only
+        delivered alerts are recorded, so a history row means the pitch
+        actually reached his phone) — the only way the operator learns
+        about a token, hence the only way a protective alert can be
+        guarding a real decision. Fails OPEN: if history cannot be read,
+        alerts keep their full priority rather than being silently demoted
+        (Rule 6 — an error must not suppress a warning).
         """
         try:
             # A coin the operator MARKED AS BOUGHT (/holding, Project 2) is
@@ -819,6 +824,38 @@ class ContinuousScanner:
                                  "full priority): %s", token.address, exc)
             return True
         return any(row["alert_type"] in INTEREST_ALERT_TYPES for row in history)
+
+    def _acknowledge_prior_pitch(self, token, events: list[AlertEvent]) -> list[AlertEvent]:
+        """Operator rule (2026-07-28): "when it sends me a coin and it gets
+        rugged I want it to acknowledge that it was rugged." When a
+        full-priority protective alert (death, security change, risk
+        warning...) fires on a coin with a DELIVERED buy-side alert on
+        record, prepend one reason line naming that earlier pitch — the
+        operator reads the warning as the outcome of the bot's own call,
+        not anonymous telemetry. Display-only: no priority, gating, or
+        learning behavior changes here, and it fails open (no line) if
+        history cannot be read (Rule 6 — an error must never touch the
+        warning itself)."""
+        needs_ack = [e for e in events
+                     if e.alert_type in _PROTECTIVE_ALERT_TYPES
+                     and e.priority is not AlertPriority.LOW]
+        if not needs_ack:
+            return events
+        try:
+            history = self._storage.alert_history(token, limit=100)
+        except Exception as exc:  # noqa: BLE001 — advisory lookup, fail open
+            self._logger.warning("pitch lookup failed for %s (no acknowledgment "
+                                 "line): %s", token.address, exc)
+            return events
+        pitch = next((row for row in history
+                      if row["alert_type"] in _BUY_SIDE_ALERT_TYPES), None)
+        if pitch is None:
+            return events
+        ack = (f"outcome of the bot's own call: this coin reached you as "
+               f"{pitch['alert_type']} on {str(pitch.get('created_at', ''))[:16]}")
+        return [dataclasses.replace(e, reasons=(ack,) + tuple(e.reasons))
+                if e in needs_ack else e
+                for e in events]
 
     # Alert types that mean "this token is already flagged risky" — a paid AI
     # opinion on it is wasted money, not information.

@@ -52,10 +52,18 @@ _STRONG_CANDIDATE_ALLOWED_UNVERIFIED = frozenset({"community"})
 #
 # Alert types that RECOMMEND a token to the operator — receiving one means
 # the operator may have acted, so protective alerts stay at full priority
-# afterwards. MEDIUM early_opportunity is deliberately excluded: it is a
-# provisional research note, not a recommendation, and most dying garbage
-# passed through it on the way down.
-INTEREST_ALERT_TYPES = frozenset({"high_priority_opportunity", "strong_candidate"})
+# afterwards. Since 2026-07-28 this is EVERY buy-side type, not just the two
+# HIGH tiers: only DELIVERED alerts are recorded to history, so membership
+# here means the pitch actually reached the operator's phone — and his
+# standing rule is that any coin he was sent must report its outcome
+# ("when it sends me a coin and it gets rugged I want it to acknowledge
+# that it was rugged"). The old exclusion of the MEDIUM tiers as
+# "provisional research notes" predates his medium delivery floor, under
+# which those tiers are real pitches he sees and can act on.
+INTEREST_ALERT_TYPES = frozenset({
+    "high_priority_opportunity", "strong_candidate",
+    "early_opportunity", "momentum", "smart_money_accumulation",
+})
 
 # Alert types that exist to PROTECT a holder/decision rather than surface a
 # new opportunity. On a token with no operator interest they demote to LOW:
@@ -89,9 +97,9 @@ _DECLINE_SUPPRESSED_TYPES = frozenset({
     "early_opportunity", "momentum", "smart_money_accumulation",
 })
 
-_NO_INTEREST_NOTE = ("informational only: this token never earned an "
-                     "opportunity alert, so no operator decision is exposed "
-                     "to it (interest gate)")
+_NO_INTEREST_NOTE = ("informational only: this token never reached the "
+                     "operator as a buy signal, so no operator decision is "
+                     "exposed to it (interest gate)")
 
 # ---- Safety checklist (operator rule 2026-07-12) ---------------------------
 # Each buy-side alert that SURVIVES the rug veto carries a small checklist so
@@ -137,14 +145,15 @@ def gate_events_by_interest(
     """Demote protective alerts to LOW when the operator was never pointed
     at this token (see the interest-gate rationale above).
 
-    A HIGH opportunity alert in the SAME batch grants interest immediately —
+    A buy-side alert in the SAME batch grants interest immediately —
     contradictory signals on a token being recommended right now must both
-    arrive at full priority. Idempotent: already-LOW events pass untouched.
+    arrive at full priority. (Any tier: a surviving buy-side event in this
+    batch is about to be delivered, so the operator IS being pitched.)
+    Idempotent: already-LOW events pass untouched.
     """
     if not enabled or operator_interest:
         return events
-    if any(e.alert_type in INTEREST_ALERT_TYPES
-           and e.priority is AlertPriority.HIGH for e in events):
+    if any(e.alert_type in INTEREST_ALERT_TYPES for e in events):
         return events
     gated: list[AlertEvent] = []
     for event in events:
