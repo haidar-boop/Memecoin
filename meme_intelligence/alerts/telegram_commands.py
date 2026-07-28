@@ -61,6 +61,12 @@ _ACTIONED_BUTTONS_CAP = 500
 _CHECK_CACHE_TTL_SECONDS = 60.0
 _CHECK_CACHE_MAX_ENTRIES = 64
 
+# /winners: how many recent coins per outcome group feed the comparison, and
+# how long the rendered card stays cached (the underlying data only changes
+# as coins resolve, so re-walking the store per tap would be pure waste).
+_WINNERS_SAMPLE_PER_GROUP = 50
+_WINNERS_CACHE_TTL_SECONDS = 900.0
+
 # Strict address charsets (D3): anything else is rejected before ANY use.
 _BASE58_ALPHABET = frozenset("123456789ABCDEFGHJKLMNPQRSTUVWXYZ"
                              "abcdefghijkmnopqrstuvwxyz")
@@ -96,6 +102,7 @@ _HELP_TEXT = "\n".join([
     "/watchlist - top tracked coins by tier",
     "/boost <address> [chain] - DexScreener paid-boost amount for a coin",
     "/mind - learning-layer report card + feedback tallies",
+    "/winners - what the bot's recorded winners had in common (read-only)",
     "/mute <address> - silence ALL alerts for a token",
     "/unmute <address> - restore alerts for a token",
     "/buy <address> <sol> - buy that many SOL of a token (live if enabled)",
@@ -214,6 +221,10 @@ class TelegramCommandListener(BaseCollector):
         self._actioned_buttons: "OrderedDict[tuple[int, str], bool]" = OrderedDict()
         self._check_lock = asyncio.Lock()
         self._check_cache: "OrderedDict[tuple[str, str], tuple[float, str]]" = OrderedDict()
+        # /winners walks recent resolved records off the event loop; cache the
+        # rendered card so repeated taps don't re-walk the store (Rule 11).
+        self._winners_lock = asyncio.Lock()
+        self._winners_cache: tuple[float, str] | None = None
         self._handlers: dict[str, Callable[[list[str]], Awaitable[str | None]]] = {
             "/help": self._cmd_help,
             "/start": self._cmd_help,
@@ -227,6 +238,7 @@ class TelegramCommandListener(BaseCollector):
             "/watchlist": self._cmd_watchlist,
             "/boost": self._cmd_boost,
             "/mind": self._cmd_mind,
+            "/winners": self._cmd_winners,
             "/mute": self._cmd_mute,
             "/unmute": self._cmd_unmute,
             "/buy": self._cmd_buy,
@@ -855,6 +867,47 @@ class TelegramCommandListener(BaseCollector):
             earned = f"EARNED — rug precision {gate[0]:.2f} over {gate[1]} graded rug calls"
         state = "ON" if ls.veto_enabled else "off (MEMEINTEL_LEARNING_VETO_ENABLED)"
         return f"p(rug) veto: {state} | authority: {earned}"
+
+    async def _cmd_winners(self, args: list[str]) -> str:
+        """Read-only 'what did my winners look like' card (operator request,
+        2026-07-28). Renders what the learning store already recorded about
+        resolved PUMP coins vs coins that died — it feeds NOTHING back into
+        scoring, alerting, training, or vetoes (the operator's standing
+        constraint: never touch how the bot thinks). The store walk runs on
+        a worker thread (the connection allows cross-thread use since the
+        2026-07-21 fix) so a large history cannot stall the event loop the
+        way the early /mind implementation once did."""
+        service = self._ctx.learning_service
+        if service is None:
+            return ("Mind layer is off (MEMEINTEL_LEARNING_ENABLE_IN_MONITOR) — "
+                    "no recorded winners to report.")
+        now = self._time()
+        if self._winners_cache is not None and self._winners_cache[0] > now:
+            return self._winners_cache[1] + "\n(cached result, <15 min old)"
+        if self._winners_lock.locked():
+            return "A /winners report is already being built — try again in a few seconds."
+
+        from meme_intelligence.learning.models import OutcomeBucket
+        from meme_intelligence.learning.winners_report import build_winners_report
+
+        def _build() -> str:
+            store = service.store
+            winners = store.resolved_records(limit=_WINNERS_SAMPLE_PER_GROUP,
+                                             bucket=OutcomeBucket.PUMP)
+            losers = (store.resolved_records(limit=_WINNERS_SAMPLE_PER_GROUP,
+                                             bucket=OutcomeBucket.RUG)
+                      + store.resolved_records(limit=_WINNERS_SAMPLE_PER_GROUP,
+                                               bucket=OutcomeBucket.DUMP))
+            return build_winners_report(winners, losers)
+
+        async with self._winners_lock:
+            try:
+                card = await asyncio.to_thread(_build)
+            except Exception as exc:  # noqa: BLE001 — a report must degrade, not crash
+                self._logger.warning("winners report failed: %s", exc)
+                return "Winners report unavailable right now (see logs) — nothing was changed."
+        self._winners_cache = (self._time() + _WINNERS_CACHE_TTL_SECONDS, card)
+        return card
 
     async def _cmd_mute(self, args: list[str]) -> str:
         address, error = self._validated_address(args, "/mute <address>")

@@ -697,6 +697,81 @@ async def test_mind_shows_veto_authority_earned_and_flag_state():
     assert "EARNED — rug precision 0.82 over 17 graded rug calls" in text
 
 
+# ---- /winners: read-only winners-vs-died comparison (2026-07-28) ----
+
+
+def _winners_learning():
+    """Learning-service double exposing only what /winners touches: .store."""
+    from meme_intelligence.learning.models import (
+        CoinRecord,
+        CoinSnapshot,
+        OutcomeBucket,
+        OutcomeLabel,
+    )
+
+    def record(address, bucket, holders):
+        return CoinRecord(
+            token=TokenIdentity(chain="solana", address=address, symbol=address[:4]),
+            detected_at=NOW, detection_price_usd=0.001,
+            snapshots=(CoinSnapshot(age_seconds=30, holder_count=holders,
+                                    liquidity_usd=10_000.0),),
+            labels=(OutcomeLabel(horizon_hours=6.0, bucket=bucket,
+                                 forward_return_percent=200.0),),
+        )
+
+    class FakeStore:
+        def __init__(self):
+            self.calls: list = []
+
+        def resolved_records(self, *, limit=None, bucket=None):
+            self.calls.append((limit, bucket))
+            if bucket is OutcomeBucket.PUMP:
+                return [record(f"W{i}", bucket, 100) for i in range(6)]
+            if bucket is OutcomeBucket.RUG:
+                return [record(f"L{i}", bucket, 10) for i in range(6)]
+            return []
+
+    return SimpleNamespace(store=FakeStore())
+
+
+async def test_winners_off_when_learning_disabled():
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage, learning=None)
+        await listener._handle_update(message_update("/winners"))
+    assert "Mind layer is off" in sent_messages(calls)[0]["text"]
+
+
+async def test_winners_renders_comparison_and_caches():
+    learning = _winners_learning()
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage, learning=learning)
+        await listener._handle_update(message_update("/winners"))
+        first = sent_messages(calls)[0]["text"]
+        assert "WINNERS REPORT" in first
+        assert "Holders: 100 vs 10" in first
+        assert "changes nothing about scanning or alerts" in first
+        store_walks = len(learning.store.calls)
+
+        await listener._handle_update(message_update("/winners", update_id=2))
+        second = sent_messages(calls)[1]["text"]
+        assert "cached result" in second
+        # The cached tap must not re-walk the store (Rule 11).
+        assert len(learning.store.calls) == store_walks
+
+
+async def test_winners_failure_degrades_without_crashing():
+    class BrokenStore:
+        def resolved_records(self, *, limit=None, bucket=None):
+            raise RuntimeError("db exploded")
+
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(
+            storage, learning=SimpleNamespace(store=BrokenStore()))
+        await listener._handle_update(message_update("/winners"))
+    text = sent_messages(calls)[0]["text"]
+    assert "unavailable" in text and "nothing was changed" in text
+
+
 # ---- Project 2 fix: startup backlog is discarded, not replayed ----
 
 async def test_startup_discards_pending_backlog_without_handling():

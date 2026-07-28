@@ -119,6 +119,24 @@ def test_resolved_records_carry_full_lifecycle(store):
     assert len(record.rug_signals) == 1
 
 
+def test_resolved_records_bucket_filter(store):
+    """The /winners report pulls 'last N pumps' via a SQL-side bucket filter
+    (2026-07-28) — a rare bucket must not require walking the whole table."""
+    pump_id = store.record_detection(TOKEN, detection_price_usd=0.01)
+    store.record_label(pump_id, OutcomeLabel(horizon_hours=6.0, bucket=OutcomeBucket.PUMP,
+                                             forward_return_percent=300.0))
+    rug_id = store.record_detection(TOKEN2, detection_price_usd=0.02)
+    store.record_label(rug_id, OutcomeLabel(horizon_hours=6.0, bucket=OutcomeBucket.RUG,
+                                            forward_return_percent=-90.0))
+
+    pumps = store.resolved_records(bucket=OutcomeBucket.PUMP)
+    assert [r.token.address for r in pumps] == [TOKEN.address]
+    rugs = store.resolved_records(bucket=OutcomeBucket.RUG, limit=10)
+    assert [r.token.address for r in rugs] == [TOKEN2.address]
+    # Unfiltered call unchanged: both resolved coins.
+    assert len(store.resolved_records()) == 2
+
+
 def test_store_is_usable_from_a_different_thread(store):
     """Bug-hunt regression (2026-07-21): retrain_if_due runs on a worker
     thread via asyncio.to_thread (Rule 10 -- the CPU-bound retrain must not

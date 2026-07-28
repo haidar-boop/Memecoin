@@ -1939,3 +1939,26 @@ stays in UTC (Rule 21 — no CRON_TZ); winter DST means everything arrives
 an hour earlier locally, accepted. OPERATOR.md now records the timezone
 so future sessions reason in Beirut time. Applied on the droplet by
 re-running `bash deploy/install-cron.sh` (idempotent). Suite unchanged.
+
+## 2026-07-28 — /winners: read-only "what did my winners look like" card
+
+Operator asked to "feed it recent successful coins and see why they
+succeeded beginning to end." For coins the bot watched, that study already
+happens automatically (every resolved coin's trajectory is graded and
+folded into the analog index/archetypes); what was missing was any way for
+the OPERATOR to see it. For coins the bot never watched it stays
+impossible — no historical-trajectory data source exists, and feeding a
+winner's end-state would only teach "successful coins look successful."
+
+Built under his standing constraint ("don't mess with how the bot
+thinks") as a strictly read-only surface: new `/winners` Telegram command
+compares the last 50 PUMP-bucket coins against the last 50+50 RUG/DUMP
+coins at their EARLIEST stored snapshot (holders, liquidity, 1h volume,
+buy share, top-10 concentration, dev outflow, rug-signal rate, median
+peak return), medians only, "not enough data" over fabricated numbers
+(Rule 8), and an explicit survivorship caveat. Nothing in the scan/alert/
+learning path imports the new module; the only store change is a SQL-side
+`bucket=` filter on `resolved_records` (read-only). The walk runs via
+asyncio.to_thread (safe since the 2026-07-21 cross-thread store fix) with
+a 15-min card cache + in-flight lock so repeated taps never stall the
+event loop or re-walk the table. Suite: **948 passing** (941 + 7).

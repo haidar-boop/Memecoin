@@ -370,19 +370,30 @@ class LearningStore:
         ).fetchone()
         return int(row["n"])
 
-    def resolved_records(self, *, limit: int | None = None) -> list[CoinRecord]:
+    def resolved_records(self, *, limit: int | None = None,
+                         bucket: OutcomeBucket | None = None) -> list[CoinRecord]:
         """Every resolved coin as a full :class:`CoinRecord` (newest first).
 
         This is the labeled training set the analog index and the classifier
         are (re)built from. Snapshots, labels, and rug signals are loaded per
         coin so the caller gets complete records without extra queries.
+
+        ``bucket`` optionally narrows to coins whose stored final outcome is
+        that bucket (e.g. the last N PUMPs for the operator's /winners
+        report) — a read-only filter, SQL-side so a rare bucket does not
+        require walking the whole table.
         """
         query = ("SELECT id, chain, address, symbol, name, detected_at, "
                  "detection_price_usd, creator FROM learning_coins "
-                 "WHERE final_bucket IS NOT NULL ORDER BY updated_at DESC")
+                 "WHERE final_bucket IS NOT NULL")
+        params: tuple = ()
+        if bucket is not None:
+            query += " AND final_bucket = ?"
+            params = (bucket.value,)
+        query += " ORDER BY updated_at DESC"
         if limit is not None:
             query += f" LIMIT {int(limit)}"
-        rows = self._conn.execute(query).fetchall()
+        rows = self._conn.execute(query, params).fetchall()
         records: list[CoinRecord] = []
         for row in rows:
             coin_id = int(row["id"])
