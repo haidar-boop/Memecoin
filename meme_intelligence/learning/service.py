@@ -442,7 +442,27 @@ class LearningService:
             self._logger.warning("stored-history merge unavailable for %s/%s: %s",
                                  chain, token_address, exc)
             return snaps
-        if not stored:
+        if not stored or not snaps:
+            return snaps
+        # The caller's observation MUST end up newest: the fingerprint's
+        # last/delta/slope stats (features._summarize) and the rug engine's
+        # _latest() both read the TAIL after sorting by age_seconds. But
+        # age_seconds is NOT reliably monotonic per coin — it collapses to
+        # 0.0 whenever a provider omits pair_created_at (controller.py,
+        # telegram_commands.py, __main__.py all default it), and a token
+        # re-surfaced on a newer pool restarts it. A bogus-young reading
+        # would sort the LIVE point to the front, so "last liquidity" would
+        # be a stale healthy value and the rug engine would miss a collapse
+        # in progress — feeding the ARMED veto worse data than before this
+        # merge existed. When age goes backwards, fail open to the caller's
+        # snapshots alone (the pre-2026-07-28 behavior, which is safe).
+        stored_max = max(s.age_seconds for s in stored)
+        fresh_min = min(s.age_seconds for s in snaps)
+        if fresh_min < stored_max:
+            self._logger.info(
+                "age went backwards for %s/%s (fresh %.0fs < stored %.0fs); "
+                "evaluating on the live snapshot only",
+                chain, token_address, fresh_min, stored_max)
             return snaps
         by_age: dict[float, CoinSnapshot] = {s.age_seconds: s for s in stored}
         by_age.update({s.age_seconds: s for s in snaps})

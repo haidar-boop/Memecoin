@@ -790,3 +790,47 @@ def test_unknown_coin_and_store_failure_fall_back_to_caller_snapshots():
 
     service._store = BoomStore()
     assert service._merge_stored_history("Any", "solana", fresh) == fresh
+
+
+def test_age_regression_falls_back_to_the_live_snapshot_only():
+    """Review finding (2026-07-28, critical): age_seconds is not monotonic —
+    it collapses to 0.0 when a provider omits pair_created_at, and a token
+    re-surfaced on a NEWER pool restarts it. Sorting a bogus-young live
+    reading into the middle would make the fingerprint's `last` (and the rug
+    engine's _latest) return a STALE healthy value for a coin collapsing
+    right now, feeding the ARMED veto worse data than no merge at all."""
+    from meme_intelligence.learning.models import CoinSnapshot
+
+    service = _service()
+    for snap in _rug_series():                     # ages 0..300, liquidity falling
+        service.capture_snapshot("Regress1", "solana", snap)
+
+    # Provider dropped pair_created_at this cycle -> age 0.0, live collapse.
+    live = [CoinSnapshot.from_dict({"age_seconds": 0.0, "liquidity_usd": 12.0,
+                                    "price_usd": 0.01})]
+    merged = service._merge_stored_history("Regress1", "solana", live)
+    assert merged == live, "must fail open, not bury the live reading mid-series"
+
+    # The live collapse therefore survives as the trajectory's last word.
+    vector = service._extractor.extract(merged).vector
+    names = service._extractor.feature_names
+    liq_last = vector[names.index("liquidity_last")]
+    assert liq_last < 100.0, "last liquidity must be the live collapse, not stale"
+    service.store.close()
+
+
+def test_equal_age_still_merges_the_stored_trajectory():
+    """The scanner captures the snapshot and THEN evaluates, so the fresh
+    age EQUALS the stored max — that is the normal path and must still get
+    the full trajectory (the guard is for age going BACKWARDS, not equal)."""
+    from meme_intelligence.learning.models import CoinSnapshot
+
+    service = _service()
+    series = _rug_series()
+    for snap in series:
+        service.capture_snapshot("Equal1", "solana", snap)
+
+    live = [CoinSnapshot.from_dict(series[-1])]    # same age as stored max
+    merged = service._merge_stored_history("Equal1", "solana", live)
+    assert len(merged) == len(series)
+    service.store.close()
