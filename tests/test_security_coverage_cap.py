@@ -32,7 +32,11 @@ from meme_intelligence.config.settings import Settings
 
 _FIXTURE = pathlib.Path(__file__).with_name("fixtures_goplus_thin_mint.json")
 MINT = "GQwocy6HF47EUtPJzXbkQxwWZbwKdarReuJoTPHKpump"
-SETTINGS = Settings.from_env(env={})
+# The cap ships OFF (measured: it would have blocked 99% of the operator's real
+# alerts — see deploy/security_cap_impact.py). These tests opt in explicitly so
+# they still pin the mechanism for when the missing holder/LP data is collected.
+SETTINGS = Settings.from_env(env={"MEMEINTEL_SECURITY_MIN_COVERAGE_FOR_FULL_SCORE": "0.5"})
+DEFAULTS = Settings.from_env(env={})
 
 
 def thin_profile():
@@ -113,6 +117,17 @@ def test_a_destructive_coin_still_scores_zero_not_the_cap():
 def test_the_cap_is_configurable_and_can_be_disabled():
     off = Settings.from_env(env={"MEMEINTEL_SECURITY_MIN_COVERAGE_FOR_FULL_SCORE": "0"})
     assert assess(thin_profile(), off).overall_score == pytest.approx(100.0)
+
+
+def test_the_cap_is_OFF_by_default():
+    """Measured on the operator's live database: enabling it would have blocked
+    338 of the 339 coins that cleared the security gate. 499 of his 500 alerted
+    coins sit at 25-49% coverage, so coverage cannot distinguish a bad coin from
+    a good one — every coin is equally unmeasured. Shipping this on would have
+    taken his bot off the air, which is why the default must stay 0.0 until the
+    holder/LP facts are actually collected."""
+    assert DEFAULTS.security.min_coverage_for_full_score == 0.0
+    assert assess(thin_profile(), DEFAULTS).overall_score == pytest.approx(100.0)
 
 
 def test_the_cap_scales_smoothly_rather_than_stepping():
