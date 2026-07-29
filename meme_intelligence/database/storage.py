@@ -867,12 +867,31 @@ class Storage:
         price_change_percent: float | None, liquidity_usd: float | None,
         survived: bool | None, source: str,
     ) -> None:
-        """Insert one measured outcome; re-measuring a window is a no-op."""
+        """Insert one measured outcome.
+
+        Re-measuring a window that already holds a real return is a no-op —
+        the first honest measurement of a window stands (Part 24 S14). The
+        one exception is a row whose ``price_change_percent`` is NULL: that
+        is an UNMEASURABLE attempt (the implausible-return guard), and since
+        the usual cause is a transient bad provider tick, a later good
+        reading must be able to fill the hole. Without this a single glitch
+        during one cron run would permanently delete that window's evidence
+        — including a real winner's (review finding, 2026-07-29).
+        """
         self._conn.execute(
-            """INSERT OR IGNORE INTO outcomes
+            """INSERT INTO outcomes
                (snapshot_id, token_id, window_hours, target_at, measured_at,
                 price_usd, price_change_percent, liquidity_usd, survived, source)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(snapshot_id, window_hours) DO UPDATE SET
+                   measured_at = excluded.measured_at,
+                   price_usd = excluded.price_usd,
+                   price_change_percent = excluded.price_change_percent,
+                   liquidity_usd = excluded.liquidity_usd,
+                   survived = excluded.survived,
+                   source = excluded.source
+               WHERE outcomes.price_change_percent IS NULL
+                 AND excluded.price_change_percent IS NOT NULL""",
             (snapshot_id, token_id, window_hours, target_at, measured_at,
              price_usd, price_change_percent, liquidity_usd,
              None if survived is None else int(survived), source),

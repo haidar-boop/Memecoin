@@ -508,7 +508,7 @@ class LearningService:
         token_address: str,
         chain: str,
         horizon_hours: float,
-        forward_return_percent: float,
+        forward_return_percent: float | None,
         *,
         is_rug: bool = False,
     ) -> None:
@@ -517,7 +517,21 @@ class LearningService:
         A confirmed rug overrides the return-based bucket. The first time a
         coin becomes resolved, instant learning fires: its fingerprint enters
         the analog index and the ensemble's accuracy is updated.
+
+        ``forward_return_percent`` may be ``None`` when the magnitude could
+        not be trusted (the backtester's implausible-return guard). That is
+        NOT the same as knowing nothing: a drained pool is a confirmed rug
+        whatever its arithmetic says, and ``_bucket_for_return`` ignores the
+        return entirely on the ``is_rug`` branch. Dropping the whole
+        resolution in that case would delete a real RUG label — no rug
+        fingerprint in the analog index, no deployer blacklisting, no graded
+        rug call for the ARMED veto's earned authority — which is a far worse
+        trade than the fake PUMPs the guard was written to stop (review
+        finding, 2026-07-29). So a rug still resolves; only an untrustworthy
+        NON-rug magnitude is dropped.
         """
+        if forward_return_percent is None and not is_rug:
+            return  # nothing measurable and no rug to record (Rule 8)
         token = TokenIdentity(chain=chain, address=token_address)
         coin_id = self._store.coin_id(token)
         if coin_id is None:
@@ -535,9 +549,11 @@ class LearningService:
               and previous is not OutcomeBucket.RUG):
             self._on_rug_upgrade(coin_id)
 
-    def _bucket_for_return(self, ret: float, is_rug: bool) -> OutcomeBucket:
+    def _bucket_for_return(self, ret: float | None, is_rug: bool) -> OutcomeBucket:
         if is_rug:
-            return OutcomeBucket.RUG
+            return OutcomeBucket.RUG   # a drained pool needs no arithmetic
+        if ret is None:                # guarded by resolve_outcome; belt-and-braces
+            return OutcomeBucket.UNRESOLVED
         if ret >= self._ls.pump_return_percent:
             return OutcomeBucket.PUMP
         if ret <= self._ls.dump_return_percent:

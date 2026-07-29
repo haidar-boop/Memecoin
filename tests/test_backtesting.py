@@ -377,3 +377,95 @@ def test_ceiling_must_exceed_the_success_threshold():
         BacktestSettings(max_measurable_return_percent=10.0)   # below success 50
     with pytest.raises(ConfigurationError, match="max_measurable_return_percent"):
         BacktestSettings(max_measurable_return_percent=-1.0)
+
+
+# ---- Review findings on the guard itself (2026-07-29) ----
+
+
+async def test_drained_pool_still_resolves_as_rug_despite_unmeasurable_return(tmp_path):
+    """CRITICAL review finding: _bucket_for_return checks is_rug FIRST, so a
+    corrupt return on a drained pool was still producing a CORRECT rug label.
+    Nulling the change and requiring `change is not None` deleted it — no rug
+    fingerprint in the analog index, no deployer blacklisting, no graded rug
+    call for the ARMED veto's authority. Losing real rugs to avoid fake pumps
+    is a strictly worse trade for a rug-veto system."""
+    with make_storage(tmp_path) as storage:
+        seed(storage, 1, Classification.STRONG_CANDIDATE,
+             start_price=3.70077676159037e-11, later_price=0.06342,
+             later_liquidity=0.0)                      # pool drained = real rug
+        learner = _RecordingLearner()
+        await refresh_outcomes(storage, settings=SETTINGS,
+                               learning_service=learner, now_func=lambda: NOW)
+        assert learner.calls, "a confirmed rug must still resolve"
+        assert all(c[3] is True for c in learner.calls), "must be flagged is_rug"
+        assert all(c[2] is None for c in learner.calls), "magnitude stays honest"
+
+
+async def test_corrupt_return_on_a_live_pool_is_still_dropped(tmp_path):
+    """The original point of the guard survives the rug fix."""
+    with make_storage(tmp_path) as storage:
+        seed(storage, 2, Classification.STRONG_CANDIDATE,
+             start_price=3.70077676159037e-11, later_price=0.06342,
+             later_liquidity=50_000.0)                 # alive: no rug to record
+        learner = _RecordingLearner()
+        await refresh_outcomes(storage, settings=SETTINGS,
+                               learning_service=learner, now_func=lambda: NOW)
+        assert learner.calls == []
+
+
+async def test_nan_return_never_reaches_learning(tmp_path):
+    """HIGH review finding: abs(nan) > ceiling is False, so NaN slipped past
+    the ceiling and was taught as FLAT (nan >= 50 and nan <= -50 are both
+    False) while SQLite stored NULL — audit trail and training set
+    disagreeing. Non-finite must be rejected unconditionally."""
+    for ceiling in (SETTINGS.max_measurable_return_percent, 0.0):   # 0 = guard off
+        settings = BacktestSettings(max_measurable_return_percent=ceiling)
+        with make_storage(tmp_path / f"nan{ceiling}") as storage:
+            seed(storage, 3, Classification.STRONG_CANDIDATE,
+                 start_price=0.000001, later_price=float("nan"))
+            learner = _RecordingLearner()
+            await refresh_outcomes(storage, settings=settings,
+                                   learning_service=learner, now_func=lambda: NOW)
+            assert learner.calls == [], f"NaN leaked with ceiling={ceiling}"
+
+
+async def test_unmeasurable_window_is_retried_and_filled_by_a_good_reading(tmp_path):
+    """MEDIUM review finding: an unmeasurable row must not burn the window
+    forever. The usual cause is a transient bad tick, and permanently losing
+    that window could delete a real winner's evidence."""
+    with make_storage(tmp_path) as storage:
+        seed(storage, 4, Classification.STRONG_CANDIDATE,
+             start_price=3.70077676159037e-11, later_price=0.06342)
+        await refresh_outcomes(storage, settings=SETTINGS, now_func=lambda: NOW)
+        snapshot_id = storage.predictions()[0]["snapshot_id"]
+        assert all(r["price_change_percent"] is None
+                   for r in storage.outcomes_for_snapshot(snapshot_id).values())
+
+        # A later, sane reading for the same windows must fill the hole.
+        storage.record_outcome(
+            snapshot_id=snapshot_id, token_id=storage.predictions()[0]["token_id"],
+            window_hours=24.0, target_at=(T0 + timedelta(hours=24)).isoformat(),
+            measured_at=NOW.isoformat(), price_usd=0.0000012,
+            price_change_percent=20.0, liquidity_usd=50_000.0,
+            survived=True, source="snapshot")
+        assert storage.outcomes_for_snapshot(snapshot_id)[24.0][
+            "price_change_percent"] == 20.0
+
+
+async def test_a_settled_window_is_never_overwritten(tmp_path):
+    """The flip side: a window holding a REAL return stays settled — the
+    first honest measurement of a window stands (Part 24 S14)."""
+    with make_storage(tmp_path) as storage:
+        seed(storage, 5, Classification.STRONG_CANDIDATE,
+             start_price=0.000001, later_price=0.000002)      # +100%
+        await refresh_outcomes(storage, settings=SETTINGS, now_func=lambda: NOW)
+        snapshot_id = storage.predictions()[0]["snapshot_id"]
+        before = storage.outcomes_for_snapshot(snapshot_id)[24.0]["price_change_percent"]
+        storage.record_outcome(
+            snapshot_id=snapshot_id, token_id=storage.predictions()[0]["token_id"],
+            window_hours=24.0, target_at=(T0 + timedelta(hours=24)).isoformat(),
+            measured_at=NOW.isoformat(), price_usd=9.99,
+            price_change_percent=999.0, liquidity_usd=1.0,
+            survived=False, source="live_fetch")
+        assert storage.outcomes_for_snapshot(snapshot_id)[24.0][
+            "price_change_percent"] == before

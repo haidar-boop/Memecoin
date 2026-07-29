@@ -24,6 +24,7 @@ Doctrine encoded here (Sections 1 and 14):
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Callable
@@ -93,7 +94,10 @@ async def refresh_outcomes(
         series = None  # fetched lazily per token
 
         for window in settings.window_list:
-            if window in existing:
+            # A window already holding a REAL return is settled. One holding
+            # NULL was an unmeasurable attempt (bad provider tick) and stays
+            # open for a later good reading — see Storage.record_outcome.
+            if existing.get(window, {}).get("price_change_percent") is not None:
                 continue
             target = predicted_at + timedelta(hours=window)
             if target > now:
@@ -113,6 +117,8 @@ async def refresh_outcomes(
             price, liquidity, measured_at = measurement
             change = (100.0 * (price - base_price) / base_price
                       if price is not None and base_price else None)
+            survived = (liquidity >= settings.survival_min_liquidity_usd
+                        if liquidity is not None else None)
             # A return is only as trustworthy as the two prices behind it.
             # When the baseline (the token's FIRST recorded price) or the
             # later reading is a bad datum, the ratio explodes: live data
@@ -124,14 +130,25 @@ async def refresh_outcomes(
             # attempt is auditable, but with no price_change_percent, which
             # also makes the learning feed below skip it automatically.
             ceiling = settings.max_measurable_return_percent
-            if change is not None and ceiling > 0 and abs(change) > ceiling:
+            if change is not None and (
+                # NaN must be rejected UNCONDITIONALLY, never behind the
+                # ceiling test: `abs(nan) > ceiling` is False, so a NaN price
+                # from a provider slipped straight past the guard and was
+                # taught as FLAT (nan >= 50 and nan <= -50 are both False),
+                # while SQLite silently stored it as NULL — the audit trail
+                # and the training set disagreeing (review finding,
+                # 2026-07-29). Not gating this on `ceiling > 0` also keeps
+                # the hole closed when the ceiling is disabled.
+                not math.isfinite(change)
+                or (ceiling > 0 and abs(change) > ceiling)
+            ):
                 _logger.warning(
-                    "implausible %+.0f%% return for %s at %sh (base %.3g -> %.3g); "
-                    "recorded as unmeasurable, not fed to learning",
-                    change, prediction["address"], window, base_price, price)
+                    "implausible %s%% return for %s at %sh (base %.3g -> %.3g); "
+                    "recorded as unmeasurable%s",
+                    f"{change:+.0f}" if math.isfinite(change) else change,
+                    prediction["address"], window, base_price, price,
+                    "" if survived is False else ", not fed to learning")
                 change = None
-            survived = (liquidity >= settings.survival_min_liquidity_usd
-                        if liquidity is not None else None)
             storage.record_outcome(
                 snapshot_id=prediction["snapshot_id"],
                 token_id=prediction["token_id"],
@@ -150,7 +167,17 @@ async def refresh_outcomes(
             # we could compute, with a confirmed rug when liquidity fell below
             # the survival floor (survived is False; unknown liquidity is not
             # a rug — Rule 8).
-            if learning_service is not None and change is not None:
+            #
+            # A drained pool resolves even when its RETURN was unmeasurable:
+            # `_bucket_for_return` ignores the magnitude entirely on the
+            # is_rug branch, so requiring `change is not None` here silently
+            # deleted real RUG labels — no rug fingerprint in the analog
+            # index, no deployer blacklisting, and no graded rug call for the
+            # ARMED veto's earned authority. Losing rugs to avoid fake pumps
+            # is a strictly worse trade for a rug-veto system (review
+            # finding, 2026-07-29).
+            if learning_service is not None and (change is not None
+                                                 or survived is False):
                 try:
                     learning_service.resolve_outcome(
                         prediction["address"], prediction["chain"],

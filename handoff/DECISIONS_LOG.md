@@ -2078,3 +2078,41 @@ real data-integrity bug worth fixing, but it does NOT explain the reported
 magnitude was known. Fix is forward-only; ~624 historical rows are left in
 place rather than risking a migration on a live DB for 0.4% of the data.
 Suite: **964 passing** (960 + 4).
+
+## 2026-07-29 (later) — Review of the return guard found it deleted real RUGs
+
+A 5-lens review + adversarial verification of `1cf3aef` found three defects
+in the guard itself. All fixed; the critical one made the guard a net
+NEGATIVE for a rug-veto system.
+
+1. **CRITICAL — the guard deleted confirmed rugs.** `_bucket_for_return`
+   checks `is_rug` FIRST, so an implausible return on a DRAINED pool never
+   produced a wrong PUMP — it produced a CORRECT RUG. Nulling `change` then
+   tripped the pre-existing `if change is not None` gate and skipped
+   `resolve_outcome` entirely, taking the rug with it. Since
+   `refresh_outcomes` is the ONLY caller of `resolve_outcome`, and that is
+   the only path to `blacklist_deployer` / `_on_rug_upgrade`, the coin was
+   never resolved at all: no RUG label, no rug fingerprint in the analog
+   index, no graded rug call for the ARMED veto's earned authority, and no
+   deployer blacklisting behind `/dev`. Worse, `base_price` is fixed per
+   token (MIN snapshot id), so a bad baseline made EVERY window exceed the
+   ceiling — the coin went permanently invisible. Reproduced by execution
+   before and after. Fix: `resolve_outcome` accepts
+   `forward_return_percent: float | None`, returns early only when the
+   magnitude is missing AND it is not a rug; the backtester now feeds it
+   when `change is not None OR survived is False`. A rug resolves with an
+   honest `None` magnitude instead of a fabricated one.
+2. **HIGH — NaN bypassed the guard.** `abs(nan) > ceiling` is False, so a
+   NaN price sailed past, `change is not None` held, and
+   `_bucket_for_return` returned FLAT (`nan >= 50` and `nan <= -50` are both
+   False) — while SQLite stored NaN as NULL, so the audit trail and the
+   training set disagreed. Fix: reject non-finite unconditionally, NOT
+   behind `ceiling > 0` (else disabling the ceiling reopens the hole).
+3. **MEDIUM — an unmeasurable row burned its window forever.**
+   `INSERT OR IGNORE` + `if window in existing` meant one transient bad tick
+   permanently deleted that window's evidence, including a real winner's.
+   Fix: `record_outcome` upserts ONLY over a NULL `price_change_percent`, and
+   the skip test now checks for a real value — a settled window still stands
+   (Part 24 S14), an unmeasurable one stays open for a later good reading.
+
+Suite: **971 passing** (966 + 5).
