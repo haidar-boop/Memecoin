@@ -325,6 +325,21 @@ class LiveExecutor:
         # immediately so a confirmation hiccup can never lose the record.
         link = f"{_SOLSCAN_TX}{signature}"
         self._journal(mint, kind, f"live {kind} {detail}: {signature}")
+        # Register the position the moment the BUY is broadcast, not when it
+        # confirms. `set_holding` was previously only ever called by /holding,
+        # so a coin bought through /buy or an alert's Buy button was never
+        # marked as held — and the live rug watch, the interest gate and the
+        # protective-alert priority all key off holdings. The bot could buy a
+        # coin and then never guard it (2026-07-29).
+        #
+        # Broadcast rather than confirmed is deliberate: a buy whose
+        # confirmation times out has very likely landed, and that is precisely
+        # the coin most in need of watching. The failure directions are not
+        # symmetric — watching a coin we do not own is harmless (a sell simply
+        # reports "nothing to dump"), while failing to watch one we do own is
+        # what costs money.
+        if kind == "trade_buy":
+            self._remember_position(mint, held=True)
         try:
             landed = await self._confirm(signature)
         except asyncio.CancelledError:
@@ -350,6 +365,12 @@ class LiveExecutor:
             return (f"{action} was submitted but could not be confirmed (RPC error). Do NOT "
                     f"retry — check Solscan first.\n{link}")
         if landed:
+            # A CONFIRMED sell of the whole position ends the holding. Only on
+            # `landed` — an unconfirmed sell may not have gone through, and
+            # keeping the watch on a coin we might still own is the safe
+            # direction (same asymmetry as the buy above).
+            if kind == "trade_sell":
+                self._remember_position(mint, held=False)
             return f"{action} confirmed.\n{link}"
         return (f"{action} submitted — confirmation still pending. Do NOT retry; "
                 f"check Solscan.\n{link}")
@@ -401,6 +422,26 @@ class LiveExecutor:
     def _safe(self, text: str) -> str:
         """Never let the private key or wallet internals surface in a reply."""
         return text.replace(self._pubkey, self._pubkey[:4] + "…")
+
+    def _remember_position(self, mint: str, *, held: bool) -> None:
+        """Mark/unmark a live position so the rug watch knows to guard it.
+
+        Best-effort and fully isolated: a storage hiccup must never turn a
+        completed trade into an error reply (Rule 7).
+        """
+        token = TokenIdentity(chain="solana", address=mint)
+        try:
+            if held:
+                if self._storage.set_holding(token, note="auto: live buy"):
+                    self._logger.info("registered live position in %s for the rug watch",
+                                      mint)
+            else:
+                if self._storage.release_holding(token):
+                    self._logger.info("released position in %s after a confirmed sell",
+                                      mint)
+        except Exception as exc:  # noqa: BLE001 — never break a completed trade
+            self._logger.warning("could not update the holding record for %s: %s",
+                                 mint, exc)
 
     def _journal(self, address: str, kind: str, content: str) -> None:
         try:

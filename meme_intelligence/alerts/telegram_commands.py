@@ -116,6 +116,7 @@ _HELP_TEXT = "\n".join([
     "/mind - learning-layer report card + feedback tallies",
     "/winners - what the bot's recorded winners had in common (read-only)",
     "/dev <address> - the deployer's track record across coins the bot watched",
+    "/rugwatch [off] - live rug guard on your positions; 'off' disarms auto-sell",
     "/mute <address> - silence ALL alerts for a token",
     "/unmute <address> - restore alerts for a token",
     "/buy <address> <sol> - buy that many SOL of a token (live if enabled)",
@@ -143,6 +144,9 @@ class CommandContext:
     # (address, chain) -> TokenBoost|None — DexScreener paid-boost lookup for
     # /boost. Optional (None = the command reports it is unavailable).
     boost_lookup: Callable[..., Awaitable[Any]] | None = None
+    # Live rug guard over open positions (None = not running). Exposed so the
+    # operator can disarm auto-sell from his phone without SSH.
+    holdings_guard: Any = None
 
 
 def _fmt_duration(seconds: float | None) -> str:
@@ -265,6 +269,7 @@ class TelegramCommandListener(BaseCollector):
             "/mind": self._cmd_mind,
             "/winners": self._cmd_winners,
             "/dev": self._cmd_dev,
+            "/rugwatch": self._cmd_rugwatch,
             "/mute": self._cmd_mute,
             "/unmute": self._cmd_unmute,
             "/buy": self._cmd_buy,
@@ -1104,6 +1109,35 @@ class TelegramCommandListener(BaseCollector):
         if recent:
             lines.append("latest coins:")
             lines.extend(recent)
+        return "\n".join(lines)
+
+    async def _cmd_rugwatch(self, args: list[str]) -> str:
+        """Kill switch for the auto-sell guard, reachable from the phone.
+
+        The guard is the only thing in the system that spends money without a
+        tap, so disarming it must not require SSH. Disarm is one-way at
+        runtime: re-arming means editing .env and restarting, which is a
+        deliberate speed bump on pointing a loaded gun at the wallet again.
+        """
+        guard = self._ctx.holdings_guard
+        if guard is None:
+            return ("Rug watch is not running.\n"
+                    "Enable it with MEMEINTEL_RUG_WATCH_ENABLED=true in .env "
+                    "(and MEMEINTEL_RUG_WATCH_AUTO_SELL=true to let it sell).")
+        want = (args[0].lower() if args else "")
+        if want in ("off", "disarm", "stop"):
+            guard.disarm("operator sent /rugwatch off")
+            return ("Auto-sell DISARMED. The guard keeps watching and will still "
+                    "warn you, but it will not sell.\n"
+                    "To re-arm: set MEMEINTEL_RUG_WATCH_AUTO_SELL=true in .env and "
+                    "restart the service.")
+        status = guard.status()
+        lines = ["RUG WATCH",
+                 f"watching: {status['watching']} position(s)",
+                 f"auto-sell: {'ARMED' if status['auto_sell'] else 'off'}",
+                 f"exited this run: {status['exited']}"]
+        if status["auto_sell"]:
+            lines.append("Send /rugwatch off to disarm.")
         return "\n".join(lines)
 
     async def _cmd_mute(self, args: list[str]) -> str:

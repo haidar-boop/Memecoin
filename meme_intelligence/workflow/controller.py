@@ -365,6 +365,14 @@ class ContinuousScanner:
         # report only which layers were WIRED, so "the process is up" and
         # "alerts are flowing" were indistinguishable from the phone.
         self._last_alert_at: datetime | None = None
+        # Live rug guard over open positions; attached via set_holdings_guard.
+        self._holdings_guard = None
+
+    def set_holdings_guard(self, guard) -> None:
+        """Attach the live rug guard so /status can report its state and the
+        Telegram kill switch can reach it (wired after construction, like the
+        Telegram listener — the guard needs the notifier this scanner uses)."""
+        self._holdings_guard = guard
 
     def request_stop(self) -> None:
         """Ask the scanner to stop after the current cycle (graceful shutdown)."""
@@ -462,6 +470,8 @@ class ContinuousScanner:
                 "last_alert_delivered_at": (
                     self._last_alert_at.isoformat()
                     if self._last_alert_at is not None else None),
+                "rug_watch": (self._holdings_guard.status()
+                              if self._holdings_guard is not None else None),
             },
             "db": db,
         }

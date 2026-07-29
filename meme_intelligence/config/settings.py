@@ -1568,6 +1568,60 @@ class RugThresholds:
 
 
 @dataclass(frozen=True)
+class RugWatchSettings:
+    """Live rug watch on coins the operator ALREADY OWNS (2026-07-29).
+
+    Distinct from the pre-alert rug engine: this guards money already
+    committed. The operator lost a position to a rug and asked for the bot to
+    exit by itself, so ``auto_sell`` can spend real money with no human in the
+    loop — it is therefore OFF by default and requires BOTH ``enabled`` and
+    ``auto_sell`` to be armed explicitly (Rule 16-style least privilege applied
+    to money rather than secrets).
+
+    The defaults are deliberately conservative. A false exit sells a healthy
+    position at a loss, so a trigger must clear ``exit_drop_percent`` on
+    ``min_confirmations`` consecutive readings, and no verdict at all is
+    produced before ``min_readings`` measured observations exist.
+    """
+
+    enabled: bool = False          # run the watch loop at all
+    auto_sell: bool = False        # let it SELL without asking (needs enabled too)
+    poll_seconds: float = 15.0     # how often each held coin is re-read
+    exit_drop_percent: float = 55.0   # fall from peak liquidity that triggers exit
+    warn_drop_percent: float = 30.0   # fall that is worth telling the operator about
+    min_confirmations: int = 2     # consecutive readings that must agree before selling
+    min_readings: int = 2          # measured observations needed before any verdict
+    max_positions: int = 20        # bound the per-poll work on a 1 vCPU droplet
+    probe_sell_route: bool = True  # ask Jupiter whether an exit still exists
+
+    def __post_init__(self) -> None:
+        if self.auto_sell and not self.enabled:
+            raise ConfigurationError(
+                "rug_watch auto_sell is on but rug_watch enabled is off — arm both "
+                "or neither, so a half-configured guard never looks armed")
+        _check_range("rug_watch exit_drop_percent", self.exit_drop_percent, 0.0, 100.0)
+        _check_range("rug_watch warn_drop_percent", self.warn_drop_percent, 0.0, 100.0)
+        if self.warn_drop_percent > self.exit_drop_percent:
+            raise ConfigurationError(
+                "rug_watch warn_drop_percent must not exceed exit_drop_percent, "
+                f"got warn={self.warn_drop_percent} exit={self.exit_drop_percent}")
+        if not math.isfinite(self.poll_seconds) or self.poll_seconds <= 0:
+            raise ConfigurationError(
+                f"rug_watch poll_seconds must be positive, got {self.poll_seconds}")
+        for name in ("min_confirmations", "min_readings", "max_positions"):
+            value = getattr(self, name)
+            if value <= 0:
+                raise ConfigurationError(
+                    f"rug_watch '{name}' must be positive, got {value}")
+        if self.min_confirmations < 2:
+            # One reading is a provider tick, not evidence. Selling on it is
+            # exactly the failure mode this guard must not have.
+            raise ConfigurationError(
+                "rug_watch min_confirmations must be at least 2 — a single "
+                "reading must never be able to liquidate a position")
+
+
+@dataclass(frozen=True)
 class RugSignalWeights:
     """Point contributions for each hard rug signal (Section 5a).
 
@@ -1642,6 +1696,7 @@ class Settings:
     learning: LearningSettings = field(default_factory=LearningSettings)
     lightgbm: LightGBMSettings = field(default_factory=LightGBMSettings)
     rug_thresholds: RugThresholds = field(default_factory=RugThresholds)
+    rug_watch: RugWatchSettings = field(default_factory=RugWatchSettings)
     rug_signal_weights: RugSignalWeights = field(default_factory=RugSignalWeights)
     log_level: str = "INFO"
     log_dir: str = "logs"
@@ -1722,6 +1777,7 @@ class Settings:
             learning=_load_group(LearningSettings, "LEARNING", env),
             lightgbm=_load_group(LightGBMSettings, "LIGHTGBM", env),
             rug_thresholds=_load_group(RugThresholds, "RUG_THRESHOLDS", env),
+            rug_watch=_load_group(RugWatchSettings, "RUG_WATCH", env),
             rug_signal_weights=_load_group(RugSignalWeights, "RUG_SIGNAL_WEIGHTS", env),
             log_level=env.get(f"{_ENV_PREFIX}_LOG_LEVEL", "INFO"),
             log_dir=env.get(f"{_ENV_PREFIX}_LOG_DIR", "logs"),
