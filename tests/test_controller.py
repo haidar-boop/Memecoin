@@ -1785,3 +1785,18 @@ async def test_sleep_runs_to_completion_when_no_stop_is_requested():
     scanner._sleep = record
     await scanner._sleep_unless_stopping(45.0)
     assert seen == [45.0]
+
+
+def test_cycle_history_is_bounded():
+    """`history` is appended once per cycle inside a loop the systemd daemon
+    never exits, and each entry retains every AlertEvent delivered that cycle.
+    At the 45s cadence that is ~1,900 entries a day accumulating forever
+    against MemoryMax=880M (bug hunt, 2026-07-29)."""
+    from collections import deque
+    from meme_intelligence.workflow.controller import _MAX_CYCLE_HISTORY
+
+    history = deque(maxlen=_MAX_CYCLE_HISTORY)
+    for i in range(_MAX_CYCLE_HISTORY * 3):
+        history.append(i)
+    assert len(history) == _MAX_CYCLE_HISTORY
+    assert history[-1] == _MAX_CYCLE_HISTORY * 3 - 1     # newest kept

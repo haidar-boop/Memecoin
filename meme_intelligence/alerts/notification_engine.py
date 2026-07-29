@@ -113,6 +113,25 @@ _NO_INTEREST_NOTE = ("informational only: this token never reached the "
 _CHECK_ICON = {"pass": "✅", "warn": "⚠️", "note": "ℹ️", "unknown": "❔"}
 
 
+def sanitize_identity(value: str | None, *, max_len: int = 64) -> str:
+    """Neutralize attacker-controlled token names/symbols (bug-hunt finding).
+
+    On-chain metadata is unbounded and arbitrary: a token literally named
+    with backticks + newlines broke out of Discord's code fence and injected
+    live markdown (incl. mention pings) into the owner's alert channel.
+    Non-printable characters and newlines are dropped, backticks neutralized,
+    and length capped; the contract address (validated charset) stays exact.
+
+    Lives here rather than in ``sinks`` so ``AlertEvent.render`` can use it:
+    sinks imports this module, not the other way round.
+    """
+    if not value:
+        return "unknown"
+    cleaned = "".join(ch for ch in value if ch.isprintable()).replace("`", "'")
+    cleaned = cleaned.strip()
+    return (cleaned[:max_len] + "…") if len(cleaned) > max_len else (cleaned or "unknown")
+
+
 def _fmt_usd(value: float | None) -> str:
     """Money for a LOG line: unknown stays visibly unknown, never $0."""
     if value is None or not math.isfinite(value):
@@ -196,7 +215,12 @@ class AlertEvent:
     checklist: tuple[str, ...] = ()
 
     def render(self) -> str:
-        symbol = self.token.symbol or self.token.address[:8]
+        # The symbol is on-chain metadata an attacker chooses freely. This
+        # string reaches ConsoleSink -> stdout -> journald, where raw ANSI
+        # escapes and newlines would rewrite the operator's terminal and forge
+        # log lines. Every other rendering site already sanitizes; this one was
+        # missed (bug-hunt finding, 2026-07-29).
+        symbol = sanitize_identity(self.token.symbol or self.token.address[:8])
         lines = [f"[{self.priority.value.upper()}] {self.alert_type}: {symbol} ({self.token.chain})",
                  f"  {self.title}"]
         if self.why_it_matters:

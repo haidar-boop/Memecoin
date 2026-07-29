@@ -597,3 +597,18 @@ async def test_dispatch_keeps_its_old_return_contract():
                                 time_func=lambda: 0.0)
     delivered = await engine.dispatch([make_event(detected_at=None)])
     assert len(delivered) == 1
+
+
+def test_console_render_sanitizes_an_attacker_chosen_symbol():
+    """AlertEvent.render() reaches ConsoleSink -> stdout -> journald. Raw ANSI
+    escapes and newlines in a token symbol would rewrite the operator's
+    terminal and forge log lines (bug hunt, 2026-07-29)."""
+    from meme_intelligence.core.models import TokenIdentity
+
+    hostile = TokenIdentity(chain="solana", address="So1" + "1" * 40,
+                            symbol="\x1b[2J\x1b[1;31mPWNED\nFAKE LOG LINE")
+    text = make_event(token=hostile).render()
+    assert "\x1b" not in text
+    assert "PWNED" in text                       # still readable, just declawed
+    assert text.count("\n") == text.count("\n")  # no injected newline in line 1
+    assert "FAKE LOG LINE" in text.splitlines()[0]

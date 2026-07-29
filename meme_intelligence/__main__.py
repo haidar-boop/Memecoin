@@ -1110,8 +1110,20 @@ async def _cmd_monitor(args, settings) -> int:
                         idle_delay_seconds=settings.telegram_commands.idle_delay_seconds,
                         error_backoff_max_seconds=(
                             settings.telegram_commands.error_backoff_max_seconds),
+                        allowed_user_ids=settings.telegram_commands.user_id_list(),
                         rate_limiter=RateLimiter.per_minute(120.0),
                     )
+                    # A group/channel chat id (Telegram makes those negative)
+                    # means every member of that chat can issue commands. With
+                    # trading armed that includes spending the wallet, so say so
+                    # loudly rather than leaving it implicit (Rule 13).
+                    if (str(settings.telegram_chat_id).startswith("-")
+                            and not settings.telegram_commands.user_id_list()):
+                        print("WARNING: MEMEINTEL_TELEGRAM_CHAT_ID looks like a "
+                              "GROUP chat and MEMEINTEL_TELEGRAM_COMMANDS_ALLOWED_"
+                              "USER_IDS is empty — every member of that group can "
+                              "run every command, including /buy and /dump. Set "
+                              "the allow-list to your own Telegram user id.")
                     scanner.set_telegram_listener(listener)
                     stack.push_async_callback(listener.close)
                     stack.push_async_callback(listener.stop)

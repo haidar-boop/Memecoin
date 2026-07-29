@@ -22,7 +22,7 @@ console sink still shows everything. Configurable per Rule 17.
 
 from __future__ import annotations
 
-from meme_intelligence.alerts.notification_engine import AlertEvent
+from meme_intelligence.alerts.notification_engine import AlertEvent, sanitize_identity
 from meme_intelligence.collectors.base import BaseCollector
 from meme_intelligence.core.enums import AlertPriority
 from meme_intelligence.core.errors import CollectorError
@@ -77,20 +77,10 @@ def channel_for(event: AlertEvent) -> str:
     return ALERT_CHANNELS.get(event.alert_type, "reports")
 
 
-def _sanitize_identity(value: str | None, *, max_len: int = 64) -> str:
-    """Neutralize attacker-controlled token names/symbols (bug-hunt finding).
-
-    On-chain metadata is unbounded and arbitrary: a token literally named
-    with backticks + newlines broke out of Discord's code fence and injected
-    live markdown (incl. mention pings) into the owner's alert channel.
-    Non-printable characters and newlines are dropped, backticks neutralized,
-    and length capped; the contract address (validated charset) stays exact.
-    """
-    if not value:
-        return "unknown"
-    cleaned = "".join(ch for ch in value if ch.isprintable()).replace("`", "'")
-    cleaned = cleaned.strip()
-    return (cleaned[:max_len] + "…") if len(cleaned) > max_len else (cleaned or "unknown")
+# Single definition lives in notification_engine so AlertEvent.render can use
+# it too (sinks imports that module, not the reverse). Re-exported under the
+# original private name so every existing call site here is unchanged.
+_sanitize_identity = sanitize_identity
 
 
 # Telegram's hard limit on inline-button callback_data is 64 BYTES; the

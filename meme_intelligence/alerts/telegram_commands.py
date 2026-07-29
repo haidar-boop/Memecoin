@@ -202,6 +202,7 @@ class TelegramCommandListener(BaseCollector):
         poll_timeout_seconds: float = 25.0,
         idle_delay_seconds: float = 2.0,
         error_backoff_max_seconds: float = 60.0,
+        allowed_user_ids: tuple[str, ...] = (),
         now_func: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         sleep_func: Callable[[float], Awaitable[None]] = asyncio.sleep,
         time_func: Callable[[], float] = time.monotonic,
@@ -225,6 +226,7 @@ class TelegramCommandListener(BaseCollector):
         self._now = now_func
         self._sleep = sleep_func
         self._time = time_func
+        self._allowed_user_ids = frozenset(allowed_user_ids)
         self._offset: int | None = None  # getUpdates cursor (in memory)
         self._task: asyncio.Task | None = None
         self._stopping = False
@@ -466,21 +468,41 @@ class TelegramCommandListener(BaseCollector):
 
     def _authorized_chat(self, update: dict) -> bool:
         """True only when the update's chat id string-equals the configured
-        one. Strangers are logged (chat id only — NEVER their text) and
-        silently ignored: no reply, no acknowledgement."""
+        one AND — when an allow-list is configured — the SENDER is on it.
+
+        Chat-scoped authorization alone is safe for a private one-to-one chat,
+        where the chat id IS the operator's user id. But `.env.example` tells
+        the operator to "add it to your group/channel", and in a group every
+        member inherits the entire command surface, including /buy and /dump
+        against the real trading wallet. ``allowed_user_ids`` closes that;
+        leaving it empty preserves the previous behaviour exactly (Rule 18).
+
+        Strangers are logged (ids only — NEVER their text) and silently
+        ignored: no reply, no acknowledgement.
+        """
         message = update.get("message") or update.get("edited_message")
         callback = update.get("callback_query")
         chat: dict = {}
+        sender: dict = {}
         if isinstance(callback, dict):
             chat = (callback.get("message") or {}).get("chat") or {}
+            sender = callback.get("from") or {}
         elif isinstance(message, dict):
             chat = message.get("chat") or {}
+            sender = message.get("from") or {}
         chat_id = chat.get("id")
-        if chat_id is not None and str(chat_id) == self._chat_id:
-            return True
-        self._logger.info("ignoring telegram update from unauthorized chat %r",
-                          chat_id)
-        return False
+        if chat_id is None or str(chat_id) != self._chat_id:
+            self._logger.info("ignoring telegram update from unauthorized chat %r",
+                              chat_id)
+            return False
+        if self._allowed_user_ids:
+            user_id = sender.get("id")
+            if user_id is None or str(user_id) not in self._allowed_user_ids:
+                self._logger.warning(
+                    "ignoring telegram command from unauthorized user %r in the "
+                    "configured chat", user_id)
+                return False
+        return True
 
     async def _handle_update(self, update: dict) -> None:
         if not self._authorized_chat(update):
@@ -684,7 +706,11 @@ class TelegramCommandListener(BaseCollector):
         address, error = self._validated_address(args, "/check <address> [chain]")
         if error:
             return error
-        chain = "solana"
+        # Infer from the address format like every other address command
+        # (_resolve_token does the same), instead of defaulting to solana and
+        # reporting a false "never watched" for an EVM coin the bot did analyse
+        # (bug-hunt finding, 2026-07-29). An explicit chain argument still wins.
+        chain = "ethereum" if address.lower().startswith("0x") else "solana"
         if len(args) > 1:
             candidate = args[1].strip().lower()
             if not (candidate.isalnum() and 1 <= len(candidate) <= 20):

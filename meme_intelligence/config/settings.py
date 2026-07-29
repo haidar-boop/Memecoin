@@ -1412,8 +1412,24 @@ class TelegramCommandSettings:
     poll_timeout_seconds: float = 25.0     # server-side long-poll wait (1..50)
     idle_delay_seconds: float = 2.0        # pause between successful polls
     error_backoff_max_seconds: float = 60.0  # cap for the poll-error backoff
+    # Optional comma-separated Telegram USER ids allowed to issue commands.
+    # Authorization is otherwise chat-scoped, and `.env.example` tells the
+    # operator to "add it to your group/channel" — in a group EVERY member
+    # inherits the whole command surface, including /buy and /dump on the real
+    # trading wallet (bug-hunt finding, 2026-07-29). Empty = unchanged
+    # behaviour (chat-scoped), which is safe for a private one-to-one chat;
+    # set it to your own user id when the bot lives in a group.
+    allowed_user_ids: str = ""
+
+    def user_id_list(self) -> tuple[str, ...]:
+        return tuple(p.strip() for p in self.allowed_user_ids.split(",") if p.strip())
 
     def __post_init__(self) -> None:
+        for user_id in self.user_id_list():
+            if not (user_id.lstrip("-").isdigit()):
+                raise ConfigurationError(
+                    "telegram_commands allowed_user_ids must be numeric Telegram "
+                    f"user ids, got {user_id!r}")
         if not math.isfinite(self.poll_timeout_seconds) or not (
                 1.0 <= self.poll_timeout_seconds <= 50.0):
             raise ConfigurationError(

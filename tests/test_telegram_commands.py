@@ -1291,3 +1291,43 @@ async def test_trades_stay_strictly_serialized_under_concurrency():
             listener._do_dump(SOL_ADDR),
         )
     assert max(overlaps) == 1, f"trades overlapped: {overlaps}"
+
+
+# ---- Command authorization is user-scoped when configured (2026-07-29) ----
+
+
+def _user_update(text, user_id, update_id=1):
+    upd = message_update(text, update_id=update_id)
+    upd["message"]["from"] = {"id": user_id}
+    return upd
+
+
+async def test_group_member_is_rejected_when_an_allow_list_is_set():
+    """.env.example says "add it to your group/channel" — in a group EVERY
+    member would otherwise inherit /buy and /dump on the real wallet."""
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage)
+        listener._allowed_user_ids = frozenset({"424242"})
+        await listener._handle_update(_user_update("/help", 999))
+        assert not sent_messages(calls)          # silently ignored, no reply
+        await listener._handle_update(_user_update("/help", 424242, update_id=2))
+        assert any("Commands:" in m["text"] for m in sent_messages(calls))
+
+
+async def test_empty_allow_list_keeps_the_previous_chat_scoped_behaviour():
+    """Rule 18: a private one-to-one chat must be unaffected."""
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage)
+        assert listener._allowed_user_ids == frozenset()
+        await listener._handle_update(_user_update("/help", 999))
+        assert any("Commands:" in m["text"] for m in sent_messages(calls))
+
+
+async def test_wrong_chat_is_still_rejected_regardless_of_user():
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage)
+        listener._allowed_user_ids = frozenset({"424242"})
+        upd = _user_update("/help", 424242)
+        upd["message"]["chat"]["id"] = -100999
+        await listener._handle_update(upd)
+        assert not sent_messages(calls)

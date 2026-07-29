@@ -25,6 +25,14 @@ if [ ! -f .env ]; then
   cp .env.example .env
 fi
 
+# .env holds the trading wallet's private key and every paid API key. `cp`
+# obeys the shell umask (022 on Ubuntu), which leaves it 0644 — readable by
+# every account on the droplet. Nothing else in the repo ever chmod'd it
+# (bug-hunt finding, 2026-07-29). Applied on every run, not just on creation,
+# so an existing droplet is repaired by re-running setup.
+chmod 600 .env
+echo "==> Locked .env to owner-only (chmod 600)"
+
 mkdir -p logs data
 
 echo "==> Installing systemd service"

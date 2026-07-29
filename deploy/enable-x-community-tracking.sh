@@ -43,11 +43,28 @@ set_kv() {
     fi
 }
 
+if [ "${1:-}" = "" ]; then
+    # No key on the argv: read it from the terminal so it never reaches the
+    # shell history or the process table.
+    read -rsp "Paste your paid LunarCrush API key (input hidden): " TYPED_KEY
+    echo
+    if [ -z "$TYPED_KEY" ]; then
+        echo "No key entered — nothing changed." >&2
+        exit 1
+    fi
+    set -- "$TYPED_KEY"
+fi
+
 if [ "$1" = "off" ]; then
     set_kv MEMEINTEL_SOCIAL_ENABLE_IN_MONITOR false
     echo "X/Twitter community tracking DISABLED (the LunarCrush key in .env is kept for manual use)."
 else
-    set_kv MEMEINTEL_LUNARCRUSH_API_KEY "$1"
+    # A key on the command line lands verbatim in ~/.bash_history and is
+    # visible in /proc/<pid>/cmdline to every local account while the script
+    # runs (bug-hunt finding, 2026-07-29). Prompt for it instead when it was
+    # not supplied, and tell the operator how to scrub it if it was.
+    API_KEY="$1"
+    set_kv MEMEINTEL_LUNARCRUSH_API_KEY "$API_KEY"
     set_kv MEMEINTEL_SOCIAL_ENABLE_IN_MONITOR true
     echo "X/Twitter community tracking ENABLED with the provided LunarCrush key."
     echo "Credit protection active: lookups only on alert-worthy coins,"

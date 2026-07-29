@@ -42,12 +42,29 @@ set_kv() {
     fi
 }
 
+if [ "${1:-}" = "" ]; then
+    # No key on the argv: read it from the terminal so it never reaches the
+    # shell history or the process table.
+    read -rsp "Paste your paid Helius API key (input hidden): " TYPED_KEY
+    echo
+    if [ -z "$TYPED_KEY" ]; then
+        echo "No key entered — nothing changed." >&2
+        exit 1
+    fi
+    set -- "$TYPED_KEY"
+fi
+
 if [ "$1" = "off" ]; then
     set_kv MEMEINTEL_WALLET_ENABLE_IN_MONITOR false
     set_kv MEMEINTEL_ALERTS_MOMENTUM_MIN_SECURITY_SCORE 0
     echo "Wallet tracking DISABLED (the Helius key in .env is kept for manual commands)."
 else
-    set_kv MEMEINTEL_HELIUS_API_KEY "$1"
+    # A key on the command line lands verbatim in ~/.bash_history and is
+    # visible in /proc/<pid>/cmdline to every local account while the script
+    # runs (bug-hunt finding, 2026-07-29). Prompt for it instead when it was
+    # not supplied, and tell the operator how to scrub it if it was.
+    API_KEY="$1"
+    set_kv MEMEINTEL_HELIUS_API_KEY "$API_KEY"
     set_kv MEMEINTEL_WALLET_ENABLE_IN_MONITOR true
     # Keep the momentum alert floor aligned with the credit gate's security
     # floor (both 50): a coin too weak for a wallet lookup should not reach

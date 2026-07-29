@@ -102,7 +102,17 @@ class SolanaRpcClient(BaseCollector):
         result = await self._rpc("getBalance", [owner])
         value = (result or {}).get("value") if isinstance(result, dict) else None
         if value is None:
-            return 0
+            # A missing/malformed getBalance result means the read FAILED, and
+            # an unreadable balance is not an empty wallet (Rule 8). Returning
+            # 0 here fabricated two different lies for the operator: the
+            # pre-send check reported "Refused: wallet holds 0.0000 SOL" for a
+            # funded wallet, and get_spendable_balance_sol returned 0.0 instead
+            # of the None its own docstring promises ("an unreadable balance
+            # must never be treated as zero or as unlimited; callers refuse the
+            # button rather than guess"). Both now take their existing
+            # CollectorError paths (bug-hunt finding, 2026-07-29).
+            raise CollectorError(
+                f"{self.name}: getBalance returned no value for {owner[:8]}…")
         try:
             return int(value)
         except (TypeError, ValueError) as exc:

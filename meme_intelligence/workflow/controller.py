@@ -23,7 +23,7 @@ import asyncio
 import dataclasses
 import math
 import signal
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable
@@ -73,6 +73,11 @@ _VERIFIABLE_ALERT_TYPES = {"high_priority_opportunity", "strong_candidate",
 
 _ERROR_BACKOFF_START = 5.0
 _ERROR_BACKOFF_MAX = 300.0
+
+# Cycle summaries retained by run(). Only the (unreachable for the daemon)
+# `return history` consumes them, so this is a memory bound, not a feature
+# limit — a bounded CLI run stays far below it and still returns every cycle.
+_MAX_CYCLE_HISTORY = 500
 
 # Cache-miss sentinel for the copycat-verdict cache: a cached None means
 # "checked, no duplicate found" and must not look like a miss.
@@ -501,7 +506,14 @@ class ContinuousScanner:
             max_cycles if max_cycles is not None else "unbounded",
         )
 
-        history: list[CycleStats] = []
+        # Bounded: one CycleStats per cycle, each retaining every AlertEvent
+        # delivered that cycle, appended inside a loop that for the systemd
+        # daemon (max_cycles=None) never exits — so `return history` never runs
+        # and nothing ever freed it. At the 45s default cadence that is ~1,900
+        # entries a day accumulating forever against MemoryMax=880M (bug-hunt
+        # finding, 2026-07-29). Bounded CLI runs are unaffected: max_cycles is
+        # far below the cap, so they still return every cycle they ran.
+        history: "deque[CycleStats]" = deque(maxlen=_MAX_CYCLE_HISTORY)
         backoff = _ERROR_BACKOFF_START
         cycle = 0
         while not self._stop.is_set() and (max_cycles is None or cycle < max_cycles):
@@ -543,7 +555,7 @@ class ContinuousScanner:
             except Exception as exc:  # noqa: BLE001 — shutdown must not hang on the listener
                 self._logger.warning("telegram command listener stop failed: %s", exc)
         self._logger.info("continuous scanner stopped after %d cycle(s)", cycle)
-        return history
+        return list(history)
 
     async def _run_cycle(self, cycle: int) -> CycleStats:
         stats = CycleStats(cycle=cycle)
