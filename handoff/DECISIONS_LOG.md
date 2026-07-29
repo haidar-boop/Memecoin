@@ -2259,3 +2259,148 @@ world-readable `.env` holding the trading wallet key; HDBSCAN holding the
 GIL through `asyncio.to_thread`; several claims against the 2026-07-28/29
 backtesting commits. Raw output is not committed — re-run the hunt to
 regenerate it.
+
+## 2026-07-29 (evening) — "Fix all the bugs": seven verified findings closed
+
+Every item below was verified against the code (and in several cases by
+execution) before being touched. Nothing here alters scoring, the alert veto,
+or rug DECISION logic — the operator's standing constraint.
+
+1. **`AutomationRules` had no logger at all.** Every buy-side alert it deleted
+   vanished at every log level; the journal read "N candidates, N analyzed,
+   0 alerts". This is what hid the GeckoTerminal blackout for days.
+   Suppression now names the gate and the tripping value (unknown renders as
+   "unknown", never `$0`), covering risk veto / untradeable / oversized /
+   too_old / decline. A batch that sends everything stays silent.
+2. **A typo in `MEMEINTEL_LOG_LEVEL` crash-looped the service.**
+   `setup_logging` is the second statement of `_run`; `ValueError: Unknown
+   level` escaped `main()` before any handler or sink existed, and
+   `Restart=always` + `StartLimitIntervalSec=0` restarted it every 10s
+   forever with Telegram silent. Unrecognized levels fall back to INFO with a
+   warning emitted *after* the handlers exist.
+3. **Filtered alerts were recorded as delivered.** A sink returns `None` for
+   an event below its min priority; `dispatch` only excluded `False`. The
+   interest gate and `_acknowledge_prior_pitch` read that history, so both
+   could cite a pitch the operator's phone never showed him. Fixed without
+   losing the audit trail the interest gate deliberately creates (demoted LOW
+   protective alerts still belong in history): additive `delivered` column
+   (NULL on existing rows = delivered), `dispatch_detailed()` returning
+   `(delivered, filtered)` with `dispatch()` unchanged, and
+   `alert_history(delivered_only=True)` at both consumers. A filtered event no
+   longer stamps the cooldown.
+4. **SIGTERM did not interrupt the sleeps.** `request_stop` only set an event,
+   and binding it to SIGTERM replaces the default disposition, so the process
+   no longer dies on SIGTERM; the backoff reaches 300s against systemd's
+   invisible 90s default. A phone-issued `systemctl restart` during an outage
+   meant 90s of apparent hang then SIGKILL, skipping the exit-stack unwind.
+   Both sleeps race the stop event; the unit states `TimeoutStopSec=45`.
+5. **`/status` reported wiring, not health.** `_layers` is built once in
+   `__init__` and never mutated, so pump.fun read "ON" while its WebSocket had
+   been dead for hours — `PumpPortalClient.connected` existed and nothing read
+   it. Added a `health` block (connected state + when an alert last reached an
+   external sink) rendered as "ON but DISCONNECTED" / "last alert delivered".
+6. **The mind-layer metrics walk was ~84,000 queries on the event loop.**
+   `get_learning_metrics` walked `resolved_records()` then issued `coin_id()` +
+   `get_prediction()` per coin — three queries each plus a full snapshot-history
+   load it discarded, since it reads only the bucket and the payload. Run
+   synchronously by `/mind` and the veto gate every 30 min. Replaced with one
+   JOIN (`LearningStore.graded_predictions`). Measured on 3,000 coins x 12
+   snapshots: **0.437s -> 0.018s, 25x, byte-identical rows**, pinned by an
+   equivalence test. Deliberately NOT limited — this accuracy is what earns the
+   p(rug) veto its authority, and truncating it would move that operating point.
+7. **A slow `/check` blocked an emergency `/dump`.** `_poll_once` awaited each
+   handler inline and `_poll_forever` only re-polls after it returns, so a
+   multi-minute `/check` meant a following `/dump` was not even *downloaded*
+   from Telegram. Handlers now run as supervised tasks, capped at 8 in flight
+   (past which dispatch runs inline as backpressure), with a `_trade_lock` at
+   the `_do_buy`/`_do_dump` chokepoint so money-moving commands keep their old
+   strict serialization. Shutdown grants a 5s grace period before cancelling.
+
+### Security findings closed
+
+- **Telegram authorization was chat-scoped only**, and `.env.example` tells the
+  operator to "add it to your group/channel" — every group member inherited
+  `/buy` and `/dump`. Added optional
+  `MEMEINTEL_TELEGRAM_COMMANDS_ALLOWED_USER_IDS`; empty preserves the old
+  behaviour (correct for a private chat, where chat id IS user id). Startup
+  warns when the chat id is negative and no allow-list is set.
+- **`deploy/setup.sh` left `.env` world-readable** (0644 via `cp` under umask
+  022) holding the trading wallet private key. Now `chmod 600` on every run.
+- **API keys were passed as `$1`** to the enable-* scripts, landing in
+  `~/.bash_history` and `/proc/<pid>/cmdline`. They now prompt with `read -rs`.
+- **`AlertEvent.render()` interpolated the token symbol raw** into stdout ->
+  journald; a symbol is attacker-chosen on-chain metadata, so ANSI escapes and
+  newlines could rewrite the terminal and forge log lines. `_sanitize_identity`
+  moved into `notification_engine` (sinks imports it, not the reverse).
+- **An unreadable wallet balance read as 0 SOL.**
+  `get_sol_balance_lamports` returned a hard `0` when the RPC result was
+  missing, so a funded wallet was told "Refused: wallet holds 0.0000 SOL" and
+  `get_spendable_balance_sol` returned `0.0` instead of the `None` its own
+  docstring promises. Now raises `CollectorError`; a genuinely empty wallet
+  still reads 0.
+- **`run()`'s cycle history grew forever** — one `CycleStats` per cycle, each
+  holding every delivered `AlertEvent`, inside a loop the daemon never exits.
+  ~1,900 entries/day against `MemoryMax=880M`. Now a bounded deque.
+- **`/dev` defaulted to chain solana**, reporting "never watched" for EVM coins
+  the bot had analysed. It now infers the chain from the address format.
+- **Two more Rule 8 holes in the outcome recorder.** Non-finite liquidity was a
+  confirmed drain (`nan >= floor` is False -> `survived=False` -> permanent RUG
+  + deployer blacklist) — the same NaN hole closed for `change` in `36b16ba`
+  but missed for `liquidity`. And an unsettled row could not record a confirmed
+  drain, leaving the audit row and the mind layer disagreeing about one event.
+  The first attempt at the second fix was wrong and an existing test caught it
+  (it let a SETTLED window be overwritten); the guard is now scoped to
+  unsettled rows only.
+
+Suite: **1020 passing**.
+
+### Outstanding — these need an operator decision (they change what the bot LEARNS)
+
+Verified as real, deliberately NOT fixed without consent:
+
+- **Analog index labels use the FIRST resolved horizon.** `_on_resolved` fires
+  when a coin first resolves — usually the 1h window — and
+  `_refresh_final_bucket` returns RUG-override else the LONGEST horizon. So a
+  coin that was FLAT at 1h and PUMP at 720h carries a FLAT fingerprint in the
+  analog memory forever (unless it later rugs), while `_rebuild`,
+  `compute_metrics` and `veto_gate` all use the 720h `final_bucket`. Partially
+  self-healing: a FULL rebuild re-labels the index; a warm-start does not.
+- **Training fingerprints see the post-prediction trajectory.** `_on_resolved`
+  and `_rebuild` extract from `snapshots_for(coin_id)` with no limit, including
+  snapshots captured after the label horizon. At serve time only the
+  pre-decision trajectory exists. Same family as the Fix-1 train/serve skew.
+- **The rug engine cannot abstain** — "no evidence" publishes as P(rug)=0.0.
+  Fixing this in isolation was tried (`781d009`) and REVERTED (`83c6eff`)
+  because abstention shrinks the rug source's accuracy sample and roughly
+  doubles its blend weight, moving the ARMED veto's operating point unannounced.
+  Any retry must handle the weight shift in the same change.
+- **The interest gate now includes `momentum`** (`21d5467`, built to the
+  operator's "tell me when a coin you sent me rugs" rule). This codebase calls
+  momentum "the largest alert category by far (thousands/day)", so one delivered
+  momentum alert grants a coin permanent interest and un-gates every protective
+  alert on it. That is the operator's stated preference vs. re-warn spam — his
+  call, not a defect to silently revert.
+- **A re-opened window can flip a RUG label, but the deployer blacklist it
+  created is permanent** (`mark_deployer_counted` is one-way).
+- **Live-fetched outcomes have no staleness bound**: the snapshot path rejects
+  measurements outside the window tolerance, the live path records whatever the
+  price is at cron time.
+- **The backtest cron never reloads the analog index mid-run**, then persists
+  its boot-time copy over any rebuild the monitor performed.
+- **Unmeasurable windows are re-measured on every cron run forever** — a
+  permanently corrupt baseline price can never produce a return, so it costs a
+  live API call four times a day indefinitely (Rule 11).
+
+### Could not verify in this environment
+
+- **HDBSCAN may hold the GIL through `asyncio.to_thread`.** The retrain is
+  already dispatched off the loop with that exact intent; the claim is that
+  hdbscan's Prim's/KD-tree path never releases the GIL, so the loop freezes
+  anyway. `hdbscan` is not installed in the review sandbox — needs measuring on
+  the droplet before acting.
+- **`RotatingFileHandler` on a shared log file.** The cron jobs redirect stdout
+  to separate files, but `setup_logging` still installs a rotating handler on
+  `logs/meme_intelligence.log` in every CLI process, which the daemon also
+  holds open. Rotation from a cron process could rename the daemon's file. Low
+  impact (some lines land in a rotated-away file); not worth a risky change
+  without evidence it is happening.
