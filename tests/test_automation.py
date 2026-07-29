@@ -646,11 +646,20 @@ async def test_zero_market_cap_coin_is_never_sent():
 
 async def test_missing_liquidity_or_market_cap_is_never_sent():
     """Missing (None) liquidity or market cap counts as untradeable, never as a
-    green light (Rule 8) — even with the comfort floors off."""
+    green light (Rule 8) — even with the comfort floors off.
+
+    2026-07-29: the market-cap half of this test used to pass ``market_cap=None``
+    alone, which left ``make_pair``'s default ``fdv=420_000`` in place — so it
+    asserted that a coin with a KNOWN valuation was untradeable, not that an
+    unknown one was. That fixture is what let the GeckoTerminal outage (mcap
+    always null, fdv always present) hide behind a green suite. The intent
+    stated above is unchanged and now actually exercised: valuation absent from
+    BOTH fields still blocks.
+    """
     no_liq = await pipeline_result(pair=make_pair(liquidity_usd=None))
     assert not ({e.alert_type for e in make_rules().evaluate(no_liq)} & _BUY_SIDE_ALERT_TYPES)
-    no_mcap = await pipeline_result(pair=make_pair(market_cap=None))
-    assert not ({e.alert_type for e in make_rules().evaluate(no_mcap)} & _BUY_SIDE_ALERT_TYPES)
+    no_value = await pipeline_result(pair=make_pair(market_cap=None, fdv=None))
+    assert not ({e.alert_type for e in make_rules().evaluate(no_value)} & _BUY_SIDE_ALERT_TYPES)
 
 
 async def test_thin_but_real_coin_still_sends_with_a_note():
@@ -873,3 +882,75 @@ def test_momentum_security_floor_validated():
     assert AlertThresholds().momentum_min_security_score == 0.0
     with pytest.raises(ConfigurationError, match="momentum_min_security_score"):
         AlertThresholds(momentum_min_security_score=101.0)
+
+
+# ---- GeckoTerminal market cap regression (bug hunt, 2026-07-29) ----
+#
+# GeckoTerminal's new_pools feed — the main discovery path — returns
+# `market_cap_usd: null` for EVERY pool while always populating `fdv_usd`
+# (verified live 2026-07-29: 0/20 vs 20/20). `_untradeable` read only
+# `market_cap`, so every discovery-path candidate looked valueless and had all
+# of its buy-side alerts stripped at notification_engine.py:330. Telegram went
+# quiet for hours at a time while the cycle log still read "N analyzed".
+#
+# The whole controller/automation suite passed throughout, because every
+# fixture here hardcodes market_cap=400_000.0. These tests pin the real
+# provider shape instead.
+
+
+async def test_gecko_shaped_pair_without_market_cap_still_alerts():
+    """The regression that silenced Telegram: mcap None + fdv set must NOT be
+    treated as untradeable, because FDV is a real measured valuation."""
+    result = await pipeline_result(
+        pair=make_pair(market_cap=None, fdv=420_000.0))
+    types = {e.alert_type for e in make_rules().evaluate(result)}
+    assert types & _BUY_SIDE_ALERT_TYPES, (
+        "a GeckoTerminal-shaped pair (no market_cap, fdv present) must still "
+        "produce buy-side alerts")
+
+
+async def test_pair_with_neither_market_cap_nor_fdv_stays_untradeable():
+    """Rule 8 is preserved: genuinely absent valuation is still a hard block.
+    The fix adds a fallback to a real value, it does not invent one."""
+    result = await pipeline_result(pair=make_pair(market_cap=None, fdv=None))
+    types = {e.alert_type for e in make_rules().evaluate(result)}
+    assert not (types & _BUY_SIDE_ALERT_TYPES)
+
+
+async def test_fdv_fallback_respects_the_oversized_ceiling():
+    """A coin that has already grown past the ceiling must stay suppressed
+    when only FDV reports its size — otherwise the fallback would open a hole
+    in the ceiling it was meant to leave untouched."""
+    rules = AutomationRules(
+        AlertThresholds(opportunity_max_market_cap_usd=500_000.0),
+        AlertEngineSettings(), now_func=lambda: NOW)
+    result = await pipeline_result(
+        pair=make_pair(market_cap=None, fdv=5_000_000.0))
+    types = {e.alert_type for e in rules.evaluate(result)}
+    assert not (types & _BUY_SIDE_ALERT_TYPES)
+
+
+async def test_reported_market_cap_still_wins_over_fdv():
+    """FDV is only a fallback: a reported circulating cap keeps priority, so
+    the ceiling still measures what it always measured (Rule 18)."""
+    rules = AutomationRules(
+        AlertThresholds(opportunity_max_market_cap_usd=500_000.0),
+        AlertEngineSettings(), now_func=lambda: NOW)
+    # mcap under the ceiling, fdv way above it: the reported cap must decide.
+    result = await pipeline_result(
+        pair=make_pair(market_cap=400_000.0, fdv=9_000_000.0))
+    types = {e.alert_type for e in rules.evaluate(result)}
+    assert types & _BUY_SIDE_ALERT_TYPES
+
+
+async def test_checklist_names_fdv_when_that_is_the_source():
+    """The operator is never shown a figure whose provenance is hidden."""
+    rules = AutomationRules(
+        AlertThresholds(opportunity_min_market_cap_usd=10_000.0),
+        AlertEngineSettings(), now_func=lambda: NOW)
+    from_fdv = rules._market_cap_check(
+        await pipeline_result(pair=make_pair(market_cap=None, fdv=420_000.0)))
+    assert "FDV" in from_fdv.detail
+    reported = rules._market_cap_check(
+        await pipeline_result(pair=make_pair(market_cap=400_000.0)))
+    assert "FDV" not in reported.detail
