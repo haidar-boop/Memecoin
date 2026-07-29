@@ -18,7 +18,7 @@ from meme_intelligence.analytics.backtesting import (
 from meme_intelligence.analyzers.scoring_engine import MasterAssessment
 from meme_intelligence.config.settings import BacktestSettings
 from meme_intelligence.core.enums import Classification, ConfidenceLevel
-from meme_intelligence.core.errors import ConfigurationError
+from meme_intelligence.core.errors import AllProvidersFailedError, ConfigurationError
 from meme_intelligence.core.models import CategoryScores, DexPair, TokenIdentity
 from meme_intelligence.database.storage import Storage
 
@@ -93,8 +93,21 @@ async def test_windows_never_measured_early_and_never_twice(tmp_path):
 
 
 class DeadTokenService:
-    async def get_best_pair(self, address, chain=None):
-        return None  # no tradable pair left
+    """A successful lookup that finds no tradable pair: the token really died."""
+
+    async def get_token_pairs(self, address, chain=None):
+        return []
+
+
+class TotalOutageService:
+    """Every provider down — a DNS blip on the droplet fails DexScreener and
+    GeckoTerminal together. This is an absence of data, NOT a death."""
+
+    async def get_token_pairs(self, address, chain=None):
+        raise AllProvidersFailedError("get_token_pairs", {
+            "dexscreener": ConnectionResetError("connection reset by peer"),
+            "geckoterminal": OSError("Temporary failure in name resolution"),
+        })
 
 
 async def test_live_fetch_records_token_death(tmp_path):
@@ -110,6 +123,74 @@ async def test_live_fetch_records_token_death(tmp_path):
         assert outcomes[24.0]["survived"] == 0
         assert outcomes[24.0]["price_change_percent"] == pytest.approx(-100.0)
         assert outcomes[24.0]["source"] == "live_fetch"
+
+
+async def test_total_provider_outage_is_never_recorded_as_death(tmp_path):
+    """Bug hunt 2026-07-29 (verified by execution): ``get_best_pair`` returns
+    ``None`` both when no provider knows a token AND when every provider
+    failed, so a DNS blip during the 4x-daily backtest cron fabricated a
+    measurement of price $0 / liquidity $0 for every prediction whose window
+    was due. That became -100%, ``survived=False``, an ``OutcomeBucket.RUG``
+    label and a PERMANENT deployer blacklisting — for healthy coins, written
+    into the same memory the ARMED p(rug) veto draws its authority from.
+
+    An outage must record NOTHING (Rule 8), leaving the window open for a
+    later good reading."""
+    with make_storage(tmp_path) as storage:
+        storage.record_snapshot(
+            master(9, 85.0, Classification.STRONG_CANDIDATE, T0),
+            source="test", pair=pair(9, 1.0), regime="bull")
+        recorded = await refresh_outcomes(storage, TotalOutageService(),
+                                          settings=SETTINGS, now_func=lambda: NOW)
+        assert recorded == 0, "an outage must not manufacture an outcome"
+        outcomes = storage.outcomes_for_snapshot(storage.predictions()[0]["snapshot_id"])
+        assert outcomes == {}
+
+
+async def test_outage_never_reaches_the_mind_layer(tmp_path):
+    """The poisoning path end to end: nothing may be taught during an outage."""
+    class RecordingLearning:
+        def __init__(self):
+            self.calls = []
+
+        def resolve_outcome(self, address, chain, horizon, ret, *, is_rug):
+            self.calls.append((address, horizon, ret, is_rug))
+
+    with make_storage(tmp_path) as storage:
+        storage.record_snapshot(
+            master(9, 85.0, Classification.STRONG_CANDIDATE, T0),
+            source="test", pair=pair(9, 1.0), regime="bull")
+        learning = RecordingLearning()
+        await refresh_outcomes(storage, TotalOutageService(), settings=SETTINGS,
+                               now_func=lambda: NOW, learning_service=learning)
+        assert learning.calls == []
+
+        # Control: a token that genuinely died still teaches the rug label,
+        # so this guard cannot be mistaken for suppressing real rugs.
+        await refresh_outcomes(storage, DeadTokenService(), settings=SETTINGS,
+                               now_func=lambda: NOW, learning_service=learning)
+        assert learning.calls, "a real death must still resolve as a rug"
+        assert all(is_rug for *_, is_rug in learning.calls)
+
+
+async def test_outage_window_reopens_for_a_later_good_reading(tmp_path):
+    """The window stays open: once providers recover, the real value lands."""
+    with make_storage(tmp_path) as storage:
+        storage.record_snapshot(
+            master(9, 85.0, Classification.STRONG_CANDIDATE, T0),
+            source="test", pair=pair(9, 1.0), regime="bull")
+        assert await refresh_outcomes(storage, TotalOutageService(),
+                                      settings=SETTINGS, now_func=lambda: NOW) == 0
+
+        class RecoveredService:
+            async def get_token_pairs(self, address, chain=None):
+                return [pair(9, 2.50)]
+
+        recorded = await refresh_outcomes(storage, RecoveredService(),
+                                          settings=SETTINGS, now_func=lambda: NOW)
+        assert recorded == 2
+        outcomes = storage.outcomes_for_snapshot(storage.predictions()[0]["snapshot_id"])
+        assert outcomes[24.0]["price_change_percent"] == pytest.approx(150.0)
 
 
 # ---- Grading & Section 4 metrics ----

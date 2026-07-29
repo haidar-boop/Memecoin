@@ -30,7 +30,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 from meme_intelligence.config.settings import BacktestSettings, ScoringWeights
-from meme_intelligence.core.errors import CollectorError
+from meme_intelligence.core.errors import AllProvidersFailedError, CollectorError
 from meme_intelligence.core.logging_setup import get_logger
 from meme_intelligence.core.models import TokenIdentity
 
@@ -207,15 +207,43 @@ def _nearest_snapshot(series, prediction_id, target, window, settings):
 
 
 async def _live_measurement(market_service, prediction, now):
+    """Measure a token live, or return ``None`` when nobody could look.
+
+    This deliberately calls ``get_token_pairs`` rather than ``get_best_pair``.
+    ``get_best_pair`` collapses two opposite meanings into ``None``: it returns
+    ``None`` both when no provider *knows* the token and when every provider
+    *failed* (it swallows ``AllProvidersFailedError`` internally,
+    market_service.py:77-81). Reading that ``None`` as "the token is dead" made
+    a 30-second DNS blip on the droplet — which fails DexScreener and
+    GeckoTerminal together — fabricate a measurement of price $0 / liquidity $0
+    for every prediction whose window came due during the outage. Downstream
+    that became a -100% return, ``survived=False``, an ``OutcomeBucket.RUG``
+    label, and a PERMANENT deployer blacklisting for coins that were perfectly
+    healthy (verified by execution; bug-hunt finding, 2026-07-29). The backtest
+    cron runs four times a day, so one bad minute mass-poisoned the very
+    training set the ARMED p(rug) veto derives its authority from.
+
+    A provider outage is an absence of data, never evidence of death (Rule 8).
+    An empty-but-successful lookup keeps its established meaning: the token no
+    longer has a tradable pair, and that IS the outcome.
+    """
     token = TokenIdentity(chain=prediction["chain"], address=prediction["address"])
     try:
-        pair = await market_service.get_best_pair(token.address, chain=token.chain)
+        pairs = await market_service.get_token_pairs(token.address, chain=token.chain)
+    except AllProvidersFailedError as exc:
+        # Every provider down: we learned NOTHING about this token.
+        _logger.warning(
+            "live outcome fetch for %s: every provider failed (%s) — recording "
+            "no measurement rather than a fabricated death", token.address, exc)
+        return None
     except CollectorError as exc:
         _logger.info("live outcome fetch failed for %s: %s", token.address, exc)
         return None
-    if pair is None:
-        # No tradable pair anymore: the token is dead — that IS the outcome.
+    if not pairs:
+        # A successful lookup that found no tradable pair: the token is dead —
+        # that IS the outcome.
         return 0.0, 0.0, now
+    pair = max(pairs, key=lambda p: p.liquidity_usd or 0.0)
     return pair.price_usd, pair.liquidity_usd, now
 
 
