@@ -2194,6 +2194,43 @@ findings are recorded below as not-yet-verified leads.
 
 Suite: **979 passing** (971 + 8).
 
+### Review of the two fixes (6 agents, 3 confirmed / 9 refuted)
+
+3. **HIGH — one provider's silence was recorded as a token death.** Predates
+   both fixes and is unchanged by them, but it defeated the point of fix 2.
+   `ProviderPool.call_with_provider` returns the first result that does not
+   RAISE, and an empty list does not raise. DexScreener answers HTTP 200
+   `{"pairs": null}` for an unindexed token (verified live), parsed to `[]`
+   at `market_data.py:243` — so GeckoTerminal is never asked. For a coin
+   discovered THROUGH GeckoTerminal, "DexScreener has not indexed it" was
+   indistinguishable from "no market left", producing a fabricated -100% /
+   RUG and a permanent deployer blacklist that `record_outcome`'s
+   NULL-only upsert could never correct. New
+   `MarketDataService.get_token_pairs_confirmed` sweeps the remaining
+   providers on an empty answer, reports `[]` only when every provider
+   answered empty, and raises when emptiness is unconfirmed. Sweep runs only
+   on the empty path (Rule 11). **The rug decision rule is untouched** — only
+   the evidence standard for concluding death changed.
+4. **MEDIUM — FDV could score a green PASS against the market-cap floor.**
+   FDV >= market cap, so below the floor it is conclusive (warn is sound) but
+   above it proves nothing: locked/vesting supply gives FDV $420k on a true
+   $21k cap, and a pass counts toward the "passed X/Y" header. That case now
+   renders `unknown` — shown, not scored. `_untradeable` and the ceiling stay
+   on `effective_market_cap`.
+5. **MEDIUM — the mutating branch was the quiet one.** The outage branch
+   (records nothing) logged WARNING while the death branch (permanently
+   blacklists a deployer) logged nothing, making a run that blacklisted N
+   wallets byte-identical in the log to a healthy one. Now WARNING (Rule 13).
+
+Refuted on inspection: the challenge to the edited fixture in
+`test_missing_liquidity_or_market_cap_is_never_sent`; the claim that an
+attacker-chosen FDV buys an alert the old code would have denied; that the
+FDV fallback starves the paid-credit budget or arms uncapped AI verification;
+that `_oversized` contradicts its docstring; and that `effective_market_cap`
+should also fall back on `0`/NaN.
+
+Suite: **986 passing** (979 + 7).
+
 ### Open leads from the same hunt (NOT yet verified — do not treat as fact)
 
 The hunt's spend budget ran out before 4 of its 5 adversarial verifiers
