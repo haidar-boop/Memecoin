@@ -265,8 +265,10 @@ class AutomationRules:
             reasons.append(f"risk_veto({veto})")
         if self._untradeable(result):
             reasons.append(
-                f"untradeable(liquidity={_fmt_usd(pair.liquidity_usd)}, "
-                f"market_cap={_fmt_usd(pair.effective_market_cap)})")
+                f"untradeable(liquidity={_fmt_usd(pair.liquidity_usd)} "
+                f"vs floor {_fmt_usd(self._t.hard_min_liquidity_usd)}, "
+                f"market_cap={_fmt_usd(pair.effective_market_cap)} "
+                f"vs floor {_fmt_usd(self._t.hard_min_market_cap_usd)})")
         if self._oversized(result):
             reasons.append(
                 f"oversized(liquidity={_fmt_usd(pair.liquidity_usd)} "
@@ -439,6 +441,14 @@ class AutomationRules:
             return True
         mcap = result.pair.effective_market_cap
         if mcap is None or not math.isfinite(mcap) or mcap <= 0.0:
+            return True
+        # HARD floors (0.0 = off). Distinct from the comfort floors, which only
+        # annotate: a coin below these is micro-junk rather than merely thin,
+        # and never reaches the phone as a buy signal. Protective warnings are
+        # unaffected — this gate only strips _BUY_SIDE_ALERT_TYPES.
+        if 0.0 < self._t.hard_min_liquidity_usd > liq:
+            return True
+        if 0.0 < self._t.hard_min_market_cap_usd > mcap:
             return True
         return False
 

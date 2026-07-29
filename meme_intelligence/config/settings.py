@@ -191,16 +191,31 @@ class AlertThresholds:
     copycat_veto_enabled: bool = True
     copycat_liquidity_ratio: float = 10.0
     copycat_min_liquidity_usd: float = 100000.0
-    # Operator "don't send me untradeable coins" floor for BUY-SIDE alerts
-    # (opportunity / momentum / smart-money accumulation). Below these, the
-    # pool is too thin/small to be a real tradeable opportunity — the buy
-    # signal is a pump artifact, not information — so the alert is suppressed.
-    # Protective warnings (death/risk/whale-exit/insider) still fire: a dying
-    # coin's holder needs to know. Unknown liquidity/mcap counts as below a SET
-    # floor (a buy you cannot size is not phone-worthy, Rule 8). Both default
-    # 0.0 = OFF, so existing behavior is unchanged until set (Rule 18).
+    # COMFORT floors for BUY-SIDE alerts — these ANNOTATE, they do not
+    # suppress. A thin-but-real pool still reaches the phone carrying a ⚠
+    # checklist line naming the miss, per the operator's 2026-07-12 rule: "if
+    # just one thing misses the checklist, send it through and let me know."
+    #
+    # (This comment previously claimed these SUPPRESS the alert. That was
+    # already untrue when the 2026-07-12 annotate-only rule landed and was
+    # never corrected, so an operator setting a floor here got no blocking at
+    # all — corrected 2026-07-29. To actually block, use the hard floors
+    # below.)
     opportunity_min_liquidity_usd: float = 0.0
     opportunity_min_market_cap_usd: float = 0.0
+    # HARD floors for BUY-SIDE alerts (opportunity / momentum / smart-money):
+    # below these the coin is not a tradeable opportunity at all and the alert
+    # is SUPPRESSED, exactly like a $0/unknown pool. Distinct from the comfort
+    # floors above so the "send it and tell me" rule keeps applying to coins
+    # that are merely thin, while genuine micro-junk never reaches the phone
+    # (operator: "it's sending me some bullshit coins, make it stricter",
+    # 2026-07-29).
+    #
+    # Protective warnings (death / risk / whale-exit / insider) are never
+    # floored: a dying coin's holder still needs to know. Both default 0.0 =
+    # OFF, so nothing changes until the operator sets them (Rule 18).
+    hard_min_liquidity_usd: float = 0.0
+    hard_min_market_cap_usd: float = 0.0
     # Operator "don't send me coins that already ran" CEILING for BUY-SIDE
     # alerts. ABOVE these, the coin is no longer an early opportunity — the move
     # the operator wants to catch already happened (a multi-million-dollar pool
@@ -275,6 +290,7 @@ class AlertThresholds:
                     f"alert threshold '{name}' must be positive, got {value}")
         for name in ("opportunity_min_liquidity_usd", "opportunity_min_market_cap_usd",
                      "opportunity_max_liquidity_usd", "opportunity_max_market_cap_usd",
+                     "hard_min_liquidity_usd", "hard_min_market_cap_usd",
                      "opportunity_max_age_hours", "checklist_new_launch_minutes"):
             value = getattr(self, name)
             if not math.isfinite(value) or value < 0:
@@ -283,7 +299,9 @@ class AlertThresholds:
         # A ceiling must sit above the comfort floor when both are set (>0),
         # else the "too big" cut would swallow the "too thin" note.
         for floor, cap in (("opportunity_min_liquidity_usd", "opportunity_max_liquidity_usd"),
-                           ("opportunity_min_market_cap_usd", "opportunity_max_market_cap_usd")):
+                           ("opportunity_min_market_cap_usd", "opportunity_max_market_cap_usd"),
+                           ("hard_min_liquidity_usd", "opportunity_max_liquidity_usd"),
+                           ("hard_min_market_cap_usd", "opportunity_max_market_cap_usd")):
             lo, hi = getattr(self, floor), getattr(self, cap)
             if hi > 0.0 and lo > 0.0 and hi < lo:
                 raise ConfigurationError(

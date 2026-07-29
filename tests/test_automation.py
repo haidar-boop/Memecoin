@@ -1031,3 +1031,87 @@ async def test_a_sent_alert_logs_no_suppression(caplog):
         events = make_rules().evaluate(await pipeline_result())
     assert {e.alert_type for e in events} & _BUY_SIDE_ALERT_TYPES
     assert "suppressed" not in caplog.text
+
+
+# ---- Hard floors: micro-junk never reaches the phone (operator 2026-07-29) ----
+#
+# The comfort floors ANNOTATE (2026-07-12: "if just one thing misses the
+# checklist, send it through and let me know"). These BLOCK. Both exist so a
+# merely-thin coin still gets through with a note while genuine micro-junk
+# does not — the operator's "it's sending me bullshit coins" complaint after
+# the GeckoTerminal fix reopened the discovery path.
+
+
+def strict_rules(**overrides):
+    return AutomationRules(AlertThresholds(**overrides), AlertEngineSettings(),
+                           now_func=lambda: NOW)
+
+
+async def test_hard_liquidity_floor_suppresses_buy_side():
+    rules = strict_rules(hard_min_liquidity_usd=12_000.0)
+    result = await pipeline_result(pair=make_pair(liquidity_usd=1_500.0))
+    types = {e.alert_type for e in rules.evaluate(result)}
+    assert not (types & _BUY_SIDE_ALERT_TYPES)
+
+
+async def test_hard_market_cap_floor_suppresses_buy_side():
+    rules = strict_rules(hard_min_market_cap_usd=20_000.0)
+    result = await pipeline_result(
+        pair=make_pair(market_cap=None, fdv=6_500.0))
+    types = {e.alert_type for e in rules.evaluate(result)}
+    assert not (types & _BUY_SIDE_ALERT_TYPES)
+
+
+async def test_a_coin_above_both_hard_floors_still_alerts():
+    rules = strict_rules(hard_min_liquidity_usd=12_000.0,
+                         hard_min_market_cap_usd=20_000.0)
+    result = await pipeline_result(
+        pair=make_pair(liquidity_usd=90_000.0, market_cap=400_000.0))
+    types = {e.alert_type for e in rules.evaluate(result)}
+    assert types & _BUY_SIDE_ALERT_TYPES
+
+
+async def test_hard_floors_never_silence_a_protective_warning():
+    """A dying micro-cap's holder still needs to know — that is the whole
+    point of keeping protective alerts unfloored."""
+    rules = strict_rules(hard_min_liquidity_usd=50_000.0)
+    result = await pipeline_result(honeypot=True,
+                                   pair=make_pair(liquidity_usd=800.0))
+    types = {e.alert_type for e in rules.evaluate(result)}
+    assert types & _PROTECTIVE_ALERT_TYPES
+
+
+async def test_the_comfort_floor_still_only_annotates():
+    """Rule 18: the 2026-07-12 'send it and tell me' behaviour is unchanged by
+    the new hard floor existing."""
+    rules = strict_rules(opportunity_min_liquidity_usd=10_000.0)
+    result = await pipeline_result(pair=make_pair(liquidity_usd=4_000.0,
+                                                  market_cap=60_000.0))
+    buy_side = [e for e in rules.evaluate(result)
+                if e.alert_type in _BUY_SIDE_ALERT_TYPES]
+    assert buy_side
+    assert any("comfort floor" in line for line in buy_side[0].checklist)
+
+
+async def test_hard_floors_are_off_by_default():
+    assert AlertThresholds().hard_min_liquidity_usd == 0.0
+    assert AlertThresholds().hard_min_market_cap_usd == 0.0
+    result = await pipeline_result(pair=make_pair(liquidity_usd=1_500.0,
+                                                  market_cap=6_500.0))
+    types = {e.alert_type for e in make_rules().evaluate(result)}
+    assert types & _BUY_SIDE_ALERT_TYPES     # unchanged until the operator sets them
+
+
+async def test_a_hard_floor_above_the_ceiling_is_rejected():
+    with pytest.raises(ConfigurationError, match="must be >="):
+        AlertThresholds(hard_min_liquidity_usd=100_000.0,
+                        opportunity_max_liquidity_usd=50_000.0)
+
+
+async def test_the_suppression_log_names_the_floor_that_blocked_it(caplog):
+    import logging
+    rules = strict_rules(hard_min_liquidity_usd=12_000.0)
+    result = await pipeline_result(pair=make_pair(liquidity_usd=1_500.0))
+    with caplog.at_level(logging.INFO, logger="meme_intelligence.alerts.rules"):
+        rules.evaluate(result)
+    assert "vs floor $12,000" in caplog.text
