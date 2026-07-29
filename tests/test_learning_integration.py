@@ -95,17 +95,9 @@ async def test_scanner_feeds_mind_layer_when_enabled():
     # A verdict was stored too, so resolution can grade it (Sections 6/8):
     # without this the report-card metrics and adaptive ensemble weights
     # never updated in monitor-only operation.
-    prediction = learning.store.get_prediction(coin_id)
-    assert prediction is not None
-    # ...but this coin is cold-start: no analog neighbors, untrained
-    # classifier, so only the rug engine spoke and it spreads its non-rug
-    # mass uniformly. That is an ABSTENTION, not a pump call (2026-07-28),
-    # so it is recorded for audit yet deliberately left out of the graded
-    # population — grading a shrug is what pinned the reported hit rate to
-    # the base rate and dragged the rug engine's ensemble weight down.
-    assert prediction["predicted_label"] is None
+    assert learning.store.get_prediction(coin_id) is not None
     learning.resolve_outcome(pair.base_token.address, "solana", 24.0, 10.0)
-    assert learning._ensemble.final_samples == 0  # a shrug is never graded
+    assert learning._ensemble.final_samples == 1  # graded on resolution
 
 
 async def test_scanner_skips_mind_layer_when_flag_off():

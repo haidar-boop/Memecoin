@@ -71,28 +71,9 @@ def _resolution_time(record: CoinRecord) -> datetime:
 
 
 def _argmax_label(distribution: dict[str, float] | None) -> str | None:
-    """The distribution's winning label, or ``None`` when there is no winner.
-
-    A TIE is an abstention, not a prediction. ``max()`` returns the first
-    maximal key, and every distribution here is built pump-first — so a
-    source with nothing to say directionally silently "predicted pump".
-    That mattered twice (2026-07-28): the rug engine spreads its non-rug
-    mass UNIFORMLY over pump/flat/dump by design (it has an opinion about
-    rug vs not-rug only, ensemble.rug_score_to_distribution), so on every
-    low-rug coin it was recorded as calling PUMP — flooding the graded
-    directional population with fake calls that pin the reported hit rate
-    near the pump base rate, AND getting itself graded wrong on every
-    non-pump outcome, which unfairly depressed its weight in the adaptive
-    ensemble. ``record_outcome`` already skips a ``None`` source ("not
-    counted as wrong"); it simply never received one.
-    """
     if not distribution:
         return None
-    best = max(distribution.values())
-    winners = [label for label, value in distribution.items() if value == best]
-    if len(winners) != 1:
-        return None
-    return winners[0]
+    return max(distribution, key=distribution.get)
 
 
 class LearningService:
@@ -439,25 +420,6 @@ class LearningService:
                                novelty_flagged, creator=creator)
         return verdict.to_dict()
 
-    def _graded_label(self, distribution: dict[str, float], result) -> str | None:
-        """The label this verdict is willing to be GRADED on, or ``None``.
-
-        Beyond the tie rule in :func:`_argmax_label`, a blended verdict whose
-        winning probability sits below ``min_ensemble_confidence`` is a
-        near-uniform shrug, not a call: recording it as a prediction would
-        put a coin the layer had no real opinion about into the hit-rate
-        denominator. Defaults to 0.0 (every non-tied verdict is graded), so
-        this is opt-in tightening the operator can raise once he has read
-        the report card (same doctrine as the veto's earned authority).
-        """
-        label = _argmax_label(distribution)
-        if label is None:
-            return None
-        floor = self._ls.min_ensemble_confidence
-        if floor > 0.0 and getattr(result, "confidence", 1.0) < floor:
-            return None
-        return label
-
     def _merge_stored_history(self, token_address: str, chain: str,
                               snaps: list[CoinSnapshot]) -> list[CoinSnapshot]:
         """The coin's stored trajectory plus ``snaps``, deduped by age.
@@ -529,7 +491,7 @@ class LearningService:
                 self._store.append_snapshot(coin_id, snap)
         payload = {
             "distribution": verdict.final_probabilities,
-            "predicted_label": self._graded_label(verdict.final_probabilities, result),
+            "predicted_label": _argmax_label(verdict.final_probabilities),
             "source_labels": {
                 SOURCE_ANALOG: _argmax_label(analog_dist),
                 SOURCE_LIGHTGBM: _argmax_label(model_dist),
@@ -794,10 +756,7 @@ class LearningService:
                 continue
             records.append(PredictionRecord(
                 predicted_distribution=prediction.get("distribution", {}),
-                # An abstention is stored as None; the metrics dataclass wants
-                # a str, and "" matches no bucket so it counts as neither a
-                # hit nor a rug call — exactly what an abstention should be.
-                predicted_label=prediction.get("predicted_label") or "",
+                predicted_label=prediction.get("predicted_label", ""),
                 actual_label=record.final_bucket.value,
                 archetype=prediction.get("archetype"),
                 novelty_flagged=prediction.get("novelty_flagged", False),

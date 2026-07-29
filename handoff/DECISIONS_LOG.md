@@ -2039,35 +2039,3 @@ insert-once graded prediction that feeds /mind and the ensemble weights is
 undisturbed. Only re-evaluations (veto on a re-checked coin, /check,
 watchlist rechecks) gain the richer input, which is exactly where the
 trajectory exists to be seen. Suite: **958 passing** (954 + 4).
-
-## 2026-07-28 — Fix 2: a tie is an abstention, not a "pump" call
-
-`_argmax_label` used `max(dist, key=dist.get)`, which returns the FIRST
-maximal key — and every distribution in the layer is built pump-first. So
-any source with no directional opinion was silently recorded as predicting
-PUMP. This bit twice:
-
-1. `rug_score_to_distribution` spreads non-rug mass UNIFORMLY over
-   pump/flat/dump by design (the engine knows rug vs not-rug only). On
-   every low-rug coin the rug engine was therefore graded as having called
-   PUMP — wrong on each non-pump outcome — which unfairly depressed its
-   weight in the accuracy-weighted ensemble.
-2. When the analog abstains and the classifier is cold (the whole cold-start
-   era, plus every sparse coin), the blend IS the rug engine, so the coin's
-   stored `predicted_label` was a fake PUMP. Those junk calls flood the
-   graded directional population, which is why the reported hit rate sits
-   pinned near the pump base rate (~0.13) regardless of real skill.
-
-Fix: `_argmax_label` returns None when the maximum is tied. `record_outcome`
-already documented and implemented the abstention path ("such sources are
-skipped, not counted as wrong") — it simply never received a None. Also
-wired the previously DEAD `min_ensemble_confidence` setting (defined and
-range-validated but referenced nowhere) as an opt-in floor: a blended
-verdict below it declines to be graded. Default stays 0.0, so the only
-behavior change shipped is the tie fix.
-
-Not cosmetic: the reported hit rate rises because junk leaves the
-denominator (metric hygiene), AND the rug engine's ensemble weight recovers
-over the rolling window, which changes future blended verdicts. Predictions
-are still stored for audit; only the graded label abstains. Suite: **965
-passing** (960 + 5).
