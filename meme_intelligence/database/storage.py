@@ -899,6 +899,16 @@ class Storage:
         reading must be able to fill the hole. Without this a single glitch
         during one cron run would permanently delete that window's evidence
         — including a real winner's (review finding, 2026-07-29).
+
+        An UNSETTLED row also accepts a reading that PROVES the pool drained
+        (``survived=0``) even when the return is still not computable. The
+        learning layer resolves a confirmed rug from exactly that reading, so
+        refusing it here left the audit row asserting nothing was observed
+        while the mind layer held a RUG label for the same event (bug-hunt
+        finding, 2026-07-29). A SETTLED window — one already holding a real
+        return — is still never overwritten: what happened at 24h is what
+        happened at 24h, and a later drain belongs to a later window
+        (Part 24 S14).
         """
         self._conn.execute(
             """INSERT INTO outcomes
@@ -913,7 +923,8 @@ class Storage:
                    survived = excluded.survived,
                    source = excluded.source
                WHERE outcomes.price_change_percent IS NULL
-                 AND excluded.price_change_percent IS NOT NULL""",
+                 AND (excluded.price_change_percent IS NOT NULL
+                      OR excluded.survived = 0)""",
             (snapshot_id, token_id, window_hours, target_at, measured_at,
              price_usd, price_change_percent, liquidity_usd,
              None if survived is None else int(survived), source),

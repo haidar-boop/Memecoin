@@ -585,3 +585,74 @@ async def test_one_providers_silence_is_not_a_token_death(tmp_path):
         # The real +150% move, not a fabricated -100% death.
         assert outcomes[24.0]["price_change_percent"] == pytest.approx(150.0)
         assert outcomes[24.0]["survived"] == 1
+
+
+async def test_non_finite_liquidity_is_unknown_not_a_confirmed_rug(tmp_path):
+    """`nan >= floor` is False, so a NaN liquidity reading produced
+    survived=False — which alone is enough to write a permanent RUG label and
+    blacklist the deployer. The same NaN hole was closed for `change` but
+    missed for `liquidity` (review finding, 2026-07-29)."""
+    class NanLiquidityService:
+        async def get_token_pairs_confirmed(self, address, chain=None):
+            return [pair(9, 2.0, liquidity=float("nan"))]
+
+    calls = []
+
+    class RecordingLearning:
+        def resolve_outcome(self, address, chain, horizon, ret, *, is_rug):
+            calls.append(is_rug)
+
+    with make_storage(tmp_path) as storage:
+        storage.record_snapshot(
+            master(9, 85.0, Classification.STRONG_CANDIDATE, T0),
+            source="test", pair=pair(9, 1.0), regime="bull")
+        await refresh_outcomes(storage, NanLiquidityService(), settings=SETTINGS,
+                               now_func=lambda: NOW, learning_service=RecordingLearning())
+        outcomes = storage.outcomes_for_snapshot(storage.predictions()[0]["snapshot_id"])
+        assert outcomes[24.0]["survived"] is None      # unknown, not "drained"
+        assert not any(calls), "a NaN liquidity must never resolve as a rug"
+
+
+async def test_an_unsettled_row_accepts_a_later_confirmed_drain(tmp_path):
+    """An UNMEASURABLE row (NULL return, e.g. the implausible-return guard
+    fired) must accept a later reading that proves the pool drained. Refusing
+    it left the audit row asserting nothing was observed while the mind layer
+    held a RUG label from that very reading (bug hunt, 2026-07-29)."""
+    with make_storage(tmp_path) as storage:
+        seed(storage, 1, Classification.STRONG_CANDIDATE, 1.00, 2.00)
+        prediction = storage.predictions()[0]
+        storage.record_outcome(
+            snapshot_id=prediction["snapshot_id"], token_id=prediction["token_id"],
+            window_hours=24.0, target_at=NOW.isoformat(), measured_at=NOW.isoformat(),
+            price_usd=None, price_change_percent=None, liquidity_usd=None,
+            survived=None, source="live_fetch")
+        assert storage.outcomes_for_snapshot(
+            prediction["snapshot_id"])[24.0]["survived"] is None
+
+        storage.record_outcome(
+            snapshot_id=prediction["snapshot_id"], token_id=prediction["token_id"],
+            window_hours=24.0, target_at=NOW.isoformat(), measured_at=NOW.isoformat(),
+            price_usd=None, price_change_percent=None, liquidity_usd=0.0,
+            survived=False, source="live_fetch")
+        assert storage.outcomes_for_snapshot(
+            prediction["snapshot_id"])[24.0]["survived"] == 0
+
+
+async def test_a_settled_window_is_not_overwritten_even_by_a_drain(tmp_path):
+    """Part 24 S14 stands: what happened at 24h is what happened at 24h, and a
+    later drain belongs to a later window — not to this row."""
+    with make_storage(tmp_path) as storage:
+        seed(storage, 1, Classification.STRONG_CANDIDATE, 1.00, 2.00)
+        await refresh_outcomes(storage, None, settings=SETTINGS, now_func=lambda: NOW)
+        prediction = storage.predictions()[0]
+        row = storage.outcomes_for_snapshot(prediction["snapshot_id"])[24.0]
+        assert row["price_change_percent"] == pytest.approx(100.0)
+
+        storage.record_outcome(
+            snapshot_id=prediction["snapshot_id"], token_id=prediction["token_id"],
+            window_hours=24.0, target_at=NOW.isoformat(), measured_at=NOW.isoformat(),
+            price_usd=0.0, price_change_percent=None, liquidity_usd=0.0,
+            survived=False, source="live_fetch")
+        after = storage.outcomes_for_snapshot(prediction["snapshot_id"])[24.0]
+        assert after["price_change_percent"] == pytest.approx(100.0)
+        assert after["survived"] == 1

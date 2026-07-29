@@ -117,8 +117,14 @@ async def refresh_outcomes(
             price, liquidity, measured_at = measurement
             change = (100.0 * (price - base_price) / base_price
                       if price is not None and base_price else None)
-            survived = (liquidity >= settings.survival_min_liquidity_usd
-                        if liquidity is not None else None)
+            # Non-finite liquidity is UNKNOWN, not drained. `nan >= floor` is
+            # False, so a NaN from a provider produced survived=False, which is
+            # sufficient on its own to write a permanent RUG label and blacklist
+            # the deployer — the same NaN hole that was closed for `change`
+            # above but missed for `liquidity` (review finding, 2026-07-29).
+            survived = None
+            if liquidity is not None and math.isfinite(liquidity):
+                survived = liquidity >= settings.survival_min_liquidity_usd
             # A return is only as trustworthy as the two prices behind it.
             # When the baseline (the token's FIRST recorded price) or the
             # later reading is a bad datum, the ratio explodes: live data
