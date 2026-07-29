@@ -1,0 +1,47 @@
+{
+ "balance_mutable_authority": {
+  "authority": [],
+  "status": "0"
+ },
+ "closable": {
+  "authority": [],
+  "status": "0"
+ },
+ "creators": [],
+ "default_account_state": "1",
+ "default_account_state_upgradable": {
+  "authority": [],
+  "status": "0"
+ },
+ "freezable": {
+  "authority": [],
+  "status": "0"
+ },
+ "metadata": {
+  "description": "",
+  "name": "Ponk",
+  "symbol": "PONK",
+  "uri": "https://metadata.j7tracker.io/metadata/ck9OahdDIR.json"
+ },
+ "metadata_mutable": {
+  "metadata_upgrade_authority": [],
+  "status": "0"
+ },
+ "mintable": {
+  "authority": [],
+  "status": "0"
+ },
+ "non_transferable": "0",
+ "total_supply": "1000000000",
+ "transfer_fee": {},
+ "transfer_fee_upgradable": {
+  "authority": [],
+  "status": "0"
+ },
+ "transfer_hook": [],
+ "transfer_hook_upgradable": {
+  "authority": [],
+  "status": "0"
+ },
+ "trusted_token": 0
+}
