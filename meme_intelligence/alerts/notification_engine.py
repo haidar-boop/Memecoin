@@ -113,6 +113,13 @@ _NO_INTEREST_NOTE = ("informational only: this token never reached the "
 _CHECK_ICON = {"pass": "✅", "warn": "⚠️", "note": "ℹ️", "unknown": "❔"}
 
 
+def _fmt_usd(value: float | None) -> str:
+    """Money for a LOG line: unknown stays visibly unknown, never $0."""
+    if value is None or not math.isfinite(value):
+        return "unknown"
+    return f"${value:,.0f}"
+
+
 @dataclass(frozen=True)
 class _SafetyCheck:
     """One checklist line. ``status`` is pass/warn/note/unknown; ``detail`` is
@@ -216,6 +223,41 @@ class AutomationRules:
         self._t = thresholds
         self._s = settings
         self._now = now_func
+        # Rule 13. Until 2026-07-29 this class had NO logger, so every
+        # buy-side alert it deleted vanished without a trace at any level:
+        # the journal printed "N candidates, N analyzed, 0 alerts" and the
+        # operator — who works from a phone — had no way to learn that alerts
+        # were being generated and then discarded, let alone by which gate.
+        # That is exactly what hid the GeckoTerminal market-cap blackout for
+        # days. Suppression is a decision; decisions get logged.
+        self._logger = get_logger("alerts.rules")
+
+    def _log_suppression(self, result: PipelineResult, suppressed: list[str],
+                         veto: str | None) -> None:
+        """Name every gate that fired and the value that tripped it."""
+        pair = result.pair
+        reasons: list[str] = []
+        if veto is not None:
+            reasons.append(f"risk_veto({veto})")
+        if self._untradeable(result):
+            reasons.append(
+                f"untradeable(liquidity={_fmt_usd(pair.liquidity_usd)}, "
+                f"market_cap={_fmt_usd(pair.effective_market_cap)})")
+        if self._oversized(result):
+            reasons.append(
+                f"oversized(liquidity={_fmt_usd(pair.liquidity_usd)} "
+                f"vs max {_fmt_usd(self._t.opportunity_max_liquidity_usd)}, "
+                f"market_cap={_fmt_usd(pair.effective_market_cap)} "
+                f"vs max {_fmt_usd(self._t.opportunity_max_market_cap_usd)})")
+        if self._too_old(result):
+            reasons.append(
+                f"too_old(created={pair.pair_created_at}, "
+                f"max {self._t.opportunity_max_age_hours}h)")
+        self._logger.info(
+            "suppressed %d buy-side alert(s) for %s: %s [%s]",
+            len(suppressed), result.pair.base_token.address,
+            ", ".join(reasons) or "unknown gate",
+            ", ".join(sorted(suppressed)))
 
     def evaluate(
         self,
@@ -327,10 +369,23 @@ class AutomationRules:
         if (deterministic_risk_veto is not None
                 or self._untradeable(result) or self._oversized(result)
                 or self._too_old(result)):
+            dropped = [e.alert_type for e in events
+                       if e.alert_type in _BUY_SIDE_ALERT_TYPES]
             events = [e for e in events if e.alert_type not in _BUY_SIDE_ALERT_TYPES]
+            if dropped:
+                self._log_suppression(result, dropped, deterministic_risk_veto)
         else:
             if self._score_declining(result, previous_score):
+                declining = [e.alert_type for e in events
+                             if e.alert_type in _DECLINE_SUPPRESSED_TYPES]
                 events = [e for e in events if e.alert_type not in _DECLINE_SUPPRESSED_TYPES]
+                if declining:
+                    self._logger.info(
+                        "suppressed %d weak-tier alert(s) for %s: score declining "
+                        "(now %.1f, was %.1f) [%s]", len(declining),
+                        result.pair.base_token.address, result.master.final_score,
+                        previous_score if previous_score is not None else float("nan"),
+                        ", ".join(sorted(declining)))
             # NOT a hard veto: individual soft checks (liquidity/market-cap
             # floor, mint/freeze authority, sell tax, deployer history) no
             # longer SUPPRESS — that used to drop the whole alert on a single
@@ -1014,6 +1069,26 @@ class NotificationEngine:
         decision-relevant alert always arrives first, and each is stamped
         with its detection time for the Section 7 message format.
         """
+        delivered, _filtered = await self.dispatch_detailed(events)
+        return delivered
+
+    async def dispatch_detailed(
+        self, events: list[AlertEvent],
+    ) -> tuple[list[AlertEvent], list[AlertEvent]]:
+        """``(delivered, filtered)`` — as :meth:`dispatch`, but also returns the
+        events an EXTERNAL sink deliberately declined for being below its
+        minimum priority.
+
+        The two are not the same thing and used to be conflated: a sink returns
+        ``None`` for a filtered event, ``dispatch`` only excluded ``False``, so
+        a filtered alert stamped the cooldown and was recorded as delivered.
+        The interest gate reads that history to decide whether the operator was
+        ever pitched a coin, so a pitch his phone never showed him could make
+        every later protective warning keep full priority (or, for demoted
+        protective alerts, be filed as if he had seen it). Callers record the
+        filtered list with ``delivered=False`` so the audit trail survives
+        without claiming a delivery that never happened (Rule 13 + Rule 8).
+        """
         now = self._time()
 
         def key_of(event: AlertEvent) -> tuple[str, str, str, str]:
@@ -1042,6 +1117,7 @@ class NotificationEngine:
         )
 
         delivered: list[AlertEvent] = []
+        filtered: list[AlertEvent] = []
         for event in ranked:
             key = key_of(event)
             last = self._last_sent.get(key)
@@ -1069,7 +1145,10 @@ class NotificationEngine:
             # is a log, not the operator's phone.
             has_external = any(getattr(s, "external", False) for s in self._sinks)
             any_delivered = False
+            any_failed = False
+            any_filtered = False
             for sink in self._sinks:
+                is_external = getattr(sink, "external", False)
                 try:
                     outcome = await sink.send(event)
                 except Exception as exc:  # noqa: BLE001 — one sink's bug must not sink the batch
@@ -1077,14 +1156,31 @@ class NotificationEngine:
                     self._logger.error("sink %s failed to deliver %s alert for %s: %s",
                                        type(sink).__name__, event.alert_type,
                                        event.token.address, exc)
-                counts = getattr(sink, "external", False) or not has_external
-                if counts and outcome is not False:
+                if not (is_external or not has_external):
+                    continue                      # a log, not the operator's phone
+                if outcome is False:
+                    any_failed = True
+                elif outcome is None and is_external:
+                    # An external sink's documented "filtered by min-priority".
+                    # Legacy sinks with no `external` attribute still mean
+                    # "sent, no status" and keep counting as delivered.
+                    any_filtered = True
+                else:
                     any_delivered = True
             if any_delivered:
                 self._last_sent[key] = now
                 delivered.append(event)
-            else:
+            elif any_failed:
                 self._logger.warning(
                     "all sinks failed for %s %s; not marking delivered (will retry)",
                     event.alert_type, event.token.address)
-        return delivered
+            elif any_filtered:
+                # Not a failure and not a delivery: the cooldown is deliberately
+                # NOT stamped, so if the same alert later fires at a priority
+                # that clears the floor it is not silently swallowed as a repeat.
+                self._logger.info(
+                    "%s alert %s for %s is below the external sink's minimum "
+                    "priority; recorded but not sent", event.priority.value,
+                    event.alert_type, event.token.address)
+                filtered.append(event)
+        return delivered, filtered

@@ -543,3 +543,57 @@ async def test_telegram_alert_shows_trade_buttons_with_percents(monkeypatch):
     await sink.send(make_event())
     data = str(calls[0]["reply_markup"])
     assert "buy:" in data and "dump:" in data
+
+
+# ---- Filtered != delivered (bug hunt, 2026-07-29) ----
+
+
+class FilteringExternalSink:
+    """An external sink at its documented min-priority contract: None means
+    'filtered', which is NOT a delivery to the operator's phone."""
+
+    external = True
+
+    def __init__(self):
+        self.calls = 0
+
+    async def send(self, event):
+        self.calls += 1
+        return None
+
+
+async def test_filtered_alert_is_reported_separately_from_delivered():
+    from meme_intelligence.alerts.notification_engine import ConsoleSink
+
+    sink = FilteringExternalSink()
+    engine = NotificationEngine([ConsoleSink(), sink],
+                                AlertEngineSettings(cooldown_seconds=900.0),
+                                time_func=lambda: 0.0)
+    delivered, filtered = await engine.dispatch_detailed([make_event(detected_at=None)])
+    assert delivered == []
+    assert len(filtered) == 1
+
+
+async def test_filtered_alert_does_not_stamp_the_cooldown():
+    """It was never sent, so a later alert that DOES clear the floor must not
+    be swallowed as a repeat."""
+    sink = FilteringExternalSink()
+    engine = NotificationEngine([sink], AlertEngineSettings(cooldown_seconds=900.0),
+                                time_func=lambda: 0.0)
+    await engine.dispatch_detailed([make_event(detected_at=None)])
+    await engine.dispatch_detailed([make_event(detected_at=None)])
+    assert sink.calls == 2
+
+
+async def test_dispatch_keeps_its_old_return_contract():
+    """Rule 18: existing callers of dispatch() see no change."""
+    class OkExternalSink:
+        external = True
+
+        async def send(self, event):
+            return True
+
+    engine = NotificationEngine([OkExternalSink()], AlertEngineSettings(),
+                                time_func=lambda: 0.0)
+    delivered = await engine.dispatch([make_event(detected_at=None)])
+    assert len(delivered) == 1

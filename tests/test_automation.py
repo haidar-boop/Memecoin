@@ -990,3 +990,44 @@ async def test_unknown_market_cap_line_is_not_counted_as_a_passed_check():
         _SafetyCheck("unknown", "Market cap unreported; FDV $420,000 (your floor $50,000)"),
     ])
     assert lines[0] == "Safety checklist — passed 1/1"   # not 2/2
+
+
+# ---- Suppression is logged (Rule 13; bug hunt 2026-07-29) ----
+#
+# AutomationRules had NO logger, so every buy-side alert it deleted vanished
+# without a trace at any level. The journal read "N candidates, N analyzed,
+# 0 alerts" and the operator had no way to learn alerts were being generated
+# and discarded, let alone by which gate. That is what hid the GeckoTerminal
+# market-cap blackout for days.
+
+
+async def test_untradeable_suppression_names_the_gate_and_the_value(caplog):
+    import logging
+    result = await pipeline_result(pair=make_pair(market_cap=None, fdv=None))
+    with caplog.at_level(logging.INFO, logger="meme_intelligence.alerts.rules"):
+        make_rules().evaluate(result)
+    blob = caplog.text
+    assert "suppressed" in blob
+    assert "untradeable" in blob
+    assert "market_cap=unknown" in blob      # unknown stays unknown, never $0
+    assert TOKEN.address in blob
+
+
+async def test_too_old_suppression_is_logged(caplog):
+    import logging
+    rules = AutomationRules(
+        AlertThresholds(opportunity_max_age_hours=1.0),
+        AlertEngineSettings(), now_func=lambda: NOW)
+    old = await pipeline_result(pair=make_pair(pair_created_at=NOW - timedelta(hours=9)))
+    with caplog.at_level(logging.INFO, logger="meme_intelligence.alerts.rules"):
+        rules.evaluate(old)
+    assert "too_old" in caplog.text
+
+
+async def test_a_sent_alert_logs_no_suppression(caplog):
+    """The log must stay quiet when nothing was dropped, or it becomes noise."""
+    import logging
+    with caplog.at_level(logging.INFO, logger="meme_intelligence.alerts.rules"):
+        events = make_rules().evaluate(await pipeline_result())
+    assert {e.alert_type for e in events} & _BUY_SIDE_ALERT_TYPES
+    assert "suppressed" not in caplog.text

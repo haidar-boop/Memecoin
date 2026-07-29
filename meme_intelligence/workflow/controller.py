@@ -788,7 +788,7 @@ class ContinuousScanner:
                 self._logger.info("suppressing %d alert(s) for muted token %s",
                                   len(events), token.address)
                 events = []
-        delivered = await self._notifier.dispatch(events)
+        delivered, filtered = await self._notifier.dispatch_detailed(events)
         stats.alerts.extend(delivered)
         for event in delivered:
             # Structured history for Section 12 / Part 24 performance
@@ -797,6 +797,13 @@ class ContinuousScanner:
             self._storage.add_journal(
                 token, "alert", f"{event.priority.value}/{event.alert_type}: {event.title}",
             )
+        for event in filtered:
+            # Generated but below the external sink's floor — kept for the
+            # audit trail (the interest gate deliberately demotes protective
+            # alerts to LOW so the phone stays quiet, and those still belong
+            # in history) but flagged so `_operator_interest` never mistakes
+            # one for a pitch the operator actually saw.
+            self._storage.record_alert(event, source=source, delivered=False)
 
         self._feed_learning(result, stats, creator=creator)
 
@@ -818,7 +825,8 @@ class ContinuousScanner:
             # even if the original recommendation predates the database.
             if self._storage.is_holding(token):
                 return True
-            history = self._storage.alert_history(token, limit=100)
+            history = self._storage.alert_history(token, limit=100,
+                                                  delivered_only=True)
         except Exception as exc:  # noqa: BLE001 — advisory lookup, fail open
             self._logger.warning("interest lookup failed for %s (alerts keep "
                                  "full priority): %s", token.address, exc)
@@ -842,7 +850,8 @@ class ContinuousScanner:
         if not needs_ack:
             return events
         try:
-            history = self._storage.alert_history(token, limit=100)
+            history = self._storage.alert_history(token, limit=100,
+                                                  delivered_only=True)
         except Exception as exc:  # noqa: BLE001 — advisory lookup, fail open
             self._logger.warning("pitch lookup failed for %s (no acknowledgment "
                                  "line): %s", token.address, exc)

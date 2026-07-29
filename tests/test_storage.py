@@ -299,3 +299,50 @@ def test_mute_and_hold_match_by_address_across_chains(storage):
     # A different address is unaffected.
     other = TokenIdentity(chain="base", address="0x" + "ef" * 20, symbol="Y")
     assert storage.is_muted(other) is False and storage.is_holding(other) is False
+
+
+def test_filtered_alerts_are_recorded_but_excluded_from_delivered_history(tmp_path):
+    """Bug hunt 2026-07-29: a min-priority-filtered alert was recorded as
+    delivered, so the interest gate could believe the operator had been
+    pitched a coin his phone never showed him. The audit trail must keep the
+    row (Rule 13) while staying distinguishable from a real delivery."""
+    from meme_intelligence.core.enums import AlertPriority
+
+    class FakeEvent:
+        def __init__(self, alert_type, priority):
+            self.token = TokenIdentity(chain="solana", address="Addr1", symbol="MEME")
+            self.priority = priority
+            self.alert_type = alert_type
+            self.title = alert_type
+            self.reasons = ()
+            self.scores = {}
+
+    with Storage(str(tmp_path / "s.sqlite3")) as storage:
+        storage.record_alert(FakeEvent("strong_candidate", AlertPriority.HIGH),
+                             source="scan")
+        storage.record_alert(FakeEvent("risk_warning", AlertPriority.LOW),
+                             source="scan", delivered=False)
+
+        token = TokenIdentity(chain="solana", address="Addr1")
+        assert len(storage.alert_history(token)) == 2                     # audit trail intact
+        only = storage.alert_history(token, delivered_only=True)
+        assert [r["alert_type"] for r in only] == ["strong_candidate"]
+
+
+def test_alert_rows_predating_the_delivered_column_still_count_as_delivered(tmp_path):
+    """Rule 18: an existing droplet database has NULL there, and those rows
+    were all real deliveries."""
+    path = str(tmp_path / "s.sqlite3")
+    with Storage(path) as storage:
+        token_id = storage.upsert_token(TokenIdentity(chain="solana", address="Addr1"))
+        storage._conn.execute(
+            """INSERT INTO alerts (token_id, created_at, priority, alert_type,
+                                   title, reasons, scores, source)
+               VALUES (?, '2026-07-01T00:00:00+00:00', 'high', 'strong_candidate',
+                       'legacy', '[]', '{}', 'scan')""",
+            (token_id,))
+        storage._conn.commit()
+        token = TokenIdentity(chain="solana", address="Addr1")
+        rows = storage.alert_history(token, delivered_only=True)
+        assert [r["alert_type"] for r in rows] == ["strong_candidate"]
+        assert rows[0]["delivered"] is None

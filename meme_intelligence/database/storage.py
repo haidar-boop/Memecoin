@@ -193,6 +193,16 @@ _MIGRATIONS = {
         ("regime", "TEXT"),          # market condition bucketing (Part 24 S9)
         ("opportunity_rank", "REAL"),  # Part 28 S5 watchlist opportunity ranking
     ),
+    "alerts": (
+        # 1 = an EXTERNAL sink accepted it (it reached the operator's phone),
+        # 0 = generated and recorded for the audit trail but filtered below the
+        # external sink's minimum priority, NULL = written before this column
+        # existed and therefore assumed delivered (Rule 18 — old rows keep
+        # their old meaning). Added 2026-07-29: a filtered alert used to be
+        # recorded as delivered, so `_operator_interest` could believe the
+        # operator had been pitched a coin his phone never showed him.
+        ("delivered", "INTEGER"),
+    ),
 }
 
 
@@ -615,53 +625,65 @@ class Storage:
                 return value
         return None
 
-    def record_alert(self, event, source: str) -> int:
-        """Persist one delivered alert (Part 29, Section 11).
+    def record_alert(self, event, source: str, *, delivered: bool = True) -> int:
+        """Persist one alert (Part 29, Section 11).
 
         ``event`` is an :class:`~meme_intelligence.alerts.notification_engine.AlertEvent`
         (duck-typed to avoid an alerts->database->alerts import cycle).
+
+        ``delivered=False`` records an alert that was generated but filtered
+        below the external sink's minimum priority — kept for the audit trail
+        (Rule 13; the interest gate deliberately demotes protective alerts to
+        LOW so the phone stays quiet, and those still belong in history) while
+        staying distinguishable from a pitch the operator actually saw.
         """
         token_id = self.upsert_token(event.token)
         cursor = self._conn.execute(
             """INSERT INTO alerts
                (token_id, created_at, priority, alert_type, title, reasons,
-                scores, score_at_alert, source)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                scores, score_at_alert, source, delivered)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (token_id, self._now().isoformat(), event.priority.value,
              event.alert_type, event.title, json.dumps(list(event.reasons)),
              json.dumps({k: v for k, v in event.scores.items()}),
              self._score_at_alert(event.scores),
-             source),
+             source, 1 if delivered else 0),
         )
         self._conn.commit()
         return int(cursor.lastrowid)
 
-    def alert_history(self, token: TokenIdentity | None = None, limit: int = 50) -> list[dict]:
+    def alert_history(self, token: TokenIdentity | None = None, limit: int = 50,
+                      *, delivered_only: bool = False) -> list[dict]:
         """Recent alerts, newest first (Part 29, Section 11).
 
         Each row includes the recorded evidence ``reasons`` (parsed from
         JSON; veto/downgrade reasons live there), added for the /why
         Telegram command (Project 2) — purely additive for older callers.
+
+        ``delivered_only=True`` returns just the alerts an external sink
+        accepted, i.e. the ones that actually reached the operator's phone.
+        Rows written before the ``delivered`` column existed have it NULL and
+        count as delivered, so old databases keep their old meaning (Rule 18).
         """
-        if token is None:
-            rows = self._conn.execute(
-                """SELECT a.id, a.created_at, a.priority, a.alert_type, a.title,
-                          a.reasons, a.score_at_alert, a.outcome,
-                          t.chain, t.address, t.symbol
-                   FROM alerts a JOIN tokens t ON t.id = a.token_id
-                   ORDER BY a.id DESC LIMIT ?""",
-                (limit,),
-            ).fetchall()
-        else:
-            rows = self._conn.execute(
-                """SELECT a.id, a.created_at, a.priority, a.alert_type, a.title,
-                          a.reasons, a.score_at_alert, a.outcome,
-                          t.chain, t.address, t.symbol
-                   FROM alerts a JOIN tokens t ON t.id = a.token_id
-                   WHERE t.chain = ? AND t.address = ?
-                   ORDER BY a.id DESC LIMIT ?""",
-                (token.chain, token.address, limit),
-            ).fetchall()
+        where = []
+        params: list = []
+        if token is not None:
+            where.append("t.chain = ? AND t.address = ?")
+            params += [token.chain, token.address]
+        if delivered_only:
+            where.append("(a.delivered IS NULL OR a.delivered = 1)")
+        clause = (" WHERE " + " AND ".join(where)) if where else ""
+        params.append(limit)
+        # No user input reaches the SQL text: `clause` is assembled purely from
+        # the constant fragments above, and every value is a bound parameter.
+        rows = self._conn.execute(  # nosemgrep
+            "SELECT a.id, a.created_at, a.priority, a.alert_type, a.title, "
+            "       a.reasons, a.score_at_alert, a.outcome, a.delivered, "
+            "       t.chain, t.address, t.symbol "
+            "FROM alerts a JOIN tokens t ON t.id = a.token_id"
+            f"{clause} ORDER BY a.id DESC LIMIT ?",
+            tuple(params),
+        ).fetchall()
         history = []
         for row in rows:
             entry = dict(row)
