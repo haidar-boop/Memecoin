@@ -81,6 +81,53 @@ class MarketDataService:
             return None
         return max(pairs, key=lambda p: p.liquidity_usd or 0.0)
 
+    async def get_token_pairs_confirmed(self, token_address: str,
+                                        chain: str | None = None) -> list[DexPair]:
+        """Pairs for a token, where an EMPTY answer has been confirmed by every
+        provider rather than taken from the first one to reply.
+
+        ``ProviderPool.call_with_provider`` returns the first result that does
+        not RAISE, and an empty list does not raise — so a provider that simply
+        has not indexed a token ends the search before the others are asked.
+        DexScreener answers HTTP 200 ``{"pairs": null}`` for an unindexed token
+        (verified live 2026-07-29), which becomes ``[]``. For a coin discovered
+        through GeckoTerminal — which DexScreener may not carry — that made
+        "DexScreener has not heard of it" indistinguishable from "this token has
+        no market left", and callers that read emptiness as death fabricated one
+        (bug-hunt finding, 2026-07-29).
+
+        Raises ``AllProvidersFailedError`` when emptiness could NOT be confirmed
+        because some provider was unable to answer: that is missing data, never
+        evidence of death (Rule 8). Returns ``[]`` only when every provider
+        answered and every answer was empty.
+
+        The extra calls happen ONLY on the empty path, so the normal case keeps
+        the pool's ordinary cost and health tracking (Rule 11).
+        """
+        pairs = await self.get_token_pairs(token_address, chain=chain)
+        if pairs:
+            return pairs
+        causes: dict[str, Exception] = {}
+        for provider in self._providers:
+            name = getattr(provider, "name", type(provider).__name__)
+            try:
+                other = await provider.get_token_pairs(token_address, chain=chain)
+            except Exception as exc:  # noqa: BLE001 — one provider must never
+                # end the confirmation sweep (Rule 9); an unanswered provider
+                # means emptiness stays unconfirmed, handled below.
+                causes[name] = exc
+                self._logger.debug("empty-confirmation provider %s unavailable: %s",
+                                   name, exc)
+                continue
+            if other:
+                self._logger.info(
+                    "%s reports %d pair(s) for %s that the pool's first responder "
+                    "did not — not an empty market", name, len(other), token_address)
+                return other
+        if causes:
+            raise AllProvidersFailedError("get_token_pairs (confirming empty)", causes)
+        return []
+
     async def search_pairs(self, query: str) -> list[DexPair]:
         """Search pairs by token name/symbol via the first provider that
         supports it (currently DexScreener; GeckoTerminal has no search

@@ -229,19 +229,27 @@ async def _live_measurement(market_service, prediction, now):
     """
     token = TokenIdentity(chain=prediction["chain"], address=prediction["address"])
     try:
-        pairs = await market_service.get_token_pairs(token.address, chain=token.chain)
+        pairs = await market_service.get_token_pairs_confirmed(
+            token.address, chain=token.chain)
     except AllProvidersFailedError as exc:
-        # Every provider down: we learned NOTHING about this token.
+        # Nobody could answer, or emptiness could not be confirmed: we learned
+        # NOTHING about this token.
         _logger.warning(
-            "live outcome fetch for %s: every provider failed (%s) — recording "
+            "live outcome fetch for %s: no confirmed reading (%s) — recording "
             "no measurement rather than a fabricated death", token.address, exc)
         return None
     except CollectorError as exc:
         _logger.info("live outcome fetch failed for %s: %s", token.address, exc)
         return None
     if not pairs:
-        # A successful lookup that found no tradable pair: the token is dead —
-        # that IS the outcome.
+        # EVERY provider answered and none knows a pair: the token is dead —
+        # that IS the outcome. This branch permanently blacklists the deployer
+        # downstream (learning/service.py:595), so it is logged as loudly as the
+        # branch that records nothing (Rule 13 — the mutating path must not be
+        # the quiet one).
+        _logger.warning(
+            "live outcome for %s: every provider confirms no tradable pair — "
+            "recording token death (price $0 / liquidity $0)", token.address)
         return 0.0, 0.0, now
     pair = max(pairs, key=lambda p: p.liquidity_usd or 0.0)
     return pair.price_usd, pair.liquidity_usd, now

@@ -954,3 +954,39 @@ async def test_checklist_names_fdv_when_that_is_the_source():
     reported = rules._market_cap_check(
         await pipeline_result(pair=make_pair(market_cap=400_000.0)))
     assert "FDV" not in reported.detail
+
+
+async def test_fdv_never_scores_a_green_pass_against_the_market_cap_floor():
+    """Review finding 2026-07-29: FDV >= market cap, so clearing the floor on
+    FDV proves nothing about the circulating cap the floor was set to measure
+    (a large locked/vesting allocation gives FDV $420k on a true $21k cap).
+    That must surface as unknown — shown but NOT counted as a passed check —
+    never as a green tick (Rule 8)."""
+    rules = AutomationRules(
+        AlertThresholds(opportunity_min_market_cap_usd=50_000.0),
+        AlertEngineSettings(), now_func=lambda: NOW)
+    above = rules._market_cap_check(
+        await pipeline_result(pair=make_pair(market_cap=None, fdv=420_000.0)))
+    assert above.status == "unknown"
+    assert "FDV" in above.detail and "unreported" in above.detail
+
+    # A REPORTED cap above the floor is still a real pass — unchanged.
+    reported = rules._market_cap_check(
+        await pipeline_result(pair=make_pair(market_cap=400_000.0)))
+    assert reported.status == "pass"
+
+    # Below the floor FDV IS conclusive (the real cap can only be lower), so
+    # the warn stands — this guard must not mute a genuine miss.
+    below = rules._market_cap_check(
+        await pipeline_result(pair=make_pair(market_cap=None, fdv=21_000.0)))
+    assert below.status == "warn"
+
+
+async def test_unknown_market_cap_line_is_not_counted_as_a_passed_check():
+    """The 'passed X/Y' header must not silently absorb the unknown."""
+    from meme_intelligence.alerts.notification_engine import _render_checklist, _SafetyCheck
+    lines = _render_checklist([
+        _SafetyCheck("pass", "Liquidity $90,000"),
+        _SafetyCheck("unknown", "Market cap unreported; FDV $420,000 (your floor $50,000)"),
+    ])
+    assert lines[0] == "Safety checklist — passed 1/1"   # not 2/2

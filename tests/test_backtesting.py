@@ -93,9 +93,9 @@ async def test_windows_never_measured_early_and_never_twice(tmp_path):
 
 
 class DeadTokenService:
-    """A successful lookup that finds no tradable pair: the token really died."""
+    """EVERY provider answered and none knows a pair: the token really died."""
 
-    async def get_token_pairs(self, address, chain=None):
+    async def get_token_pairs_confirmed(self, address, chain=None):
         return []
 
 
@@ -103,7 +103,7 @@ class TotalOutageService:
     """Every provider down — a DNS blip on the droplet fails DexScreener and
     GeckoTerminal together. This is an absence of data, NOT a death."""
 
-    async def get_token_pairs(self, address, chain=None):
+    async def get_token_pairs_confirmed(self, address, chain=None):
         raise AllProvidersFailedError("get_token_pairs", {
             "dexscreener": ConnectionResetError("connection reset by peer"),
             "geckoterminal": OSError("Temporary failure in name resolution"),
@@ -183,7 +183,7 @@ async def test_outage_window_reopens_for_a_later_good_reading(tmp_path):
                                       settings=SETTINGS, now_func=lambda: NOW) == 0
 
         class RecoveredService:
-            async def get_token_pairs(self, address, chain=None):
+            async def get_token_pairs_confirmed(self, address, chain=None):
                 return [pair(9, 2.50)]
 
         recorded = await refresh_outcomes(storage, RecoveredService(),
@@ -550,3 +550,38 @@ async def test_a_settled_window_is_never_overwritten(tmp_path):
             survived=False, source="live_fetch")
         assert storage.outcomes_for_snapshot(snapshot_id)[24.0][
             "price_change_percent"] == before
+
+
+class SplitCoverageService:
+    """DexScreener has not indexed the token and answers HTTP 200 with an empty
+    list; GeckoTerminal is holding the live pool. Review finding 2026-07-29."""
+
+    def __init__(self, live_pair):
+        self._live = live_pair
+        self.confirm_sweeps = 0
+
+    async def get_token_pairs(self, address, chain=None):
+        return []          # what the pool's first responder says
+
+    async def get_token_pairs_confirmed(self, address, chain=None):
+        self.confirm_sweeps += 1
+        return [self._live]  # what a second provider actually knows
+
+
+async def test_one_providers_silence_is_not_a_token_death(tmp_path):
+    """A Gecko-discovered coin that DexScreener never indexed must not be
+    recorded as dead just because DexScreener replied first. Before the fix
+    this wrote -100%/RUG and PERMANENTLY blacklisted an innocent deployer."""
+    with make_storage(tmp_path) as storage:
+        storage.record_snapshot(
+            master(9, 85.0, Classification.STRONG_CANDIDATE, T0),
+            source="test", pair=pair(9, 1.0), regime="bull")
+        service = SplitCoverageService(pair(9, 2.50))
+        recorded = await refresh_outcomes(storage, service, settings=SETTINGS,
+                                          now_func=lambda: NOW)
+        assert service.confirm_sweeps > 0, "must use the confirming lookup"
+        assert recorded == 2
+        outcomes = storage.outcomes_for_snapshot(storage.predictions()[0]["snapshot_id"])
+        # The real +150% move, not a fabricated -100% death.
+        assert outcomes[24.0]["price_change_percent"] == pytest.approx(150.0)
+        assert outcomes[24.0]["survived"] == 1

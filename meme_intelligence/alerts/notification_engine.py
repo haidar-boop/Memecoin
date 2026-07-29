@@ -516,14 +516,27 @@ class AutomationRules:
         mcap = result.pair.effective_market_cap
         if mcap is None or not math.isfinite(mcap):
             return _SafetyCheck("unknown", "Market cap: unknown")
-        # Name the source when the number is FDV rather than a reported
-        # circulating cap, so the operator is never shown a figure whose
-        # provenance is hidden (Rule 8).
-        label = "Market cap" if result.pair.market_cap is not None else "Market cap (FDV)"
+        reported = result.pair.market_cap is not None
+        # FDV >= market cap by construction, and that asymmetry decides which
+        # verdicts FDV may stand in for. BELOW the floor it is conclusive: if
+        # even the fully-diluted figure misses the floor, the circulating cap
+        # certainly does, so the warn is sound. ABOVE the floor it is NOT: a
+        # token with a large locked or vesting allocation can show FDV $420k
+        # against a true circulating cap of $21k, so a green PASS would report
+        # that a floor was cleared by a quantity the floor does not measure.
+        # That reads as a cleared check in the "passed X/Y" header, so it is
+        # surfaced as unknown instead — shown to the operator, not scored
+        # (`_render_checklist` counts only pass/warn). Rule 8: never upgrade
+        # missing data into a green light.
         if mcap < floor:
+            label = "Market cap" if reported else "Market cap (FDV)"
             return _SafetyCheck(
                 "warn", f"{label} ${mcap:,.0f} — below your ${floor:,.0f} floor")
-        return _SafetyCheck("pass", f"{label} ${mcap:,.0f}")
+        if not reported:
+            return _SafetyCheck(
+                "unknown",
+                f"Market cap unreported; FDV ${mcap:,.0f} (your floor ${floor:,.0f})")
+        return _SafetyCheck("pass", f"Market cap ${mcap:,.0f}")
 
     def _is_new_launch(self, result: PipelineResult) -> bool:
         """True when the pool is younger than the checklist's new-launch window —
