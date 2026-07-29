@@ -2554,3 +2554,104 @@ than measurement, and the operator has been silenced once already by a guess.
   and was simply never switched on.
 
 Suite: **1079 passing**.
+
+## 2026-07-29 (late night) — The bot is blind to the two facts that decide a rug
+
+The operator sent a rugcheck.xyz screenshot of a coin his bot had pitched him:
+**DANGER 65**, single holder **88.45%**, LP **100% unlocked**. His bot scored
+that coin's security a **perfect 100.0/100** and its rug engine fired nothing.
+
+### Diagnosis (proven, not inferred)
+
+Neither component was wrong about the facts it had. `GoPlusClient._parse_solana`
+returns `holder_count=None`, `top_holder_percent=None`, `lp_locked_percent=None`
+for a fresh pump.fun mint — GoPlus does not index them that early. So of the
+four security sub-scores only `contract` resolved (authorities cleanly
+renounced), and `SecurityAnalyzer` renormalizes over the sub-scores that HAVE
+data, making `contract=100` the entire score at **25% coverage**.
+
+`RugEngine` behaved correctly too: its `top_holder_concentration` and
+`liquidity_unlocked` signals refuse to fire on `None` (Rule 8). They are fully
+written and weighted and **have never fired once**, because they have never had
+a number to look at.
+
+His own database confirmed this is universal, not one bad coin
+(`deploy/security_evidence_report.py`): of **500 coins he was alerted about,
+499 sat at 25-49% security coverage**, and security **passed 100% of buy-side
+alerts**. It is not a gate, it is a constant.
+
+### A coverage cap was tried, measured, and removed
+
+The first fix attempt capped the security score by its own coverage
+(`50 + 50 * coverage`), mirroring `RiskAnalyzer._MIN_COVERAGE_FOR_LOW_RISK`
+which has enforced exactly that since Part 9 ("Unknown is not safe"). It was
+measured against the live database **before** being switched on, and the
+measurement killed it twice over:
+
+1. **It would have silenced him.** Of the 339 coins that cleared the security
+   gate, the cap blocked **338 — 99%**.
+2. **It was the wrong shape, not merely mis-tuned.** With the real facts
+   present:
+
+   | | known-bad (88% holder, 0% LP) | known-good (3%, 95%) | separation |
+   |---|---|---|---|
+   | no cap | 73.8 **blocked** | 100.0 passes | **26.2** |
+   | cap on | 73.8 blocked | 82.5 passes | 8.7 |
+
+   The existing scoring already separates good from bad by a wide margin the
+   moment it HAS the facts; the cap *compressed* that. An adversarial review
+   independently found why: because the ceiling rises with ANY evidence, a coin
+   whose 88.45% concentration is **confirmed** outscored the same coin with that
+   fact unknown. Rewarding the discovery of damning evidence is not a threshold
+   to tune.
+
+Deleted rather than left disabled — no dead mechanism, no latent bug surface,
+no perverse gradient (Rule 21). The same review also found, on that code, that
+the setting's VALUE was inert (only zero vs non-zero had any effect, against
+its name and docstring) and that a float-accumulated `available_weight < 1.0`
+could cap a fully-measured coin. Both died with it.
+
+**Do not re-introduce a coverage cap without re-running the measurement.** The
+tool that produced the 99% figure (`security_cap_impact.py`) was itself removed
+because, once the setting was gone, `Settings.from_env` silently ignored the
+unknown variable and the script compared a config against itself — it would have
+printed "now BLOCKED: 0 (0%)", the exact inverse of the truth, and read as
+clearance to ship the cap back on.
+
+### The actual conclusion
+
+**The bug was never the scoring.** It is that the facts are missing. Collect
+holder concentration and LP status from chain and the existing analyzer blocks
+the screenshot coin at 73.8 on its own, with no new mechanism, and two dormant
+rug signals finally get inputs.
+
+`tests/test_security_thin_evidence.py` pins both halves: today's behaviour
+honestly (the coin scores 100 at 25% coverage and IS pitched) and the acceptance
+criterion for the fix (with the facts known it must fall below the gate). The
+fixture is the real captured GoPlus payload.
+
+### Next, and not yet built
+
+On-chain collection of top-holder concentration and LP burn/lock status.
+Design notes and the traps identified so far:
+
+- **The exclusion trap.** Raw largest-account balances are NOT concentration.
+  The LP vault, the incinerator/burn address and pump.fun bonding-curve accounts
+  routinely hold most of supply and are not "a holder". Counting them makes every
+  healthy coin look 90% concentrated, which would silence the operator a third
+  time. This is the single highest-risk part of the work.
+- **LP scope honesty.** The verified `lpReserve` burn formula (Raydium AMM v4,
+  offset 720) does not transfer to CPMM/CLMM/Whirlpool/DLMM, where it would read
+  a meaningless integer and print it as a percentage. Those must return `None`.
+  Pre-graduation pump.fun coins have no LP pool at all.
+- **Burned vs locked** are different claims. Burned is verifiable without trust;
+  verifying a lock needs a locker program layout. Be explicit about which
+  `lp_locked_percent` actually means.
+- Must ship OFF and be measured with `deploy/security_evidence_report.py` before
+  being switched on — the same discipline that caught the cap.
+
+The operator supplied a reference implementation (MIT-licensed `Rug-check`) that
+computes both from chain and whose 94 tests pass; its offsets are claims to be
+verified live, not facts to be copied.
+
+Suite: **1085 passing**.
