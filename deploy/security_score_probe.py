@@ -14,9 +14,28 @@ and is safe to run while the monitor is live.
 """
 import json, sqlite3, sys, collections
 
-db = sys.argv[1] if len(sys.argv) > 1 else "data/meme_intelligence.sqlite3"
-con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-con.row_factory = sqlite3.Row
+import os
+
+# Find the database without the operator having to know where it lives.
+CANDIDATES = ("data/meme_intelligence.sqlite3",
+              os.path.expanduser("~/meme-intelligence/data/meme_intelligence.sqlite3"))
+db = sys.argv[1] if len(sys.argv) > 1 else next(
+    (c for c in CANDIDATES if os.path.exists(c)), CANDIDATES[0])
+
+if not os.path.exists(db):
+    print(f"No database found at {db}.")
+    print("Run this from the repo root (cd ~/meme-intelligence), or pass the path:")
+    print("  python3 deploy/security_score_probe.py /path/to/meme_intelligence.sqlite3")
+    raise SystemExit(1)
+
+try:
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    con.row_factory = sqlite3.Row
+    con.execute("SELECT 1 FROM alerts LIMIT 1")
+except sqlite3.Error as exc:
+    print(f"Could not read {db}: {exc}")
+    raise SystemExit(1)
+print(f"reading {db} (read-only)\n")
 
 BUY = ("high_priority_opportunity", "strong_candidate", "early_opportunity",
        "momentum", "smart_money_accumulation")
