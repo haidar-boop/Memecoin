@@ -2404,3 +2404,88 @@ Verified as real, deliberately NOT fixed without consent:
   holds open. Rotation from a cron process could rename the daemon's file. Low
   impact (some lines land in a rotated-away file); not worth a risky change
   without evidence it is happening.
+
+## 2026-07-29 (night) — Live rug guard on open positions (auto-sell armed)
+
+The operator lost a position to a rug and asked for a new rug engine. Before
+building one, three things were established about the existing one — it is not
+badly designed, it is starved:
+
+1. **The hard rug engine is blind to liquidity at alert time.**
+   `_deterministic_risk_veto` (controller.py) builds a SINGLE `CoinSnapshot`
+   with four fields — `age_seconds=0.0`, `volume_1h_usd`, `holder_count`,
+   `dev_outflow_usd` — and no `liquidity_usd` at all. `_check_liquidity_removal`
+   needs a trajectory, so the signal that actually catches a rug pull can never
+   fire on the alert path. Only contract facts, deployer reputation and dev
+   outflow can. A competent rugger passes all of those and then pulls the LP.
+2. **The learned P(rug) veto is off by default** (`veto_enabled=False`), so
+   screen #3 — the one backed by the graded-call history — never votes unless
+   the operator sets it.
+3. **The dev-dumping signal needs the Helius wallet lookup**, which is
+   credit-gated, so `dev_outflow_usd` is `None` for most coins and that signal
+   cannot fire either. (The operator noted the Helius key is in use; the key is
+   plugged in, the data mostly is not reaching the rug engine.)
+
+**Operator decisions (asked before building, Rule 20):** protect money already
+committed rather than only improving pre-alert screening, and *"auto-sell, then
+tell me"*.
+
+### What was built
+
+`analyzers/rug_watch.py` — pure verdict engine (hold / warn / exit) over a
+liquidity trajectory plus sell-route status. No I/O, no clock, no database, so
+every threshold and confirmation rule is testable.
+
+`workflow/holdings_guard.py` — a fast poll loop over open positions only,
+which can call `execute_sell_all` by itself.
+
+**Why a second engine (Rule 4/18/19):** the existing `learning/rug_engine.py`
+answers "would this coin rug?" *before* an alert. This answers "is it rugging
+right now, and can I still get out?" Prediction and detection have opposite
+error costs — an over-eager screen costs a missed opportunity, an over-eager
+watcher sells a healthy position — so they get separate thresholds and separate
+code. **Nothing in the pre-alert rug engine, the scoring engine or the veto was
+changed.**
+
+**The asymmetry that shapes the design:** a vanished sell route is the END of a
+rug, not the start — once Jupiter finds no path out, an auto-sell is futile.
+The actionable moment is liquidity draining hard *while a route still exists*.
+So route-gone warns loudly (nothing to execute) and a confirmed liquidity
+collapse with a live route triggers the exit.
+
+**Safety model**, because this is the only place the bot spends money without a
+tap:
+
+- Armed twice or not at all: `MEMEINTEL_RUG_WATCH_ENABLED` starts the watch,
+  `MEMEINTEL_RUG_WATCH_AUTO_SELL` lets it trade. A half-armed config raises
+  `ConfigurationError` at startup rather than looking armed.
+- Positive evidence only (Rule 8): a failed read, unknown liquidity or an
+  unprobed route never move the verdict. Uses `get_token_pairs_confirmed`, so
+  "every provider agrees there is no pair" is a measured zero while "nobody
+  could answer" is not — the exact distinction the 2026-07-29 outage fix added.
+- `min_confirmations >= 2` is enforced by config validation: one provider tick
+  must never be able to liquidate a position.
+- Once per position; the attempt is recorded BEFORE the trade so a crash
+  mid-sell cannot double-sell.
+- `/rugwatch off` disarms from the phone. Re-arming needs an `.env` edit and a
+  restart — a deliberate speed bump.
+
+### The gap that would have made it useless
+
+`set_holding` was only ever called by `/holding`. A coin bought through `/buy`
+or an alert's Buy button was **never marked as held**, and the guard, the
+interest gate and protective-alert priority all key off holdings — the bot
+could buy a coin and then never guard it. A live buy now registers the position
+at **broadcast** (not confirmation: a buy whose confirmation times out has very
+likely landed, and is exactly the coin most in need of watching); a **confirmed**
+sell releases it. Both directions err toward keeping the watch.
+
+### Still open on the pre-alert side
+
+Feeding the hard rug engine the real stored liquidity trajectory at veto time
+(finding 1 above) is a contained change that would light up
+`_check_liquidity_removal` on the alert path. NOT done here: it changes which
+coins get vetoed, i.e. how the bot thinks, which needs the operator's word.
+Same for arming `veto_enabled`.
+
+Suite: **1062 passing** (1020 + 42).
