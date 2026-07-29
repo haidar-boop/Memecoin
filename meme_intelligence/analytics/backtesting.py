@@ -113,6 +113,23 @@ async def refresh_outcomes(
             price, liquidity, measured_at = measurement
             change = (100.0 * (price - base_price) / base_price
                       if price is not None and base_price else None)
+            # A return is only as trustworthy as the two prices behind it.
+            # When the baseline (the token's FIRST recorded price) or the
+            # later reading is a bad datum, the ratio explodes: live data
+            # showed +1.7e11% — a 1.7-billion-fold "gain" — and because
+            # anything >= pump_return_percent becomes a PUMP label, those
+            # fantasies were being written into the mind layer's permanent
+            # memory as winners. Discard the number instead of believing it
+            # (Rule 8): the outcome row is still recorded so the measurement
+            # attempt is auditable, but with no price_change_percent, which
+            # also makes the learning feed below skip it automatically.
+            ceiling = settings.max_measurable_return_percent
+            if change is not None and ceiling > 0 and abs(change) > ceiling:
+                _logger.warning(
+                    "implausible %+.0f%% return for %s at %sh (base %.3g -> %.3g); "
+                    "recorded as unmeasurable, not fed to learning",
+                    change, prediction["address"], window, base_price, price)
+                change = None
             survived = (liquidity >= settings.survival_min_liquidity_usd
                         if liquidity is not None else None)
             storage.record_outcome(

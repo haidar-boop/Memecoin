@@ -2039,3 +2039,34 @@ insert-once graded prediction that feeds /mind and the ensemble weights is
 undisturbed. Only re-evaluations (veto on a re-checked coin, /check,
 watchlist rechecks) gain the richer input, which is exactly where the
 trajectory exists to be seen. Suite: **958 passing** (954 + 4).
+
+## 2026-07-29 — Implausible forward returns were being taught as PUMPs
+
+Live data (operator's droplet, 147,676 outcome rows): 624 rows (0.42%) carry
+impossible returns — top offenders +1.7e11%, +1.1e11%, +4.0e9%. Cause: the
+forward return is `100*(price-base)/base` against the token's FIRST recorded
+price, with no plausibility guard. Observed pairs: base 3.70e-11 -> later
+0.0634 (Agamemnon), base 8.13e-09 -> later 9.000048 (W26), base 1.31e-07 ->
+later 5.28 (USOH). One of the two prices in each pair is a bad datum — the
+"later" values clustering at ~$5.00/$9.00 do not look like memecoin prices.
+
+Why it mattered beyond a broken scoreboard: `refresh_outcomes` feeds the same
+`change` to `learning_service.resolve_outcome`, and `_bucket_for_return`
+labels anything >= pump_return_percent (50) as PUMP. So a few hundred coins
+that never pumped were written into the analog index and the classifier's
+training set as winners.
+
+Fix: `BacktestSettings.max_measurable_return_percent` (default 100,000% =
+1000x, 0 disables; validated to exceed success_price_change_percent). Beyond
+the ceiling the return is discarded as UNMEASURABLE — the outcome row is
+still written for audit, but with `price_change_percent=None`, which makes
+the existing `if change is not None` learning guard skip it for free. The
+ceiling sits several orders of magnitude above any genuine run recorded here,
+so real moonshots survive (tested explicitly with a +1,900% case).
+
+Scope correction, stated to the operator: at 0.42% contamination this is a
+real data-integrity bug worth fixing, but it does NOT explain the reported
+0.13 hit rate — an earlier message overstated its likely impact before the
+magnitude was known. Fix is forward-only; ~624 historical rows are left in
+place rather than risking a migration on a live DB for 0.4% of the data.
+Suite: **964 passing** (960 + 4).

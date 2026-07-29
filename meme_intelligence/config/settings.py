@@ -679,6 +679,17 @@ class BacktestSettings:
     alert_useful_drift_points: float = 10.0  # score drift that labels an alert useful (S12/29)
     alert_outcome_min_hours: float = 24.0    # alerts younger than this stay unlabeled
     min_predictions_for_weights: int = 10    # weight experiments need a real sample (S1)
+    # A forward return is measured against the token's FIRST recorded price.
+    # When that baseline (or the later reading) is a bad datum, the ratio
+    # explodes into meaningless numbers — live data showed returns of 1e9%
+    # and higher, i.e. 10-million-fold "gains" that never happened, and those
+    # fed straight into the mind layer as PUMP labels (2026-07-29). Anything
+    # beyond this ceiling is treated as UNMEASURABLE rather than as a real
+    # return (Rule 8 — a nonsense number is not evidence). Set generously:
+    # 100,000% is a 1000x, several orders of magnitude above any genuine
+    # memecoin run this system has recorded, so real moonshots survive.
+    # 0 disables the guard.
+    max_measurable_return_percent: float = 100_000.0
 
     def __post_init__(self) -> None:
         windows = [w.strip() for w in self.windows_hours.split(",") if w.strip()]
@@ -699,6 +710,16 @@ class BacktestSettings:
             raise ConfigurationError("failure_price_change_percent must be negative")
         if self.signal_low_score >= self.signal_high_score:
             raise ConfigurationError("signal_low_score must be below signal_high_score")
+        if (not math.isfinite(self.max_measurable_return_percent)
+                or self.max_measurable_return_percent < 0):
+            raise ConfigurationError(
+                "max_measurable_return_percent must be >= 0 (0 disables the guard), got "
+                f"{self.max_measurable_return_percent}")
+        if (0 < self.max_measurable_return_percent
+                <= self.success_price_change_percent):
+            raise ConfigurationError(
+                "max_measurable_return_percent must exceed "
+                "success_price_change_percent, else every success is discarded")
         for name in ("survival_min_liquidity_usd", "alert_useful_drift_points",
                      "alert_outcome_min_hours", "min_predictions_for_weights"):
             value = getattr(self, name)

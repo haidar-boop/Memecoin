@@ -300,3 +300,73 @@ def test_old_database_migrates_new_columns(tmp_path):
         storage.record_snapshot(master(1, 80.0, Classification.WATCHLIST, T0),
                                 source="test", pair=pair(1, 1.0), regime="bull")
         assert storage.predictions()[0]["price_usd"] == pytest.approx(1.0)
+
+
+# ---- Implausible-return guard (2026-07-29 live-data finding) ----
+
+
+class _RecordingLearner:
+    """Mind-layer stand-in: records what it was asked to learn from."""
+
+    def __init__(self):
+        self.calls = []
+
+    def resolve_outcome(self, address, chain, horizon_hours, forward_return_percent,
+                        *, is_rug=False):
+        self.calls.append((address, horizon_hours, forward_return_percent, is_rug))
+
+
+async def test_implausible_return_is_unmeasurable_and_never_taught(tmp_path):
+    """Live data (2026-07-29) showed returns of +1.7e11% — a baseline price of
+    3.7e-11 against a later reading of 0.063. Anything past the pump threshold
+    becomes a PUMP label, so these fantasies were entering the mind layer's
+    permanent memory as winners. The row must still be recorded (the attempt
+    is auditable) but with no percentage, and learning must not see it."""
+    with make_storage(tmp_path) as storage:
+        seed(storage, 1, Classification.STRONG_CANDIDATE,
+             start_price=3.70077676159037e-11, later_price=0.06342)
+        learner = _RecordingLearner()
+        recorded = await refresh_outcomes(storage, settings=SETTINGS,
+                                          learning_service=learner,
+                                          now_func=lambda: NOW)
+        assert recorded >= 1
+        rows = storage.outcomes_for_snapshot(
+            storage.predictions()[0]["snapshot_id"])
+        assert rows, "the measurement attempt must still be recorded"
+        assert all(r["price_change_percent"] is None for r in rows.values())
+        assert learner.calls == [], "a fantasy return must never become a label"
+
+
+async def test_genuine_large_win_is_still_measured_and_taught(tmp_path):
+    """The guard must not eat real moonshots: a 20x (+1,900%) is far under
+    the 1000x ceiling and has to survive intact, or the operator's whole
+    reason for running this bot gets filtered away."""
+    with make_storage(tmp_path) as storage:
+        seed(storage, 2, Classification.STRONG_CANDIDATE,
+             start_price=0.000001, later_price=0.00002)     # +1,900%
+        learner = _RecordingLearner()
+        await refresh_outcomes(storage, settings=SETTINGS,
+                               learning_service=learner, now_func=lambda: NOW)
+        rows = storage.outcomes_for_snapshot(
+            storage.predictions()[0]["snapshot_id"])
+        assert any(r["price_change_percent"] is not None for r in rows.values())
+        assert learner.calls, "a real 20x must still be learned from"
+        assert any(c[2] > 1000.0 for c in learner.calls)
+
+
+async def test_guard_can_be_disabled(tmp_path):
+    settings = BacktestSettings(max_measurable_return_percent=0.0)
+    with make_storage(tmp_path) as storage:
+        seed(storage, 3, Classification.STRONG_CANDIDATE,
+             start_price=3.7e-11, later_price=0.06342)
+        learner = _RecordingLearner()
+        await refresh_outcomes(storage, settings=settings,
+                               learning_service=learner, now_func=lambda: NOW)
+        assert learner.calls, "0 disables the ceiling entirely"
+
+
+def test_ceiling_must_exceed_the_success_threshold():
+    with pytest.raises(ConfigurationError, match="max_measurable_return_percent"):
+        BacktestSettings(max_measurable_return_percent=10.0)   # below success 50
+    with pytest.raises(ConfigurationError, match="max_measurable_return_percent"):
+        BacktestSettings(max_measurable_return_percent=-1.0)
