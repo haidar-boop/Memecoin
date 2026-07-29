@@ -2116,3 +2116,109 @@ NEGATIVE for a rug-veto system.
    (Part 24 S14), an unmeasurable one stays open for a later good reading.
 
 Suite: **971 passing** (966 + 5).
+
+## 2026-07-29 (later still) — Bug hunt: the discovery path could never alert
+
+A 10-agent bug hunt across five dimensions (liveness, recent-diff,
+data-integrity, security, resources) found the cause of the recurring
+"Telegram goes quiet" incidents. Two fixes shipped; the hunt's remaining
+findings are recorded below as not-yet-verified leads.
+
+1. **CRITICAL — GeckoTerminal reports no market cap, so every
+   discovery-path coin was judged untradeable.** `AutomationRules
+   ._untradeable` read only `pair.market_cap`, and GeckoTerminal's
+   `new_pools` feed — the main discovery source — returns
+   `market_cap_usd: null` for *every* pool while always populating
+   `fdv_usd`. Verified live 2026-07-29: 0/20 vs 20/20. Running the real
+   parser and the real `AutomationRules` over a live payload, 20/20 pools
+   returned `_untradeable() == True`, 3 of which cleared the $5k discovery
+   liquidity floor — so real candidates hit this gate every cycle and had
+   all buy-side events stripped at `notification_engine.py:330`, while the
+   cycle log still read "N candidates, N analyzed".
+
+   This is why alerts arrived in bursts: the pump.fun feed, the watchlist
+   re-check and the insufficient-data retry all resolve pairs through
+   `MarketDataService` (DexScreener first, which *does* return `marketCap`),
+   so those paths kept alerting. Only discovery was dead.
+
+   `TokenAnalyzer._effective_mcap` had used a market_cap-else-FDV fallback
+   for valuation since Part 7, so the **scorer and the alert gates silently
+   disagreed about what a coin is worth**. Resolution: promote that rule to
+   `DexPair.effective_market_cap` (Rule 18 — extend, one definition) and
+   read it from every gate that asks a coin's size — `_untradeable`,
+   `_oversized`, `_market_cap_check`, and the two paid-credit gates in
+   `ResearchPipeline`, which had been refusing wallet/social lookups on the
+   same coins.
+
+   Not a Rule 8 fabrication: FDV is a *measured* provider value, absence
+   still yields `None`, and a coin with neither field is still blocked
+   (confirmed against the live payload — the one pool still blocked has
+   $0 liquidity, stopped by the liquidity gate). FDV >= market cap by
+   construction, so every ceiling check stays conservative. The checklist
+   line renders "Market cap (FDV)" when that is the source, so no figure
+   reaches the operator with hidden provenance.
+
+   **Why the green suite never caught it:** every fixture hardcodes
+   `market_cap=400_000.0`, and
+   `test_missing_liquidity_or_market_cap_is_never_sent` passed
+   `market_cap=None` *alone*, leaving `make_pair`'s default `fdv=420_000`
+   in place — it asserted that a coin with a KNOWN valuation was
+   untradeable, never testing the case its own docstring claimed. The
+   fixture now nulls both fields and still pins the Rule 8 requirement.
+
+2. **CRITICAL — provider outages were recorded as token deaths, and then
+   as rugs.** `MarketDataService.get_best_pair` returns `None` for two
+   opposite things: no provider knows the token, and *every provider
+   failed* (it swallows `AllProvidersFailedError` internally,
+   `market_service.py:77-81`). `_live_measurement` read that `None` as
+   "the token is dead — that IS the outcome" and returned a fabricated
+   measurement of price $0 / liquidity $0.
+
+   Verified by execution against the real service: a total outage yields
+   `change = -100.0`, `survived = False`, `is_rug = True`,
+   `OutcomeBucket.RUG` — and `_on_resolved` then blacklists the deployer
+   **permanently**. A 30-second DNS blip on the droplet fails DexScreener
+   and GeckoTerminal together, and the backtest cron runs 4x/day, so one
+   bad minute mass-labelled healthy coins as rugs and blacklisted innocent
+   deployers, writing straight into the memory the ARMED p(rug) veto draws
+   its earned authority from.
+
+   Fix: call `get_token_pairs`, which *propagates*
+   `AllProvidersFailedError`, and keep the two cases apart. An outage
+   records nothing and leaves the window open for a later good reading
+   (Rule 8); an empty-but-successful lookup keeps its established meaning
+   of a dead token. Logged at WARNING instead of silently fabricating
+   (Rule 13). Rug detection itself is unchanged — a token that genuinely
+   lost its pair still resolves as a RUG, pinned by a control assertion so
+   this guard can never be mistaken for suppressing real rugs.
+
+Suite: **979 passing** (971 + 8).
+
+### Open leads from the same hunt (NOT yet verified — do not treat as fact)
+
+The hunt's spend budget ran out before 4 of its 5 adversarial verifiers
+ran, so the following are raw finder output with a known-high false-positive
+rate. Verified-and-unfixed items first:
+
+- **Alert suppression is entirely unlogged.** `AutomationRules` has no
+  logger at all, so `_untradeable` / `_oversized` / `_too_old` delete
+  buy-side alerts with no trace at any log level. This is precisely what
+  made finding 1 undiagnosable from a phone. Fixing it is the highest-value
+  observability work outstanding (Rule 13).
+- **`get_learning_metrics` walks the whole table on the event loop.**
+  `resolved_records()` is called with no limit (`service.py:768`), plus 2
+  SQL queries per resolved coin, from `/mind` and from the veto gate every
+  30 min. `/winners` passes `limit=`; `/mind` never got the same treatment.
+- **Telegram updates are handled strictly serially** — a slow `/check`
+  blocks a following `/dump` from even being downloaded from Telegram.
+- Filtered-by-min-priority alerts are recorded as *delivered*; SIGTERM is
+  not honored during the cycle/backoff sleep (90s hang then SIGKILL); a
+  typo'd `MEMEINTEL_LOG_LEVEL` crashes the process into an unbounded
+  systemd restart loop; `/status` reports layer *wiring*, not health.
+
+Unverified finder claims worth checking before acting: Telegram auth is
+chat-scoped rather than user-scoped; `deploy/setup.sh` may create a
+world-readable `.env` holding the trading wallet key; HDBSCAN holding the
+GIL through `asyncio.to_thread`; several claims against the 2026-07-28/29
+backtesting commits. Raw output is not committed — re-run the hunt to
+regenerate it.
