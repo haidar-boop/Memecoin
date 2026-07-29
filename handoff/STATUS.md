@@ -1,6 +1,6 @@
 # Build Status — Parts 1 through 33 (built or verified-satisfied)
 
-**1062 tests passing** (as of 2026-07-29). ~14,000+ lines of source,
+**1079 tests passing** (as of 2026-07-29). ~14,000+ lines of source,
 ~8,000+ lines of tests. Parts 20-33 completed a verification pass (see
 `next_steps/INDEX.md`); the only unbuilt items are the web dashboard
 (**discarded by the operator 2026-07-10 — do not build**) and

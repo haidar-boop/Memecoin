@@ -2489,3 +2489,68 @@ coins get vetoed, i.e. how the bot thinks, which needs the operator's word.
 Same for arming `veto_enabled`.
 
 Suite: **1062 passing** (1020 + 42).
+
+## 2026-07-29 (late) — "Still sending me dumb coins": the score rewards ignorance
+
+Two rounds of threshold tuning did not fix it, which was the clue. The cause
+is structural, not a matter of numbers.
+
+`compute_weighted_score` renormalizes over the categories that HAVE data
+(`total = weighted_sum / available_weight`). A coin nobody can measure is
+therefore scored on whichever one or two categories resolved — and outranks a
+fully-analysed coin. Measured on the real pipeline:
+
+| coin | score | coverage |
+|---|---|---|
+| only `security` measurable | **90.0** | 15% (classified `elite_opportunity`) |
+| fully-analysed decent coin | 74.0 | 100% |
+| fully-analysed GREAT coin | 88.3 | 100% |
+
+And through the actual `ResearchPipeline`: deleting every volume/trade field
+from a healthy coin **raised** its score from 92.9 (70% coverage) to 93.3
+(55%). **The less the bot knows about a coin, the better it looks** — and
+brand-new junk is what it knows least about.
+
+This is why raising `MEMEINTEL_ALERTS_OVERALL` made things worse: at 85 it
+removes the fully-analysed 88.3 coin before it touches the 90.0 unknown.
+Tightening the score threshold selectively deletes the GOOD coins.
+
+**The asymmetry that makes it a bug rather than a preference:**
+`workflow.insufficient_data_min_coverage` (0.5) already encodes that below
+half coverage an AVOID is "a data gap, not a verdict" and must not be
+trusted. The identical evidence was still trusted to conclude ELITE
+OPPORTUNITY. Refusing to conclude "bad" while happily concluding "great" from
+the same thin data is indefensible under Rule 8.
+
+### Fix
+
+- `AlertThresholds.min_coverage` (0.0 = OFF, Rule 18) suppresses buy-side
+  alerts below the floor; unknown/non-finite coverage counts as below it.
+  Protective warnings are never floored.
+- **Every buy-side alert now names its own coverage and what was missing**,
+  floor or no floor — `⚠️ Evidence: only 55% of the framework had data
+  (missing: community, momentum, narrative)`. The score alone cannot
+  distinguish "great coin" from "coin we could barely measure"; this makes
+  the difference visible on the phone. Below 70% it is scored as a MISS in the
+  "passed X/Y" header rather than a silent note.
+- The suppression log names the coverage floor that blocked a coin.
+
+Recommended `.env` value 0.65: blocks a coin missing narrative on top of
+community/foundation (55%) while keeping a normal fresh launch (70%). Left OFF
+by default because the last two strictness changes were my judgment rather
+than measurement, and the operator has been silenced once already by a guess.
+
+### Also this round
+
+- `hard_min_liquidity_usd` / `hard_min_market_cap_usd`: floors that actually
+  SUPPRESS. The existing `opportunity_min_*` floors only ANNOTATE (2026-07-12
+  "send it through and let me know") — but the settings comment claimed they
+  suppressed, so anyone setting them got no blocking at all. Comment corrected;
+  hard floors added alongside rather than changing what the old ones mean.
+- `momentum_min_security_score` documented in `.env.example`: momentum is the
+  largest alert category and ships with NO security floor, so a mintable /
+  freezable / unlocked coin can fire one purely for going up. The guard exists
+  in code ("rising price on a coin with bad security is bait, not a signal")
+  and was simply never switched on.
+
+Suite: **1079 passing**.

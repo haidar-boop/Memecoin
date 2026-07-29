@@ -216,6 +216,27 @@ class AlertThresholds:
     # OFF, so nothing changes until the operator sets them (Rule 18).
     hard_min_liquidity_usd: float = 0.0
     hard_min_market_cap_usd: float = 0.0
+    # Minimum EVIDENCE COVERAGE for a buy-side alert (0.0-1.0; 0.0 = OFF).
+    #
+    # The framework score is renormalized over whatever categories have data,
+    # so a coin nobody can measure scores on the strength of the one or two
+    # categories that DID resolve. Measured on the real pipeline 2026-07-29:
+    # stripping every volume/trade field off a healthy coin RAISED its score
+    # from 92.9 (70% coverage) to 93.3 (55% coverage). The less the bot knows
+    # about a coin, the better it looks — and brand-new junk is what it knows
+    # least about.
+    #
+    # The asymmetry this fixes: `workflow.insufficient_data_min_coverage`
+    # (0.5) already says that below half coverage an AVOID is "a data gap, not
+    # a verdict" and must not be trusted. The same evidence was still trusted
+    # to conclude ELITE OPPORTUNITY. Refusing to conclude "bad" while happily
+    # concluding "great" from the same thin data is the bug (Rule 8).
+    #
+    # Reference points, since coverage is abstract: all 7 categories = 1.00;
+    # missing community only = 0.85; missing community + foundation = 0.70 (a
+    # normal fresh launch — those two need CoinGecko/social data that does not
+    # exist yet for a new coin); missing narrative as well = 0.55.
+    min_coverage: float = 0.0
     # Operator "don't send me coins that already ran" CEILING for BUY-SIDE
     # alerts. ABOVE these, the coin is no longer an early opportunity — the move
     # the operator wants to catch already happened (a multi-million-dollar pool
@@ -306,6 +327,7 @@ class AlertThresholds:
             if hi > 0.0 and lo > 0.0 and hi < lo:
                 raise ConfigurationError(
                     f"alert threshold '{cap}' ({hi}) must be >= '{floor}' ({lo})")
+        _check_range("alert threshold 'min_coverage'", self.min_coverage, 0.0, 1.0)
         _check_range("alert threshold 'checklist_sell_tax_max_percent'",
                      self.checklist_sell_tax_max_percent, 0.0, 100.0)
         _check_range("alert threshold 'check_dumped_drop_percent'",

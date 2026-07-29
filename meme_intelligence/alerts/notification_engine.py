@@ -132,6 +132,22 @@ def sanitize_identity(value: str | None, *, max_len: int = 64) -> str:
     return (cleaned[:max_len] + "…") if len(cleaned) > max_len else (cleaned or "unknown")
 
 
+def _missing_categories(result: PipelineResult) -> tuple[str, ...]:
+    """Framework categories with no data behind them, for the alert checklist.
+
+    Derived from ``category_scores`` (None = never scored) rather than stored
+    on the assessment, so it stays correct without widening MasterAssessment.
+    """
+    scores = getattr(result.master, "category_scores", None)
+    if scores is None:
+        return ()
+    try:
+        fields = dataclasses.asdict(scores)
+    except TypeError:
+        return ()
+    return tuple(name for name, value in fields.items() if value is None)
+
+
 def _fmt_usd(value: float | None) -> str:
     """Money for a LOG line: unknown stays visibly unknown, never $0."""
     if value is None or not math.isfinite(value):
@@ -275,6 +291,11 @@ class AutomationRules:
                 f"vs max {_fmt_usd(self._t.opportunity_max_liquidity_usd)}, "
                 f"market_cap={_fmt_usd(pair.effective_market_cap)} "
                 f"vs max {_fmt_usd(self._t.opportunity_max_market_cap_usd)})")
+        if self._too_little_evidence(result):
+            reasons.append(
+                f"too_little_evidence(coverage="
+                f"{getattr(result.master, 'coverage', float('nan')):.0%} "
+                f"vs floor {self._t.min_coverage:.0%})")
         if self._too_old(result):
             reasons.append(
                 f"too_old(created={pair.pair_created_at}, "
@@ -394,7 +415,7 @@ class AutomationRules:
         # warning.
         if (deterministic_risk_veto is not None
                 or self._untradeable(result) or self._oversized(result)
-                or self._too_old(result)):
+                or self._too_little_evidence(result) or self._too_old(result)):
             dropped = [e.alert_type for e in events
                        if e.alert_type in _BUY_SIDE_ALERT_TYPES]
             events = [e for e in events if e.alert_type not in _BUY_SIDE_ALERT_TYPES]
@@ -452,6 +473,25 @@ class AutomationRules:
             return True
         return False
 
+    def _too_little_evidence(self, result: PipelineResult) -> bool:
+        """True when the score rests on too little of the framework to be a
+        recommendation (0.0 = off).
+
+        Scores are renormalized over the categories that HAVE data, so a coin
+        nobody can measure is scored on whichever one or two categories did
+        resolve — and comes out looking better than a fully-analysed coin.
+        Verified on the real pipeline: removing every volume/trade field
+        RAISED a coin's score from 92.9 to 93.3 while dropping coverage from
+        70% to 55% (operator: "it's still sending me dumb coins", 2026-07-29).
+        """
+        floor = self._t.min_coverage
+        if floor <= 0.0:
+            return False
+        coverage = getattr(result.master, "coverage", None)
+        if coverage is None or not math.isfinite(coverage):
+            return True   # unknown coverage is not evidence of coverage (Rule 8)
+        return coverage < floor
+
     def _oversized(self, result: PipelineResult) -> bool:
         """True when the coin has already grown past the operator's buy-side
         ceiling — liquidity or market cap above a SET maximum. A coin this large
@@ -504,6 +544,22 @@ class AutomationRules:
         not look like a scam purely for being young."""
         p = result.security_profile
         checks: list[_SafetyCheck] = []
+
+        # 0) How much of the framework actually had data behind this score.
+        # Surfaced unconditionally: the score alone cannot distinguish "great
+        # coin" from "coin we could barely measure", because renormalization
+        # makes those look identical (2026-07-29).
+        coverage = getattr(result.master, "coverage", None)
+        if coverage is None or not math.isfinite(coverage):
+            checks.append(_SafetyCheck("unknown", "Evidence coverage: unknown"))
+        elif coverage >= 0.85:
+            checks.append(_SafetyCheck(
+                "pass", f"Evidence: {coverage:.0%} of the framework had data"))
+        else:
+            missing = ", ".join(_missing_categories(result))
+            detail = (f"Evidence: only {coverage:.0%} of the framework had data"
+                      + (f" (missing: {missing})" if missing else ""))
+            checks.append(_SafetyCheck("warn" if coverage < 0.7 else "note", detail))
 
         # 1) Sellable — a confirmed honeypot is handled upstream (destructive ->
         # no opportunity + emergency warning); this line reassures on the survivors.

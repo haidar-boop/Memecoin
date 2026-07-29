@@ -1115,3 +1115,94 @@ async def test_the_suppression_log_names_the_floor_that_blocked_it(caplog):
     with caplog.at_level(logging.INFO, logger="meme_intelligence.alerts.rules"):
         rules.evaluate(result)
     assert "vs floor $12,000" in caplog.text
+
+
+# ---- Evidence coverage (operator: "still sending me dumb coins", 2026-07-29) ----
+#
+# Scores are renormalized over the categories that HAVE data, so the less the
+# bot knows about a coin the better it looks. Measured on the real pipeline:
+# stripping every volume/trade field RAISED a coin's score from 92.9 (70%
+# coverage) to 93.3 (55%). Raising the score threshold therefore removes GOOD
+# coins before it touches junk — which is why tightening `overall` backfired.
+
+
+async def thin_result():
+    """A coin almost nothing could be measured on — the 'dumb coin' shape."""
+    return await pipeline_result(pair=make_pair(
+        volume_24h=None, volume_1h=None, buys_24h=None, sells_24h=None,
+        buys_1h=None, sells_1h=None, buyers_24h=None, sellers_24h=None,
+        price_change_24h=None, price_change_6h=None, price_change_1h=None))
+
+
+async def test_thin_evidence_outscores_a_healthy_coin():
+    """The pathology itself, pinned so it cannot silently return."""
+    healthy = await pipeline_result()
+    thin = await thin_result()
+    assert thin.master.coverage < healthy.master.coverage
+    assert thin.master.final_score >= healthy.master.final_score
+
+
+async def test_a_coverage_floor_suppresses_a_barely_measured_coin():
+    rules = strict_rules(min_coverage=0.65)
+    types = {e.alert_type for e in rules.evaluate(await thin_result())}
+    assert not (types & _BUY_SIDE_ALERT_TYPES)
+
+
+async def test_a_coverage_floor_keeps_a_normally_analysed_launch():
+    """A fresh launch legitimately lacks community/foundation data — the floor
+    must not punish it for being new (Rule 8)."""
+    rules = strict_rules(min_coverage=0.65)
+    types = {e.alert_type for e in rules.evaluate(await pipeline_result())}
+    assert types & _BUY_SIDE_ALERT_TYPES
+
+
+async def test_unknown_coverage_is_not_evidence_of_coverage():
+    import dataclasses as _dc
+    rules = strict_rules(min_coverage=0.65)
+    result = await pipeline_result()
+    broken = _dc.replace(result,
+                         master=_dc.replace(result.master, coverage=float("nan")))
+    types = {e.alert_type for e in rules.evaluate(broken)}
+    assert not (types & _BUY_SIDE_ALERT_TYPES)
+
+
+async def test_the_coverage_floor_is_off_by_default():
+    assert AlertThresholds().min_coverage == 0.0
+    types = {e.alert_type for e in make_rules().evaluate(await thin_result())}
+    assert types & _BUY_SIDE_ALERT_TYPES     # unchanged until the operator sets it
+
+
+async def test_coverage_floor_never_silences_a_protective_warning():
+    rules = strict_rules(min_coverage=0.95)
+    result = await pipeline_result(honeypot=True)
+    types = {e.alert_type for e in rules.evaluate(result)}
+    assert types & _PROTECTIVE_ALERT_TYPES
+
+
+async def test_every_buy_side_alert_names_its_evidence_coverage():
+    """Shown whether or not a floor is set: the score alone cannot distinguish
+    'great coin' from 'coin we could barely measure'."""
+    events = make_rules().evaluate(await thin_result())
+    buy_side = [e for e in events if e.alert_type in _BUY_SIDE_ALERT_TYPES]
+    line = next(l for l in buy_side[0].checklist if "Evidence" in l)
+    assert "55%" in line
+    assert "momentum" in line          # names WHAT was missing
+
+
+async def test_thin_evidence_is_scored_as_a_miss_not_a_pass():
+    """It must count against the 'passed X/Y' header, not be a silent note."""
+    thin = make_rules().evaluate(await thin_result())
+    healthy = make_rules().evaluate(await pipeline_result())
+    thin_header = [e for e in thin if e.alert_type in _BUY_SIDE_ALERT_TYPES][0].checklist[0]
+    good_header = [e for e in healthy if e.alert_type in _BUY_SIDE_ALERT_TYPES][0].checklist[0]
+    assert "5/6" in thin_header        # the coverage warn counts as a miss
+    assert "5/5" in good_header
+
+
+async def test_the_suppression_log_names_the_coverage_floor(caplog):
+    import logging
+    rules = strict_rules(min_coverage=0.65)
+    with caplog.at_level(logging.INFO, logger="meme_intelligence.alerts.rules"):
+        rules.evaluate(await thin_result())
+    assert "too_little_evidence" in caplog.text
+    assert "coverage=55%" in caplog.text
