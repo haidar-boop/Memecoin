@@ -188,3 +188,59 @@ def test_store_is_usable_from_a_different_thread(store):
     assert not thread.is_alive(), "worker thread hung"
     assert errors == [], f"cross-thread access raised: {errors}"
     assert store.coin_id(TOKEN2) is not None
+
+
+def test_graded_predictions_matches_the_old_per_coin_walk(tmp_path):
+    """Equivalence guard for the 2026-07-29 performance fix.
+
+    get_learning_metrics used to walk resolved_records() and then issue
+    coin_id() + get_prediction() per coin — three queries per coin plus a full
+    snapshot-history load it discarded, run synchronously on the event loop by
+    /mind and the veto gate. graded_predictions() must return exactly the same
+    (bucket, payload) rows in the same order.
+    """
+    from datetime import timedelta
+
+    store = LearningStore(str(tmp_path / "l.sqlite3"))
+    for i in range(6):
+        token = TokenIdentity(chain="solana", address=f"Addr{i}", symbol=f"S{i}")
+        coin_id = store.record_detection(token, detected_at=NOW,
+                                         detection_price_usd=1.0)
+        for k in range(3):
+            store.append_snapshot(coin_id, CoinSnapshot(
+                age_seconds=300.0 * k, captured_at=NOW + timedelta(minutes=5 * k),
+                price_usd=1.0 + k, liquidity_usd=50_000.0))
+        if i % 2 == 0:   # only half get a resolved label
+            store.record_label(coin_id, OutcomeLabel(
+                horizon_hours=24.0, bucket=OutcomeBucket.PUMP,
+                forward_return_percent=80.0, resolved_at=NOW))
+        if i % 3 != 0:   # and an overlapping-but-different half get a prediction
+            store.record_prediction(coin_id, {
+                "distribution": {"pump": 0.6, "rug": 0.4},
+                "predicted_label": f"p{i}", "archetype": "a1",
+                "novelty_flagged": False})
+
+    expected = []
+    for record in store.resolved_records():
+        coin_id = store.coin_id(record.token)
+        prediction = store.get_prediction(coin_id) if coin_id else None
+        if not prediction:
+            continue
+        expected.append((record.final_bucket.value, prediction))
+
+    assert store.graded_predictions() == expected
+    assert expected, "fixture must produce at least one graded prediction"
+
+
+def test_graded_predictions_skips_a_corrupt_payload(tmp_path):
+    """A corrupt payload is not a graded prediction — and must not raise."""
+    store = LearningStore(str(tmp_path / "l.sqlite3"))
+    token = TokenIdentity(chain="solana", address="Addr1", symbol="S")
+    coin_id = store.record_detection(token, detected_at=NOW, detection_price_usd=1.0)
+    store.record_label(coin_id, OutcomeLabel(
+        horizon_hours=24.0, bucket=OutcomeBucket.PUMP,
+        forward_return_percent=80.0, resolved_at=NOW))
+    store.record_prediction(coin_id, {"predicted_label": "pump"})
+    store._conn.execute("UPDATE learning_predictions SET payload = 'not json'")
+    store._conn.commit()
+    assert store.graded_predictions() == []

@@ -1724,3 +1724,64 @@ async def test_credit_gate_skips_wallet_lookup_on_stale_candidate():
         )
         await scanner2.run(max_cycles=1)
         assert wallet.calls == [stale_pair.base_token.address]   # holding: always checked
+
+
+# ---- SIGTERM wakes the loop out of its sleep (bug hunt, 2026-07-29) ----
+
+
+async def test_stop_request_interrupts_a_long_sleep():
+    """request_stop only set a flag; run() parked in asyncio.sleep (up to the
+    300s error backoff) and never re-checked it, so systemd waited its 90s
+    TimeoutStopSec and then SIGKILLed — skipping the exit-stack unwind during
+    the exact window the operator was trying to restart the bot from his
+    phone."""
+    import asyncio as _asyncio
+    import time as _time
+    from meme_intelligence.workflow.controller import ContinuousScanner
+
+    scanner = ContinuousScanner.__new__(ContinuousScanner)
+    scanner._stop = _asyncio.Event()
+    scanner._sleep = _asyncio.sleep          # the REAL sleep, not a test double
+
+    async def stop_shortly():
+        await _asyncio.sleep(0.05)
+        scanner.request_stop()
+
+    started = _time.monotonic()
+    await _asyncio.gather(scanner._sleep_unless_stopping(300.0), stop_shortly())
+    assert _time.monotonic() - started < 5.0   # woke on the event, not the 300s
+
+
+async def test_sleep_returns_immediately_when_already_stopping():
+    import asyncio as _asyncio
+    from meme_intelligence.workflow.controller import ContinuousScanner
+
+    scanner = ContinuousScanner.__new__(ContinuousScanner)
+    scanner._stop = _asyncio.Event()
+    scanner._stop.set()
+    calls = []
+
+    async def never(seconds):
+        calls.append(seconds)
+        await _asyncio.sleep(300)
+
+    scanner._sleep = never
+    await scanner._sleep_unless_stopping(300.0)
+    assert calls == []          # the sleep is never even started
+
+
+async def test_sleep_runs_to_completion_when_no_stop_is_requested():
+    """The normal path must still actually wait."""
+    import asyncio as _asyncio
+    from meme_intelligence.workflow.controller import ContinuousScanner
+
+    scanner = ContinuousScanner.__new__(ContinuousScanner)
+    scanner._stop = _asyncio.Event()
+    seen = []
+
+    async def record(seconds):
+        seen.append(seconds)
+
+    scanner._sleep = record
+    await scanner._sleep_unless_stopping(45.0)
+    assert seen == [45.0]

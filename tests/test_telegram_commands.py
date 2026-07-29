@@ -1,5 +1,7 @@
 """Tests for two-way Telegram control (Project 2, ROADMAP item 2)."""
 
+import asyncio
+import dataclasses
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -643,6 +645,10 @@ async def test_poison_update_does_not_stop_the_batch():
 
         listener._get_json = fake_get_json
         await listener._poll_once()
+        # Handlers now run as background tasks so one slow command cannot stop
+        # the poll loop from FETCHING the next update (2026-07-29); wait for
+        # this batch to finish before asserting on what was sent.
+        await listener._wait_inflight()
     assert listener._offset == 4
     assert any("Commands:" in m["text"] for m in sent_messages(calls))
 
@@ -1116,3 +1122,172 @@ async def test_percent_buy_button_malformed_payload_rejected():
         await listener._handle_update(callback_update(f"buy:{SOL_ADDR}:pct:notanumber"))
         await listener._handle_update(callback_update(f"buy:{SOL_ADDR}:notpct:50"))
     assert executor.buy_calls == []
+
+
+# ---- /status reports health, not just wiring (bug hunt, 2026-07-29) ----
+
+
+async def _status_text(status):
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage, status=status)
+        await listener._handle_update(message_update("/status"))
+    return sent_messages(calls)[0]["text"]
+
+
+def _base_status(**health):
+    return {
+        "uptime_seconds": 3700.0, "cycles": 42,
+        "last_cycle": {"pools_seen": 30, "candidates": 5, "analyzed": 3,
+                       "launches_tracked": 0, "learned": 3, "alerts": 0},
+        "networks": ["solana"],
+        "layers": {"wallet_intel": True, "ai": False, "learning": True,
+                   "pumpfun": True, "jupiter_probe": True, "buy_button": False,
+                   "trading_live": False},
+        "health": health,
+        "db": {"tokens": 10, "alerts": 4, "watchlist": 3, "holdings": 1},
+    }
+
+
+async def test_status_says_disconnected_when_the_pumpfun_socket_is_dead():
+    """PumpPortal reconnects forever with backoff and logs only at WARNING, so
+    a permanently dead stream showed as a confident "pump.fun ON" while launch
+    discovery — the fastest path to a fresh Solana launch — was gone."""
+    text = await _status_text(_base_status(pumpfun_connected=False))
+    assert "DISCONNECTED" in text
+
+
+async def test_status_confirms_a_live_pumpfun_socket():
+    text = await _status_text(_base_status(pumpfun_connected=True))
+    assert "ON (connected)" in text
+    assert "DISCONNECTED" not in text
+
+
+async def test_status_reports_when_an_alert_last_reached_the_phone():
+    """"The process is up" and "alerts are reaching me" are different
+    questions, and only the second one matters to the operator."""
+    quiet = await _status_text(_base_status(pumpfun_connected=True))
+    assert "none since startup" in quiet
+    recent = await _status_text(
+        _base_status(pumpfun_connected=True,
+                     last_alert_delivered_at="2026-07-29T09:15:00+00:00"))
+    assert "2026-07-29T09:15:00+00:00" in recent
+
+
+async def test_status_without_health_still_renders():
+    """Rule 18: an older snapshot dict with no `health` key must not break."""
+    status = _base_status()
+    del status["health"]
+    text = await _status_text(status)
+    assert "SCANNER STATUS" in text
+    assert "pump.fun ON" in text
+
+
+# ---- A slow command must not block an emergency one (bug hunt 2026-07-29) ----
+
+
+async def test_a_slow_check_does_not_delay_the_next_command():
+    """_poll_once awaited every handler inline, and _poll_forever only issues
+    the next getUpdates after it returns — so a multi-minute /check meant a
+    following /dump was not even DOWNLOADED from Telegram until the /check
+    finished. The operator watching a pool drain could not sell."""
+    released = asyncio.Event()
+    started = asyncio.Event()
+
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        async def slow_check(address, chain):
+            started.set()
+            await released.wait()      # a provider stack that never returns
+            return None
+
+        listener, calls = make_listener(storage, check_result=None)
+        listener._ctx = dataclasses.replace(listener._ctx, check_runner=slow_check)
+
+        await listener._dispatch_update(
+            message_update(f"/check {SOL_ADDR}", update_id=1))
+        await asyncio.wait_for(started.wait(), timeout=2.0)
+
+        # With the old inline dispatch this await would have blocked until the
+        # /check finished. It must return promptly instead.
+        await asyncio.wait_for(
+            listener._dispatch_update(message_update("/help", update_id=2)),
+            timeout=2.0)
+        # /help answered while /check is still parked.
+        for _ in range(50):
+            if any("Commands:" in m["text"] for m in sent_messages(calls)):
+                break
+            await asyncio.sleep(0.01)
+        assert any("Commands:" in m["text"] for m in sent_messages(calls))
+        assert not released.is_set()
+
+        released.set()
+        await listener._wait_inflight()
+
+
+async def test_inflight_cap_falls_back_to_inline_instead_of_growing():
+    """Unbounded task growth on a 1 GB droplet is worse than a brief stall.
+    Exercises the dispatcher directly so no per-command lock interferes."""
+    from meme_intelligence.alerts.telegram_commands import _MAX_INFLIGHT_UPDATES
+
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, _calls = make_listener(storage)
+        blocker = asyncio.Event()
+        ran_inline = []
+
+        async def blocking_run(update):
+            ran_inline.append(update)
+            await blocker.wait()
+
+        listener._run_update = blocking_run
+        for i in range(_MAX_INFLIGHT_UPDATES):
+            await listener._dispatch_update(message_update("/help", update_id=i + 1))
+        assert len(listener._inflight) == _MAX_INFLIGHT_UPDATES
+
+        # At the cap the next dispatch runs INLINE, so it blocks with the rest
+        # rather than spawning task number nine.
+        overflow = asyncio.ensure_future(
+            listener._dispatch_update(message_update("/help", update_id=99)))
+        for _ in range(50):
+            if len(ran_inline) > _MAX_INFLIGHT_UPDATES:
+                break
+            await asyncio.sleep(0.01)
+        assert len(ran_inline) == _MAX_INFLIGHT_UPDATES + 1   # it did run
+        assert len(listener._inflight) == _MAX_INFLIGHT_UPDATES  # but spawned nothing
+
+        blocker.set()
+        await overflow
+        await listener._wait_inflight()
+
+
+async def test_trades_stay_strictly_serialized_under_concurrency():
+    """Concurrency must never let two buys size against the same balance."""
+    overlaps = []
+    active = 0
+
+    class SlowExecutor:
+        enabled = True
+        live = False
+
+        async def execute_buy(self, intent):
+            nonlocal active
+            active += 1
+            overlaps.append(active)
+            await asyncio.sleep(0.02)
+            active -= 1
+            return "bought"
+
+        async def execute_sell_all(self, address, chain):
+            nonlocal active
+            active += 1
+            overlaps.append(active)
+            await asyncio.sleep(0.02)
+            active -= 1
+            return "dumped"
+
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, _calls = make_listener(storage, executor=SlowExecutor())
+        await asyncio.gather(
+            listener._do_buy(SOL_ADDR, 0.05),
+            listener._do_buy(SOL_ADDR, 0.05),
+            listener._do_dump(SOL_ADDR),
+        )
+    assert max(overlaps) == 1, f"trades overlapped: {overlaps}"

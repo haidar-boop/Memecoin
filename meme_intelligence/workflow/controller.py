@@ -356,10 +356,46 @@ class ContinuousScanner:
         # red flag) — see _finalize_or_reschedule / _retry_insufficient_data.
         self._retry_pending = _BoundedKeySet(settings.workflow.max_tracked_keys)
         self._stop = asyncio.Event()
+        # When an alert last actually reached an external sink. /status used to
+        # report only which layers were WIRED, so "the process is up" and
+        # "alerts are flowing" were indistinguishable from the phone.
+        self._last_alert_at: datetime | None = None
 
     def request_stop(self) -> None:
         """Ask the scanner to stop after the current cycle (graceful shutdown)."""
         self._stop.set()
+
+    async def _sleep_unless_stopping(self, seconds: float) -> None:
+        """Sleep, but wake the moment a stop is requested.
+
+        ``request_stop`` only sets an event, and ``_install_signal_handlers``
+        binds it to SIGTERM — which REPLACES the default disposition, so the
+        process no longer dies on SIGTERM. A plain ``asyncio.sleep`` is not
+        interruptible by that event, and the error backoff reaches
+        ``_ERROR_BACKOFF_MAX`` (300s) while systemd's default TimeoutStopSec is
+        90s: a provider outage plus a phone-issued ``systemctl restart`` meant
+        90 seconds of apparent hang followed by SIGKILL, skipping the
+        AsyncExitStack unwind (aiohttp sessions, wallet/social/AI clients, the
+        Telegram listener) — during the exact window the operator is trying to
+        recover the bot (bug-hunt finding, 2026-07-29).
+
+        ``sleep_func`` stays injectable for tests; this only races it against
+        the stop event.
+        """
+        if self._stop.is_set():
+            return
+        sleeper = asyncio.ensure_future(self._sleep(seconds))
+        waiter = asyncio.ensure_future(self._stop.wait())
+        try:
+            await asyncio.wait({sleeper, waiter}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in (sleeper, waiter):
+                if not task.done():
+                    task.cancel()
+            # Never leave the losing task pending: on a small droplet a
+            # cancelled-but-unawaited task logs "Task was destroyed but it is
+            # pending!" on every shutdown.
+            await asyncio.gather(sleeper, waiter, return_exceptions=True)
 
     def _install_signal_handlers(self) -> None:
         try:
@@ -407,6 +443,21 @@ class ContinuousScanner:
             "last_cycle": last,
             "networks": list(self._settings.workflow.network_list),
             "layers": dict(self._layers),
+            # `layers` says what is WIRED; `health` says what is actually
+            # WORKING. The pump.fun launch stream reconnects forever with
+            # backoff and logs only at WARNING, so a permanently dead socket
+            # left /status cheerfully reporting "pump.fun ON" while the fastest
+            # path to a fresh launch was gone (bug-hunt finding, 2026-07-29).
+            # A None value means "not wired", which is different from "wired
+            # but down" (Rule 8).
+            "health": {
+                "pumpfun_connected": (
+                    bool(getattr(self._pumpportal, "connected", False))
+                    if self._launch_monitor is not None else None),
+                "last_alert_delivered_at": (
+                    self._last_alert_at.isoformat()
+                    if self._last_alert_at is not None else None),
+            },
             "db": db,
         }
 
@@ -477,13 +528,14 @@ class ContinuousScanner:
                 # KeyboardInterrupt / SystemExit are BaseException and still
                 # propagate for a clean shutdown.
                 self._logger.error("cycle %d failed: %s (backing off %.0fs)", cycle, exc, backoff)
-                await self._sleep(backoff)
+                await self._sleep_unless_stopping(backoff)
                 backoff = min(_ERROR_BACKOFF_MAX, backoff * 2)
                 continue
 
             if self._stop.is_set() or (max_cycles is not None and cycle >= max_cycles):
                 break
-            await self._sleep(self._settings.workflow.monitor_interval_seconds)
+            await self._sleep_unless_stopping(
+                self._settings.workflow.monitor_interval_seconds)
 
         if self._telegram is not None:
             try:
@@ -790,6 +842,8 @@ class ContinuousScanner:
                 events = []
         delivered, filtered = await self._notifier.dispatch_detailed(events)
         stats.alerts.extend(delivered)
+        if delivered:
+            self._last_alert_at = self._now()
         for event in delivered:
             # Structured history for Section 12 / Part 24 performance
             # measurement, plus the human-readable journal line.

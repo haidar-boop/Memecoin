@@ -11,6 +11,11 @@ Environment=PYTHONUNBUFFERED=1
 ExecStart=__REPO_DIR__/.venv/bin/python -m meme_intelligence monitor --pumpfun
 Restart=always
 RestartSec=10
+# State the stop budget rather than inheriting systemd's invisible 90s
+# default. The app now wakes from its cycle/backoff sleep on SIGTERM, so a
+# clean stop takes about as long as the in-flight cycle; this bounds the
+# worst case and keeps a phone-issued `systemctl restart` responsive.
+TimeoutStopSec=45
 # Belt-and-suspenders on top of the app's own exponential backoff (Rule 7):
 # if the process itself dies outright, systemd brings it back.
 StartLimitIntervalSec=0

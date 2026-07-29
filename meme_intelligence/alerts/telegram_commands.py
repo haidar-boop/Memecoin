@@ -47,6 +47,18 @@ from meme_intelligence.core.models import TokenIdentity
 # resets on the first successful poll. The cap is configurable.
 _ERROR_BACKOFF_START = 2.0
 
+# Concurrent update handlers allowed before the poll loop falls back to
+# running them inline. Small on purpose: the operator is ONE person, so more
+# than a handful in flight means something is wrong (a flood, or handlers
+# wedged on a hung provider), and unbounded task growth on a 1 GB droplet is
+# a worse failure than a brief stall.
+_MAX_INFLIGHT_UPDATES = 8
+
+# Grace period for in-flight command handlers at shutdown, before they are
+# cancelled. Sized well under the unit's TimeoutStopSec so systemd never has
+# to SIGKILL us.
+_SHUTDOWN_DRAIN_SECONDS = 5.0
+
 _REPLY_MAX_CHARS = 4000        # Telegram sendMessage hard limit is 4096
 _CALLBACK_ACK_MAX_CHARS = 190  # answerCallbackQuery text limit is 200
 # Only ask Telegram for fresh messages and button presses — never
@@ -220,6 +232,16 @@ class TelegramCommandListener(BaseCollector):
         # double-tap on a laggy client must not fire two real trades
         # (bug-hunt finding, 2026-07-12). Bounded FIFO.
         self._actioned_buttons: "OrderedDict[tuple[int, str], bool]" = OrderedDict()
+        # Handlers run as background tasks so one slow command cannot stop the
+        # poll loop from FETCHING the next (see _poll_once). Tracked so stop()
+        # can cancel them, and capped so a flood cannot spawn tasks without
+        # bound on a 1 GB droplet — at the cap the loop falls back to running
+        # the handler inline, which is natural backpressure.
+        self._inflight: set[asyncio.Task] = set()
+        # Money-moving commands stay STRICTLY serialized exactly as they were
+        # when every handler ran inline. Concurrency here would let two /buy
+        # presses size themselves against the same balance and double-spend.
+        self._trade_lock = asyncio.Lock()
         self._check_lock = asyncio.Lock()
         self._check_cache: "OrderedDict[tuple[str, str], tuple[float, str]]" = OrderedDict()
         # /winners walks recent resolved records off the event loop; cache the
@@ -277,6 +299,34 @@ class TelegramCommandListener(BaseCollector):
                 pass
             self._task = None
             self._logger.info("telegram command listener stopped")
+        await self._drain_inflight()
+
+    async def _wait_inflight(self) -> None:
+        """Await every handler currently running (no cancellation)."""
+        pending = list(self._inflight)
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    async def _drain_inflight(self, timeout: float = _SHUTDOWN_DRAIN_SECONDS) -> None:
+        """Let running handlers finish, then cancel whatever is left.
+
+        Handlers get a grace period rather than an immediate cancel because one
+        of them may be a /buy or /dump mid-flight: a trade that has been
+        submitted but not yet confirmed should be allowed to finish recording
+        its signature (Rule 7). Anything still running after the grace period is
+        cancelled so shutdown cannot hang and no orphan task is left behind.
+        """
+        pending = list(self._inflight)
+        self._inflight.clear()
+        if not pending:
+            return
+        _done, still_running = await asyncio.wait(pending, timeout=timeout)
+        for task in still_running:
+            task.cancel()
+        if still_running:
+            self._logger.warning("cancelled %d telegram handler(s) still running "
+                                 "after %.0fs", len(still_running), timeout)
+            await asyncio.gather(*still_running, return_exceptions=True)
 
     # ---- Poll loop (error-isolated, Rule 7) ----
 
@@ -374,14 +424,43 @@ class TelegramCommandListener(BaseCollector):
                 # handlers fail — a poison update must not replay forever.
                 self._offset = (update_id + 1 if self._offset is None
                                 else max(self._offset, update_id + 1))
-            try:
-                await self._handle_update(update)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # noqa: BLE001 — one bad update never stops polling
-                self._logger.error("telegram update handling failed: %s",
-                                   self._scrub(str(exc)))
+            await self._dispatch_update(update)
         return len(updates)
+
+    async def _dispatch_update(self, update: dict) -> None:
+        """Run one update's handler WITHOUT blocking the poll loop.
+
+        Handlers used to be awaited inline here, and _poll_forever only issues
+        the next getUpdates after _poll_once returns — so a multi-minute
+        /check (forced wallet + social lookups, each retried with backoff) meant
+        a following /dump was not even DOWNLOADED from Telegram until the
+        /check finished. The operator watching a pool drain could not sell
+        while the bot looked perfectly alive (bug-hunt finding, 2026-07-29).
+
+        Trading commands remain serialized via _trade_lock, so this changes
+        latency, never the ordering of anything that moves money.
+        """
+        if len(self._inflight) >= _MAX_INFLIGHT_UPDATES:
+            # Backpressure rather than unbounded task growth: run it inline.
+            self._logger.warning(
+                "%d telegram handlers already in flight; running this one inline",
+                len(self._inflight))
+            await self._run_update(update)
+            return
+        task = asyncio.create_task(self._run_update(update),
+                                   name="telegram-update-handler")
+        self._inflight.add(task)
+        task.add_done_callback(self._inflight.discard)
+
+    async def _run_update(self, update: dict) -> None:
+        """Handle one update, swallowing everything a handler can throw."""
+        try:
+            await self._handle_update(update)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — one bad update never stops polling
+            self._logger.error("telegram update handling failed: %s",
+                               self._scrub(str(exc)))
 
     # ---- Update routing + auth (D3) ----
 
@@ -524,11 +603,25 @@ class TelegramCommandListener(BaseCollector):
             trading = "LIVE"
         else:
             trading = "dry-run"
+        # `layers` is what is WIRED. pump.fun additionally reports whether its
+        # WebSocket is actually connected right now: it reconnects forever with
+        # backoff and logs only at WARNING, so a permanently dead stream used to
+        # show as a confident "ON" here while launch discovery was gone.
+        health = snap.get("health") or {}
+        pumpfun = onoff("pumpfun")
+        connected = health.get("pumpfun_connected")
+        if layers.get("pumpfun") and connected is not None:
+            pumpfun = "ON (connected)" if connected else "ON but DISCONNECTED"
         lines.append(
             f"layers: wallet intel {onoff('wallet_intel')} | AI {onoff('ai')} | "
             f"learning {onoff('learning')} | mind veto {onoff('learning_veto')} | "
-            f"pump.fun {onoff('pumpfun')} | jupiter probe {onoff('jupiter_probe')} | "
+            f"pump.fun {pumpfun} | jupiter probe {onoff('jupiter_probe')} | "
             f"trading {trading}")
+        # "The process is up" and "alerts are reaching me" are different
+        # questions, and only the second one matters to the operator.
+        last_alert = health.get("last_alert_delivered_at")
+        lines.append("last alert delivered: " + (
+            str(last_alert) if last_alert else "none since startup"))
         db = snap.get("db") or {}
         lines.append(
             f"db: {db.get('tokens', '?')} tokens, {db.get('alerts', '?')} alerts, "
@@ -1205,12 +1298,21 @@ class TelegramCommandListener(BaseCollector):
             token_address=token.address, chain=token.chain,
             sol_amount=sol_amount, requested_at=self._now(), source="telegram",
         )
-        return await self._ctx.executor.execute_buy(intent)
+        # Handlers now run concurrently so a slow /check cannot delay a /dump,
+        # but money-moving commands must keep the strict serialization they had
+        # when everything ran inline: two overlapping buys would each size
+        # themselves against the same wallet balance and could double-spend.
+        # This is the single chokepoint for both the text command and the
+        # alert's Buy button.
+        async with self._trade_lock:
+            return await self._ctx.executor.execute_buy(intent)
 
     async def _do_dump(self, address: str) -> str:
         """Runs the dump and returns the full result — see :meth:`_do_buy`."""
         token = self._resolve_token(address)
-        return await self._ctx.executor.execute_sell_all(token.address, token.chain)
+        async with self._trade_lock:   # serialized with buys — see _do_buy
+            return await self._ctx.executor.execute_sell_all(
+                token.address, token.chain)
 
     async def _answer_callback(self, callback_id, text: str) -> None:
         if not callback_id:
