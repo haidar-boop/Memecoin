@@ -726,7 +726,10 @@ class TelegramCommandListener(BaseCollector):
             verdict = service.evaluate_coin(
                 pair.base_token.address, pair.base_token.chain, [snapshot],
                 security=profile,
-                creator=profile.creator_address if profile is not None else None)
+                creator=profile.creator_address if profile is not None else None,
+                # Same trajectory-aware read the scanner uses, so /check and
+                # the live veto never disagree (2026-07-28).
+                include_stored_history=True)
             p_rug = float(verdict.get("final_probabilities", {}).get("rug", 0.0))
             confidence = float(verdict.get("model_confidence", 0.0))
             return (f"mind (advisory): p(rug) {p_rug:.0%}, confidence {confidence:.0%}, "

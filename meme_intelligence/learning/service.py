@@ -346,10 +346,24 @@ class LearningService:
         *,
         security: SecurityProfile | None = None,
         creator: str | None = None,
+        include_stored_history: bool = False,
     ) -> dict:
-        """The full verdict for a live coin (Section 10 — the public contract)."""
+        """The full verdict for a live coin (Section 10 — the public contract).
+
+        ``include_stored_history`` merges the coin's already-recorded
+        trajectory with ``snapshot_series`` before extracting the
+        fingerprint. Callers that observe a coin one cycle at a time (the
+        scanner, the veto, /check) should set it: the analog index and the
+        classifier are TRAINED on full-trajectory fingerprints, so judging a
+        live coin from a single snapshot handed the models a shapeless
+        vector — all slope/volatility/acceleration features zero — that the
+        training set never contained (train/serve skew, 2026-07-28). Callers
+        that already hold the whole series leave it False and are unaffected.
+        """
         self._maybe_reload_analog()
         snaps = [CoinSnapshot.from_dict(s) for s in snapshot_series]
+        if include_stored_history:
+            snaps = self._merge_stored_history(token_address, chain, snaps)
         fingerprint = self._extractor.extract(snaps)
         scaled = self._scaler.transform(fingerprint.vector)
 
@@ -405,6 +419,37 @@ class LearningService:
                                analog_dist, model_dist, rug_dist, assignment.name,
                                novelty_flagged, creator=creator)
         return verdict.to_dict()
+
+    def _merge_stored_history(self, token_address: str, chain: str,
+                              snaps: list[CoinSnapshot]) -> list[CoinSnapshot]:
+        """The coin's stored trajectory plus ``snaps``, deduped by age.
+
+        The caller's snapshot wins on an age collision — it is the fresher
+        read of that same moment (the scanner captures a snapshot and then
+        evaluates, so the current observation is usually in both). Bounded
+        by ``max_evaluation_snapshots``. Fails OPEN: any store problem
+        returns the caller's snapshots unchanged, so a history read can
+        never break an evaluation that the ARMED p(rug) veto depends on
+        (Rule 6/7).
+        """
+        try:
+            coin_id = self._store.coin_id(TokenIdentity(chain=chain, address=token_address))
+            if coin_id is None:
+                return snaps
+            stored = self._store.snapshots_for(
+                coin_id, limit=self._ls.max_evaluation_snapshots)
+        except Exception as exc:  # noqa: BLE001 — advisory enrichment, never fatal
+            self._logger.warning("stored-history merge unavailable for %s/%s: %s",
+                                 chain, token_address, exc)
+            return snaps
+        if not stored:
+            return snaps
+        by_age: dict[float, CoinSnapshot] = {s.age_seconds: s for s in stored}
+        by_age.update({s.age_seconds: s for s in snaps})
+        merged = [by_age[age] for age in sorted(by_age)]
+        if len(merged) > self._ls.max_evaluation_snapshots:
+            merged = merged[-self._ls.max_evaluation_snapshots:]
+        return merged
 
     def _store_prediction(self, token_address, chain, snaps, verdict, result,
                           analog_dist, model_dist, rug_dist, archetype, novelty_flagged,

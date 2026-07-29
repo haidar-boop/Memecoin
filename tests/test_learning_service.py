@@ -706,3 +706,87 @@ def test_reload_rejects_incompatible_feature_version(tmp_path):
     assert monitor._analog_reload_ok is False         # refused and latched off
     assert monitor._analog.size == 5                  # kept its own compatible copy
     monitor.store.close()
+
+
+# ---- Train/serve skew fix (2026-07-28): evaluate on the stored trajectory ----
+
+
+def test_include_stored_history_merges_trajectory_into_the_fingerprint():
+    """The models are trained on full-trajectory fingerprints, so a live
+    evaluation handed ONE snapshot fed them a shapeless vector (all slopes
+    and volatility zero) the training set never contained. With
+    include_stored_history the accumulated trajectory is used instead."""
+    service = _service()
+    series = _rug_series()
+    # The scanner's real pattern: capture each observation as it arrives.
+    for snap in series:
+        service.capture_snapshot("Traj1", "solana", snap)
+
+    from meme_intelligence.learning.models import CoinSnapshot
+
+    latest = [CoinSnapshot.from_dict(series[-1])]
+    merged = service._merge_stored_history("Traj1", "solana", latest)
+    assert len(latest) == 1 and len(merged) == len(series)
+
+    # The actual defect: a one-snapshot fingerprint has NO shape — every
+    # slope/volatility summary collapses to zero. The merged trajectory
+    # carries the falling-liquidity arc the models were trained on.
+    shapeless = service._extractor.extract(latest).vector
+    trajectory = service._extractor.extract(merged).vector
+    assert not (shapeless == trajectory).all()
+    names = service._extractor.feature_names
+    slope_idx = [i for i, n in enumerate(names) if "slope" in n]
+    assert slope_idx, "expected slope features in the fingerprint"
+    assert all(shapeless[i] == 0.0 for i in slope_idx)      # no shape at all
+    assert any(trajectory[i] != 0.0 for i in slope_idx)     # real trajectory shape
+    service.store.close()
+
+
+def test_include_stored_history_dedupes_the_caller_snapshot():
+    """The scanner captures the current snapshot and THEN evaluates, so the
+    fresh observation is already stored: it must appear once, not twice."""
+    service = _service()
+    series = _rug_series()
+    for snap in series:
+        service.capture_snapshot("Dedup1", "solana", snap)
+
+    merged = service._merge_stored_history(
+        "Dedup1", "solana",
+        [__import__("meme_intelligence.learning.models", fromlist=["CoinSnapshot"])
+         .CoinSnapshot.from_dict(series[-1])])
+    ages = [s.age_seconds for s in merged]
+    assert ages == sorted(ages)
+    assert len(ages) == len(set(ages)) == len(series)
+    service.store.close()
+
+
+def test_include_stored_history_is_bounded_by_setting():
+    env = dict(_ENV, MEMEINTEL_LEARNING_MAX_EVALUATION_SNAPSHOTS="3")
+    settings = Settings.from_env(env=env)
+    store = LearningStore(":memory:", now_func=lambda: NOW)
+    service = LearningService(settings, store=store, now_func=lambda: NOW)
+    for snap in _rug_series():          # 6 snapshots
+        service.capture_snapshot("Cap1", "solana", snap)
+
+    from meme_intelligence.learning.models import CoinSnapshot
+    merged = service._merge_stored_history(
+        "Cap1", "solana", [CoinSnapshot.from_dict({"age_seconds": 999.0})])
+    assert len(merged) <= 3
+    assert merged[-1].age_seconds == 999.0   # newest kept
+    store.close()
+
+
+def test_unknown_coin_and_store_failure_fall_back_to_caller_snapshots():
+    """Fails OPEN: the ARMED p(rug) veto must never break on a history read."""
+    from meme_intelligence.learning.models import CoinSnapshot
+
+    service = _service()
+    fresh = [CoinSnapshot.from_dict({"age_seconds": 10.0, "price_usd": 1.0})]
+    assert service._merge_stored_history("NeverSeen", "solana", fresh) == fresh
+
+    class BoomStore:
+        def coin_id(self, token):
+            raise RuntimeError("db gone")
+
+    service._store = BoomStore()
+    assert service._merge_stored_history("Any", "solana", fresh) == fresh

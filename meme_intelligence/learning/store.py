@@ -244,12 +244,30 @@ class LearningStore:
         self._conn.commit()
         return int(cursor.lastrowid)
 
-    def snapshots_for(self, coin_id: int) -> list[CoinSnapshot]:
-        rows = self._conn.execute(
-            """SELECT data FROM learning_snapshots
-               WHERE coin_id = ? ORDER BY age_seconds""",
-            (coin_id,),
-        ).fetchall()
+    def snapshots_for(self, coin_id: int, *, limit: int | None = None) -> list[CoinSnapshot]:
+        """The coin's trajectory, oldest first.
+
+        ``limit`` keeps only the ``limit`` MOST RECENT snapshots (still
+        returned oldest-first). Used by live evaluation to bound the series
+        a long-tracked coin can accumulate — the recent arc is what carries
+        slope/acceleration signal, and an unbounded read on a coin watched
+        for days would grow without limit on a 1 GB droplet.
+        """
+        if limit is not None and limit <= 0:
+            return []
+        if limit is None:
+            rows = self._conn.execute(
+                """SELECT data FROM learning_snapshots
+                   WHERE coin_id = ? ORDER BY age_seconds""",
+                (coin_id,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                """SELECT data FROM learning_snapshots
+                   WHERE coin_id = ? ORDER BY age_seconds DESC LIMIT ?""",
+                (coin_id, int(limit)),
+            ).fetchall()
+            rows = list(reversed(rows))
         return [CoinSnapshot.from_dict(json.loads(row["data"])) for row in rows]
 
     # ---- Outcome labels (Section 1) ----

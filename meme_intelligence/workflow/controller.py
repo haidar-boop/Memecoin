@@ -945,7 +945,11 @@ class ContinuousScanner:
             token = result.pair.base_token
             verdict = self._learning.evaluate_coin(
                 token.address, token.chain, [snapshot],
-                security=result.security_profile, creator=creator)
+                security=result.security_profile, creator=creator,
+                # Judge the coin on its trajectory so far, not this one
+                # instant — the models were trained on full-trajectory
+                # fingerprints (2026-07-28 train/serve-skew fix).
+                include_stored_history=True)
             p_rug = float((verdict.get("final_probabilities") or {}).get("rug", 0.0))
             if p_rug >= ls.veto_min_p_rug:
                 return (f"mind layer: p(rug) {p_rug:.0%} >= {ls.veto_min_p_rug:.0%} "
@@ -1088,7 +1092,8 @@ class ContinuousScanner:
             # report card never update in monitor-only operation. All local
             # models; zero API cost.
             self._learning.evaluate_coin(token.address, token.chain, [snapshot],
-                                         security=profile, creator=creator)
+                                         security=profile, creator=creator,
+                                         include_stored_history=True)
             stats.learned += 1
         except Exception as exc:  # noqa: BLE001 — additive; must not kill the cycle
             self._logger.warning("learning hook failed for %s: %s",

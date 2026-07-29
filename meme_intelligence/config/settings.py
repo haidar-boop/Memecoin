@@ -1247,6 +1247,16 @@ class LearningSettings:
     min_snapshots_for_confidence: int = 3    # fewer snapshots -> low confidence
     cold_start_samples: int = 100            # resolved coins below this = cold start
 
+    # Live evaluation uses the coin's STORED trajectory merged with the fresh
+    # snapshot, because the models are TRAINED on full-trajectory fingerprints
+    # (slope / volatility / acceleration) — evaluating from one snapshot fed
+    # them a shapeless vector the training set never contained (train/serve
+    # skew, 2026-07-28). This bounds how many of the most recent stored
+    # snapshots a single evaluation may load; it is generous enough never to
+    # bind in normal operation and exists only so a coin watched for days
+    # cannot grow an unbounded read on a 1 GB droplet.
+    max_evaluation_snapshots: int = 200
+
     # Alert veto (Project 3, ROADMAP #3): the mind layer's P(rug) blocks
     # HIGH opportunities ONLY once its measured rug precision has earned it
     # (Rule 8 — authority is proven, never assumed). Off by default; the
@@ -1292,6 +1302,10 @@ class LearningSettings:
         if self.veto_min_samples <= 0:
             raise ConfigurationError(
                 f"learning veto_min_samples must be positive, got {self.veto_min_samples}")
+        if self.max_evaluation_snapshots <= 0:
+            raise ConfigurationError(
+                "learning max_evaluation_snapshots must be positive, got "
+                f"{self.max_evaluation_snapshots}")
         if not math.isfinite(self.veto_metrics_ttl_seconds) or self.veto_metrics_ttl_seconds <= 0:
             raise ConfigurationError(
                 "learning veto_metrics_ttl_seconds must be positive, got "

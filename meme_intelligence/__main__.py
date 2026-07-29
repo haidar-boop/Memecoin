@@ -943,7 +943,8 @@ async def _cmd_mind(args, settings) -> int:
     }
     verdict = service.evaluate_coin(
         args.address, args.chain, [snapshot], security=profile,
-        creator=profile.creator_address if profile else None)
+        creator=profile.creator_address if profile else None,
+        include_stored_history=True)
     service.persist()
 
     probs = verdict["final_probabilities"]

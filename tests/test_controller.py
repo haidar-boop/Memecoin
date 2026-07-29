@@ -1272,8 +1272,12 @@ class FakeMind:
         self.metrics_calls += 1
         return self._metrics
 
-    def evaluate_coin(self, address, chain, snapshots, *, security=None, creator=None):
+    def evaluate_coin(self, address, chain, snapshots, *, security=None, creator=None,
+                      include_stored_history=False):
         self.eval_calls += 1
+        # The veto must ask for the coin's trajectory, not a single instant
+        # (2026-07-28 train/serve-skew fix).
+        self.last_include_stored_history = include_stored_history
         if self._raise:
             raise RuntimeError("model exploded")
         return {"final_probabilities": {"rug": self.p_rug}, "model_confidence": 0.9,
@@ -1313,6 +1317,8 @@ def test_mind_veto_fires_with_earned_authority_and_names_evidence():
         reason = scanner._deterministic_risk_veto(fake_veto_input(pair), [], None)
     assert reason is not None
     assert "p(rug) 90%" in reason and "precision 0.80" in reason and "10 graded" in reason
+    # The veto judges the trajectory, not a single instant (2026-07-28).
+    assert mind.last_include_stored_history is True
 
 
 def test_mind_veto_abstains_below_p_rug_threshold():

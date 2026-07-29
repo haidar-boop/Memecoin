@@ -2009,3 +2009,33 @@ LearningStore methods (creator_of, coins_by_creator, blacklist_entry);
 nothing in the scan/alert/learning path changed. A coin the bot never
 watched reports "no deployer on record" rather than guessing (Rule 8).
 Suite: **954 passing** (950 + 4).
+
+## 2026-07-28 — Fix train/serve skew: evaluate coins on their trajectory
+
+The analog index and the LightGBM classifier are TRAINED on full-trajectory
+fingerprints — slope, volatility, and acceleration summarized across a
+coin's whole snapshot series (features.py). But every live call site passed
+a SINGLE fresh snapshot, so evaluation produced a fingerprint whose every
+slope/volatility feature is zero — a vector shape the training set never
+contained. service.py's own comment admitted it ("a 1-2 snapshot
+trajectory barely has a shape yet"). The models were being asked to judge
+coins in a representation they were never trained on, which depresses all
+measured directional skill (the 0.13 hit rate is a floor, not a ceiling).
+
+Fix: opt-in `evaluate_coin(include_stored_history=True)` merges the coin's
+stored trajectory with the caller's fresh snapshot, deduped by
+age_seconds (the caller's read wins a collision), bounded by the new
+`learning.max_evaluation_snapshots` (200) via a new `snapshots_for(limit=)`
+that keeps the most recent N. Enabled at the four production call sites
+(veto, learning feed, /check, mind CLI); every other caller — including all
+tests that already pass a full series — is unaffected.
+
+Risk handling, because this changes inputs to the ARMED p(rug) veto:
+merging FAILS OPEN (any store problem returns the caller's snapshots, so a
+history read can never break the veto), and first sightings are provably
+unchanged — at first sight the store holds at most the same snapshot the
+caller passed, so the merged series equals the passed one and the
+insert-once graded prediction that feeds /mind and the ensemble weights is
+undisturbed. Only re-evaluations (veto on a re-checked coin, /check,
+watchlist rechecks) gain the richer input, which is exactly where the
+trajectory exists to be seen. Suite: **958 passing** (954 + 4).
