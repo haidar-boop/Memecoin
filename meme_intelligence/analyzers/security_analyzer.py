@@ -133,41 +133,9 @@ class SecurityAnalyzer:
             )
 
         overall = weighted_sum / available_weight
-
-        # Unknown is not safe (Rule 8). The weighted mean renormalizes over the
-        # sub-scores that HAVE data, so a mint whose holder/LP facts are simply
-        # unavailable is scored on whichever category did resolve — and a fresh
-        # pump.fun mint with cleanly renounced authorities and no holder data
-        # scored a PERFECT 100 at 25% coverage while rugcheck.xyz independently
-        # rated it DANGER 65 on an 88.45% single holder and 100% unlocked LP
-        # (operator screenshot, 2026-07-29).
-        #
-        # The report already says "unverified areas are NOT safe" in its text,
-        # but the alert gate reads `overall_score`, not the note. Capping is
-        # what `RiskAnalyzer` has done since Part 9 for exactly this reason;
-        # this makes the two consistent. Full coverage is unaffected.
-        floor = self._t.min_coverage_for_full_score
-        capped_from = None
-        if floor > 0.0 and available_weight < 1.0:
-            ceiling = 50.0 + 50.0 * available_weight
-            if overall > ceiling:
-                capped_from, overall = overall, ceiling
-
         destructive = any(f.severity is RiskTier.DESTRUCTIVE for f in findings)
         if destructive:
             overall = 0.0  # security overrides opportunity (Part 4 final rule)
-        elif capped_from is not None:
-            # Rule 13: a suppressed number must say so, or the operator sees a
-            # mediocre score with no explanation of what was actually missing.
-            unmeasured = ", ".join(
-                name for name, value in sub_scores.items() if value is None)
-            findings.append(Finding(
-                category="coverage",
-                severity=RiskTier.ACCEPTABLE_UNCERTAINTY,
-                message=(f"scored {capped_from:.0f}/100 on only {available_weight:.0%} of "
-                         f"the security categories; capped to {overall:.0f} because "
-                         f"unverified is not safe (no data for: {unmeasured or 'unknown'})"),
-            ))
 
         tier = self._tier(findings, overall)
         confidence = self._confidence(unknowns, parts)

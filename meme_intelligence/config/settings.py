@@ -556,51 +556,8 @@ class SecurityThresholds:
     max_round_trip_loss_percent: float = 50.0
     extreme_round_trip_loss_percent: float = 90.0
 
-    # Below this share of the four security sub-scores, the overall security
-    # score is CAPPED rather than reported at face value.
-    #
-    # The bug this closes (operator screenshot, 2026-07-29): a fresh pump.fun
-    # mint that rugcheck.xyz rated DANGER 65 — single holder 88.45%, LP 100%
-    # unlocked — scored **100.0/100** here. GoPlus returns no holder or LP data
-    # for a mint that young, so `liquidity`, `distribution`, `developer` and
-    # `manipulation` were all None and excluded, leaving `contract` (all
-    # authorities cleanly renounced) to BECOME the entire score at 25%
-    # coverage. The assessment already PRINTS "unverified areas are NOT safe"
-    # — but the alert gate reads the number, not the note.
-    #
-    # `RiskAnalyzer` has enforced exactly this rule since Part 9
-    # (`_MIN_COVERAGE_FOR_LOW_RISK = 0.5`, "Unknown is not safe: a
-    # mostly-unverifiable profile cannot be rated low risk"). This makes the
-    # security analyzer consistent with it instead of the lone exception.
-    #
-    # The cap is `50 + 50 * coverage`. 0.0 = OFF, and OFF IS THE DEFAULT.
-    #
-    # Measured against the operator's live database 2026-07-29 before shipping
-    # it on (deploy/security_cap_impact.py): of 500 coins he had actually been
-    # alerted about, 499 sat at 25-49% security coverage. Enabling the cap
-    # would have blocked 338 of the 339 that cleared the gate — 99% of his
-    # alerts. It would have taken the bot off the air.
-    #
-    # The measurement did not just size the threshold, it invalidated the
-    # approach: coverage cannot separate a bad coin from a good one here
-    # because EVERY coin scores the same ~25%. GoPlus essentially never returns
-    # holder or LP data for the coins this bot analyses, so the security score
-    # is always just the contract sub-score, and it passed 100% of buy-side
-    # alerts. The data gap is the bug; punishing the gap only silences the bot.
-    #
-    # Kept (rather than reverted) because the mechanism is correct and becomes
-    # useful the moment the missing holder/LP facts are actually collected —
-    # see the RPC holder/LP work. Until then it stays off, and turning it on
-    # without re-running the impact probe will silence the operator.
-    min_coverage_for_full_score: float = 0.0
-
     def __post_init__(self) -> None:
         for name, value in dataclasses.asdict(self).items():
-            # The coverage cap is a 0..1 fraction where 0 means "disabled",
-            # unlike every other threshold here, which is a positive magnitude.
-            if name == "min_coverage_for_full_score":
-                _check_range(f"security threshold '{name}'", value, 0.0, 1.0)
-                continue
             if not math.isfinite(value) or value <= 0:
                 raise ConfigurationError(f"security threshold '{name}' must be positive, got {value}")
         if self.extreme_tax_percent < self.max_tax_percent:
