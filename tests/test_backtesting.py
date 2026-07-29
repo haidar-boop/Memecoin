@@ -337,21 +337,28 @@ async def test_implausible_return_is_unmeasurable_and_never_taught(tmp_path):
         assert learner.calls == [], "a fantasy return must never become a label"
 
 
-async def test_genuine_large_win_is_still_measured_and_taught(tmp_path):
-    """The guard must not eat real moonshots: a 20x (+1,900%) is far under
-    the 1000x ceiling and has to survive intact, or the operator's whole
-    reason for running this bot gets filtered away."""
+@pytest.mark.parametrize("multiple,label", [
+    (20, "20x"),
+    (1_000, "1000x — happens in this market (operator, 2026-07-29)"),
+    (50_000, "50,000x — a $20k detection reaching a $1B market cap"),
+])
+async def test_genuine_moonshots_are_still_measured_and_taught(tmp_path, multiple, label):
+    """The guard must never eat a real run. The rare monster is the single
+    most valuable record this system can hold — filtering it would delete
+    exactly the evidence the operator is hunting. An earlier 1000x ceiling
+    sat right where his best outcomes live; these cases pin the floor."""
     with make_storage(tmp_path) as storage:
         seed(storage, 2, Classification.STRONG_CANDIDATE,
-             start_price=0.000001, later_price=0.00002)     # +1,900%
+             start_price=0.000001, later_price=0.000001 * multiple)
         learner = _RecordingLearner()
         await refresh_outcomes(storage, settings=SETTINGS,
                                learning_service=learner, now_func=lambda: NOW)
         rows = storage.outcomes_for_snapshot(
             storage.predictions()[0]["snapshot_id"])
-        assert any(r["price_change_percent"] is not None for r in rows.values())
-        assert learner.calls, "a real 20x must still be learned from"
-        assert any(c[2] > 1000.0 for c in learner.calls)
+        assert any(r["price_change_percent"] is not None
+                   for r in rows.values()), f"{label} must stay measurable"
+        assert learner.calls, f"{label} must still be learned from"
+        assert any(c[2] > 100.0 * (multiple - 1) * 0.99 for c in learner.calls)
 
 
 async def test_guard_can_be_disabled(tmp_path):

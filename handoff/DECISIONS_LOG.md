@@ -2056,13 +2056,21 @@ labels anything >= pump_return_percent (50) as PUMP. So a few hundred coins
 that never pumped were written into the analog index and the classifier's
 training set as winners.
 
-Fix: `BacktestSettings.max_measurable_return_percent` (default 100,000% =
-1000x, 0 disables; validated to exceed success_price_change_percent). Beyond
-the ceiling the return is discarded as UNMEASURABLE — the outcome row is
-still written for audit, but with `price_change_percent=None`, which makes
-the existing `if change is not None` learning guard skip it for free. The
-ceiling sits several orders of magnitude above any genuine run recorded here,
-so real moonshots survive (tested explicitly with a +1,900% case).
+Fix: `BacktestSettings.max_measurable_return_percent` (0 disables; validated
+to exceed success_price_change_percent). Beyond the ceiling the return is
+discarded as UNMEASURABLE — the outcome row is still written for audit, but
+with `price_change_percent=None`, which makes the existing `if change is not
+None` learning guard skip it for free.
+
+**Ceiling corrected same day by the operator: "woah woah a 1000x return is
+possible."** He was right — the first default (100,000% = 1000x) sat exactly
+where his best real outcomes live, and discarding a genuine monster would
+delete the single most valuable record this system can hold. Re-anchored on
+physics from a ~$20k detection (discovery floor is $15k liquidity): $1B peak
+= 50,000x = 5.0e6%; a DOGE-tier $10B = 500,000x = 5.0e7%. Observed corruption
+starts at 26,000,000x (2.7e9%). Default is now 100,000,000% (1,000,000x) —
+~20x above a DOGE-tier miracle and ~27x below the smallest impossible value.
+Parametrized tests pin 20x / 1000x / 50,000x as must-survive cases.
 
 Scope correction, stated to the operator: at 0.42% contamination this is a
 real data-integrity bug worth fixing, but it does NOT explain the reported

@@ -680,16 +680,27 @@ class BacktestSettings:
     alert_outcome_min_hours: float = 24.0    # alerts younger than this stay unlabeled
     min_predictions_for_weights: int = 10    # weight experiments need a real sample (S1)
     # A forward return is measured against the token's FIRST recorded price.
-    # When that baseline (or the later reading) is a bad datum, the ratio
-    # explodes into meaningless numbers — live data showed returns of 1e9%
-    # and higher, i.e. 10-million-fold "gains" that never happened, and those
-    # fed straight into the mind layer as PUMP labels (2026-07-29). Anything
-    # beyond this ceiling is treated as UNMEASURABLE rather than as a real
-    # return (Rule 8 — a nonsense number is not evidence). Set generously:
-    # 100,000% is a 1000x, several orders of magnitude above any genuine
-    # memecoin run this system has recorded, so real moonshots survive.
+    # When that baseline (or the later reading) is a bad datum the ratio
+    # explodes: live data showed +1.7e11% — a 1.7-BILLION-fold "gain" — and
+    # because anything >= pump_return_percent becomes a PUMP label, those
+    # fantasies were written into the mind layer's memory as winners
+    # (2026-07-29). Past this ceiling a return is UNMEASURABLE, not real
+    # (Rule 8 — a nonsense number is not evidence).
+    #
+    # The ceiling MUST sit above every genuinely reachable run, because the
+    # rare monster is the single most valuable thing this system can record
+    # — discarding it would delete exactly the evidence the operator is
+    # hunting (his correction, 2026-07-29; an earlier 1000x default was far
+    # too tight: 1000x happens in this market). Anchoring on real physics
+    # from a ~$20k detection (the discovery floor is $15k liquidity):
+    #   $1M peak =        50x =         4,900%
+    #   $1B peak =    50,000x =     4,999,900%
+    #   $10B (DOGE-tier) = 500,000x = 49,999,900%
+    # The observed corruption starts at 26,000,000x (2.7e9%). 1,000,000x
+    # therefore sits ~20x above a DOGE-tier miracle and ~27x below the
+    # smallest impossible value — wide margins on both sides.
     # 0 disables the guard.
-    max_measurable_return_percent: float = 100_000.0
+    max_measurable_return_percent: float = 100_000_000.0
 
     def __post_init__(self) -> None:
         windows = [w.strip() for w in self.windows_hours.split(",") if w.strip()]
