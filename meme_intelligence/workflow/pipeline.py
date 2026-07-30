@@ -422,7 +422,7 @@ class ResearchPipeline:
             return False
         if security.overall_score < self._wallet_settings.credit_gate_min_security_score:
             return False
-        liq, mcap = pair.liquidity_usd, pair.market_cap
+        liq, mcap = pair.liquidity_usd, pair.effective_market_cap
         if liq is None or not math.isfinite(liq) or liq <= 0.0:
             return False
         if mcap is None or not math.isfinite(mcap) or mcap <= 0.0:
@@ -506,7 +506,7 @@ class ResearchPipeline:
             return False
         if security.overall_score < self._social_settings.credit_gate_min_security_score:
             return False
-        liq, mcap = pair.liquidity_usd, pair.market_cap
+        liq, mcap = pair.liquidity_usd, pair.effective_market_cap
         if liq is None or not math.isfinite(liq) or liq <= 0.0:
             return False
         if mcap is None or not math.isfinite(mcap) or mcap <= 0.0:

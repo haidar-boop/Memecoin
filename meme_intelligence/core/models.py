@@ -59,6 +59,30 @@ class DexPair:
     pair_created_at: datetime | None = None
     url: str | None = None
 
+    @property
+    def effective_market_cap(self) -> float | None:
+        """Market cap, falling back to FDV when circulating cap is unreported.
+
+        Providers disagree about this field: DexScreener returns ``marketCap``
+        for young Solana pairs, GeckoTerminal's ``new_pools`` feed returns
+        ``market_cap_usd: null`` for *every* pool while always populating
+        ``fdv_usd`` (verified live 2026-07-29: 0/20 vs 20/20). Reading only
+        ``market_cap`` therefore made every GeckoTerminal-discovered coin look
+        valueless, and the buy-side alert gate silently deleted its alerts —
+        the "Telegram goes quiet" failure (bug-hunt finding, 2026-07-29).
+
+        FDV is a *measured* provider value, not a default, so this is not a
+        Rule 8 fabrication — absence still returns ``None``. For the memecoins
+        this system trades the two are near-identical (supply is minted in
+        full at launch, so circulating == total), and FDV >= market cap by
+        construction, which keeps every ceiling check conservative.
+
+        ``TokenAnalyzer`` has used this exact fallback for valuation since
+        Part 7; this property is that rule promoted to the model so the
+        scorer and the alert gates cannot disagree about what a coin is worth.
+        """
+        return self.market_cap if self.market_cap is not None else self.fdv
+
 
 @dataclass(frozen=True)
 class PumpFunLaunch:

@@ -358,7 +358,7 @@ class AutomationRules:
         liq = result.pair.liquidity_usd
         if liq is None or not math.isfinite(liq) or liq <= 0.0:
             return True
-        mcap = result.pair.market_cap
+        mcap = result.pair.effective_market_cap
         if mcap is None or not math.isfinite(mcap) or mcap <= 0.0:
             return True
         return False
@@ -378,7 +378,7 @@ class AutomationRules:
         if max_liq > 0.0 and liq is not None and math.isfinite(liq) and liq > max_liq:
             return True
         max_mcap = self._t.opportunity_max_market_cap_usd
-        mcap = result.pair.market_cap
+        mcap = result.pair.effective_market_cap
         if max_mcap > 0.0 and mcap is not None and math.isfinite(mcap) and mcap > max_mcap:
             return True
         return False
@@ -513,13 +513,17 @@ class AutomationRules:
         floor = self._t.opportunity_min_market_cap_usd
         if floor <= 0.0:
             return None
-        mcap = result.pair.market_cap
+        mcap = result.pair.effective_market_cap
         if mcap is None or not math.isfinite(mcap):
             return _SafetyCheck("unknown", "Market cap: unknown")
+        # Name the source when the number is FDV rather than a reported
+        # circulating cap, so the operator is never shown a figure whose
+        # provenance is hidden (Rule 8).
+        label = "Market cap" if result.pair.market_cap is not None else "Market cap (FDV)"
         if mcap < floor:
             return _SafetyCheck(
-                "warn", f"Market cap ${mcap:,.0f} — below your ${floor:,.0f} floor")
-        return _SafetyCheck("pass", f"Market cap ${mcap:,.0f}")
+                "warn", f"{label} ${mcap:,.0f} — below your ${floor:,.0f} floor")
+        return _SafetyCheck("pass", f"{label} ${mcap:,.0f}")
 
     def _is_new_launch(self, result: PipelineResult) -> bool:
         """True when the pool is younger than the checklist's new-launch window —

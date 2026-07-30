@@ -187,8 +187,13 @@ class TokenAnalyzer:
     # ---- Stage & valuation (Part 7 Sections 2-3) ----
 
     def _effective_mcap(self, pair: DexPair) -> float | None:
-        """Market cap, falling back to FDV when circulating cap is unreported."""
-        return pair.market_cap if pair.market_cap is not None else pair.fdv
+        """Market cap, falling back to FDV when circulating cap is unreported.
+
+        Delegates to :attr:`DexPair.effective_market_cap` so the scorer and the
+        alert gates share one definition (they silently disagreed until
+        2026-07-29).
+        """
+        return pair.effective_market_cap
 
     def _classify_stage(self, pair: DexPair) -> MarketCapStage:
         mcap = self._effective_mcap(pair)
