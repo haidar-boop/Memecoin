@@ -320,6 +320,11 @@ async def test_holding_unhold_and_holdings_list():
         await listener._handle_update(message_update(f"/holding {SOL_ADDR}"))
         assert "Holding recorded" in sent_messages(calls)[-1]["text"]
         assert storage.is_holding(TelegramTokenLookup(storage))
+        # Review finding 2026-07-30: rechecks iterate the watchlist, so
+        # /holding must also ensure the coin is watched — otherwise a held
+        # coin the bot never scanned gets no protective monitoring at all.
+        watched = {e.token.address for e in storage.get_watchlist()}
+        assert SOL_ADDR in watched
         await listener._handle_update(message_update("/holdings"))
         assert "HOLDINGS (1 active)" in sent_messages(calls)[-1]["text"]
         await listener._handle_update(message_update(f"/unhold {SOL_ADDR}"))

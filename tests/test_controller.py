@@ -804,6 +804,60 @@ async def test_dead_watchlist_token_archived_with_postmortem():
         assert death.priority is AlertPriority.LOW  # interest gate: never recommended
 
 
+async def test_held_live_token_not_archived_on_score_collapse():
+    """Review finding 2026-07-30: a LIVE coin the operator still holds must
+    stay on the watchlist even when its re-assessment falls to Avoid —
+    archiving would end rechecks, and holdings are now the only channel his
+    protective alerts flow through. (A DEAD held coin still archives: covered
+    by the post-mortem test above — nothing left to guard in a drained pool.)"""
+    import dataclasses as _dc3
+    held = TokenIdentity(chain="solana", address="TokenHeld", symbol="HODL")
+    healthy_pair = make_pair(address="TokenHeld", symbol="HODL")
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        storage.update_watchlist(held, WatchlistTier.TIER_1_HIGH_PRIORITY, score=85.0)
+        storage.set_holding(held)
+        goplus_profiles = {"TokenHeld": clean_profile(held)}
+        market = FakeMarketService({"TokenHeld": healthy_pair})
+        # First recheck: clean — establishes the prior score snapshot.
+        await make_scanner_with_market(
+            storage, [], goplus_profiles, market,
+            settings=fast_recheck_settings(), sink=RecordingSink(),
+        ).run(max_cycles=1)
+        # Second recheck: the coin turns honeypot — the assessment collapses
+        # to Avoid, but the pool is still liquid: his money is still in there.
+        goplus_profiles["TokenHeld"] = _dc3.replace(clean_profile(held), is_honeypot=True)
+        await make_scanner_with_market(
+            storage, [], goplus_profiles, market,
+            settings=fast_recheck_settings(), sink=RecordingSink(),
+        ).run(max_cycles=1)
+
+        remaining = {e.token.address for e in storage.get_watchlist()}
+        assert "TokenHeld" in remaining        # kept: still monitored while held
+
+
+async def test_unheld_token_still_archived_on_score_collapse():
+    """The inverse: without a holding, the Avoid-score archive behavior is
+    unchanged (Part 29 S1 — don't re-warn on garbage every recheck)."""
+    import dataclasses as _dc3
+    gone = TokenIdentity(chain="solana", address="TokenGone", symbol="GONE")
+    healthy_pair = make_pair(address="TokenGone", symbol="GONE")
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        storage.update_watchlist(gone, WatchlistTier.TIER_1_HIGH_PRIORITY, score=85.0)
+        goplus_profiles = {"TokenGone": clean_profile(gone)}
+        market = FakeMarketService({"TokenGone": healthy_pair})
+        await make_scanner_with_market(
+            storage, [], goplus_profiles, market,
+            settings=fast_recheck_settings(), sink=RecordingSink(),
+        ).run(max_cycles=1)
+        goplus_profiles["TokenGone"] = _dc3.replace(clean_profile(gone), is_honeypot=True)
+        await make_scanner_with_market(
+            storage, [], goplus_profiles, market,
+            settings=fast_recheck_settings(), sink=RecordingSink(),
+        ).run(max_cycles=1)
+
+        assert storage.get_watchlist() == []   # archived as before
+
+
 def legacy_interest_settings() -> Settings:
     """Recheck settings with the pre-2026-07-30 ever-pitched interest gate."""
     return Settings.from_env(env={

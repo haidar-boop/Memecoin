@@ -855,11 +855,30 @@ class TelegramCommandListener(BaseCollector):
         storage = self._ctx.storage
         token = self._resolve_token(address)
         added = storage.set_holding(token)
+        # Review finding 2026-07-30: a holding only receives protective
+        # alerts if the scanner keeps RECHECKING it, and rechecks iterate the
+        # watchlist — so a held coin the bot never watchlisted (bought
+        # outside a pitch) would be guarded on paper but never actually
+        # looked at. Ensure a watchlist entry exists; never downgrade one.
+        watching = True
+        try:
+            on_list = {e.token.address.lower() for e in storage.get_watchlist()}
+            if token.address.lower() not in on_list:
+                from meme_intelligence.core.enums import WatchlistTier
+                storage.update_watchlist(token, WatchlistTier.TIER_1_HIGH_PRIORITY,
+                                         thesis="operator holding (/holding)")
+        except Exception as exc:  # noqa: BLE001 — the holding itself is recorded
+            self._logger.warning("could not watchlist holding %s: %s",
+                                 token.address, exc)
+            watching = False
         count = len(storage.get_holdings(active_only=True))
         state = "Holding recorded" if added else "Already marked as held"
+        watch_note = ("Protective alerts stay at full priority for held coins."
+                      if watching else
+                      "WARNING: could not add it to the watchlist — protective "
+                      "monitoring may not cover it; try /holding again.")
         return (f"{state}: {_sanitize_identity(token.symbol or token.address[:8])} "
-                f"({token.chain}). Active holdings: {count}. Protective alerts stay "
-                "at full priority for held coins.")
+                f"({token.chain}). Active holdings: {count}. {watch_note}")
 
     async def _cmd_unhold(self, args: list[str]) -> str:
         address, error = self._validated_address(args, "/unhold <address>")

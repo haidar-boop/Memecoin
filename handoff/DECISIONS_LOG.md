@@ -2047,3 +2047,55 @@ scanner wallet spend still requires `MEMEINTEL_WALLET_ENABLE_IN_MONITOR=true`
 lookup, rug-clean still spends, force bypasses); the 200->300 default assertion
 updated. Suite: full local run shows no new failures (pre-existing failures are
 all missing optional deps — faiss/anthropic/solders — absent in this sandbox).
+
+## 2026-07-30 — Protective alerts holding-only + auto-holding on live trades
+
+Operator: "I keep getting security updates and I don't care unless I'm
+holding a coin. Create it so it only tells me the status of a coin I
+currently hold." Built under ultracode with a 2-lens adversarial review
+workflow (correctness + operator-intent, every finding independently
+re-verified); the review confirmed 2 critical + 2 major gaps in the first
+cut, all fixed before ship.
+
+**The gate.** New `AlertEngineSettings.protective_alerts_holding_only`
+(default True, env `MEMEINTEL_ALERT_ENGINE_PROTECTIVE_ALERTS_HOLDING_ONLY`).
+`_operator_interest` now counts ONLY active holdings — a coin merely
+pitched in the past no longer keeps protective alerts (security_change,
+risk_warning, token_death, whale_exit, insider_risk, community_fake,
+score_drop_review, emergency_review) at full priority; they demote to LOW
+(console + history only, phone quiet). Buy-side pitches are untouched; a
+protective alert in the same batch as a live pitch still passes; fail-open
+on lookup errors kept. Setting false restores the ever-pitched behavior
+(one test pins that legacy path).
+
+**Review finding 1+2 (critical, fixed): the Buy button never wrote a
+holding.** The only holdings writer was the manual /holding command, so a
+coin bought via the bot's own Buy button would have had its rug warnings
+silenced under the new gate unless the operator separately typed /holding.
+LiveExecutor now auto-marks a holding the moment a buy tx is broadcast
+(including the cancelled-mid-send maybe-broadcast path) and auto-releases
+it after a CONFIRMED 100% dump. Direction of safety on uncertainty: a
+stale holding flag costs noise; a missing one costs a silent rug — so
+pending buys mark, pending dumps do NOT release. Bookkeeping errors never
+touch the trade path or its reply. Dry-run buys do not mark (no real
+position).
+
+**Review finding 3 (fixed): demotion note text.** `_NO_INTEREST_NOTE`
+claimed "this token never reached the operator as a buy signal" — false
+for pitched coins under the new gate. Reworded to "not an operator holding
+and no live pitch in this batch".
+
+**Review finding 4 (fixed): held coins could silently lose monitoring.**
+(a) The Avoid-score archive path removed a held coin from the watchlist,
+ending the rechecks its protective alerts depend on — a LIVE held coin is
+now kept on the watchlist (a DEAD one still archives after its
+full-priority post-mortem; nothing left to guard in a drained pool; fails
+toward keeping coverage on an is_holding error). (b) /holding now also
+ensures a watchlist entry exists (TIER_1, never downgrades an existing
+entry), so a held coin the bot never scanned actually gets rechecked.
+
+Tests: 10 new (2 gate modes + pitched-not-held demotes LOW + held keeps
+CRITICAL/ack + held-not-archived + unheld-still-archived + 5 execution
+auto-holding tests incl. failure-isolation), 4 updated. Full suite: zero
+regressions (remaining sandbox failures are pre-existing faiss/anthropic
+gaps; solders was installed to verify the entire trading suite green).

@@ -97,8 +97,8 @@ _DECLINE_SUPPRESSED_TYPES = frozenset({
     "early_opportunity", "momentum", "smart_money_accumulation",
 })
 
-_NO_INTEREST_NOTE = ("informational only: this token never reached the "
-                     "operator as a buy signal, so no operator decision is "
+_NO_INTEREST_NOTE = ("informational only: not an operator holding and no live "
+                     "pitch in this batch, so no active operator position is "
                      "exposed to it (interest gate)")
 
 # ---- Safety checklist (operator rule 2026-07-12) ---------------------------

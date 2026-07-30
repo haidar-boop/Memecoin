@@ -305,6 +305,8 @@ class LiveExecutor:
             self._journal(mint, kind,
                           f"live {kind} {detail}: {expected_sig} "
                           "(send cancelled mid-flight — may be broadcast, verify on-chain)")
+            if kind == "trade_buy":
+                self._mark_bought(mint)  # tx may have landed: assume held
             self._logger.error(
                 "%s for %s cancelled during send — may already be broadcast; "
                 "verify on-chain, do NOT re-tap: %s%s",
@@ -325,6 +327,8 @@ class LiveExecutor:
         # immediately so a confirmation hiccup can never lose the record.
         link = f"{_SOLSCAN_TX}{signature}"
         self._journal(mint, kind, f"live {kind} {detail}: {signature}")
+        if kind == "trade_buy":
+            self._mark_bought(mint)  # money may now be in the coin: guard it
         try:
             landed = await self._confirm(signature)
         except asyncio.CancelledError:
@@ -350,6 +354,8 @@ class LiveExecutor:
             return (f"{action} was submitted but could not be confirmed (RPC error). Do NOT "
                     f"retry — check Solscan first.\n{link}")
         if landed:
+            if kind == "trade_sell":
+                self._mark_dumped(mint)  # confirmed 100% exit: stop guarding it
             return f"{action} confirmed.\n{link}"
         return (f"{action} submitted — confirmation still pending. Do NOT retry; "
                 f"check Solscan.\n{link}")
@@ -408,3 +414,31 @@ class LiveExecutor:
                 TokenIdentity(chain="solana", address=address), kind, content)
         except Exception as exc:  # noqa: BLE001 — journaling must not break the reply
             self._logger.warning("failed to journal %s for %s: %s", kind, address, exc)
+
+    def _mark_bought(self, mint: str) -> None:
+        """Record the position as a holding the moment a buy tx has (possibly)
+        reached the chain. Review finding 2026-07-30: /holding was the ONLY
+        holdings writer, and the holding-only protective-alert gate counts
+        nothing else — so a coin bought via the bot's own Buy button would
+        have its rug/security warnings silenced unless the operator separately
+        typed /holding. Safe direction on uncertainty: a holding flag on a buy
+        that never landed costs a little alert noise (/unhold clears it); a
+        missing flag on a landed buy costs a silent rug on real money. Errors
+        never touch the trade path or its reply (idempotent via set_holding)."""
+        try:
+            self._storage.set_holding(TokenIdentity(chain="solana", address=mint),
+                                      note="auto: bought via bot")
+        except Exception as exc:  # noqa: BLE001 — bookkeeping must not break the trade
+            self._logger.warning("could not auto-mark holding for %s: %s", mint, exc)
+
+    def _mark_dumped(self, mint: str) -> None:
+        """Release the holding after a CONFIRMED 100%% dump — the position no
+        longer exists, so protective alerts on it are pure noise (the operator's
+        2026-07-30 rule). Only the confirmed-landed path calls this: a pending
+        or unknown outcome keeps the holding, because wrongly releasing silences
+        warnings on money still in the coin while wrongly keeping it only costs
+        noise. Errors never touch the trade path or its reply."""
+        try:
+            self._storage.release_holding(TokenIdentity(chain="solana", address=mint))
+        except Exception as exc:  # noqa: BLE001 — bookkeeping must not break the trade
+            self._logger.warning("could not auto-release holding for %s: %s", mint, exc)

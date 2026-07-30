@@ -746,12 +746,33 @@ class ContinuousScanner:
             # Was tracked (or at least scored) before and now fails: archive.
             existing = {e.token.address.lower() for e in self._storage.get_watchlist()}
             if token.address.lower() in existing:
-                reason = (
-                    f"liquidity collapsed to ${liquidity:,.0f}: token appears dead"
-                    if is_dead else
-                    f"re-assessment fell to Avoid (score {result.master.final_score:.0f})"
-                )
-                self._storage.archive(token, reason)
+                # Review finding 2026-07-30: a LIVE coin the operator still
+                # HOLDS must not be archived on a score collapse — archiving
+                # ends rechecks, and holdings are now the only channel his
+                # protective alerts flow through, so archiving a held coin
+                # means a later honeypot flip on his real position goes
+                # unseen. A DEAD held coin still archives: he got the
+                # full-priority death post-mortem (held coins keep priority)
+                # and a collapsed pool has no further status worth guarding.
+                # Fails toward monitoring: an is_holding error keeps the coin.
+                try:
+                    keep_for_holder = (not is_dead) and self._storage.is_holding(token)
+                except Exception as exc:  # noqa: BLE001 — never drop coverage on an error
+                    self._logger.warning("is_holding failed for %s (kept on "
+                                         "watchlist): %s", token.address, exc)
+                    keep_for_holder = True
+                if keep_for_holder:
+                    self._logger.info(
+                        "%s fell to Avoid but is a held position — kept on the "
+                        "watchlist for continued protective monitoring",
+                        token.address)
+                else:
+                    reason = (
+                        f"liquidity collapsed to ${liquidity:,.0f}: token appears dead"
+                        if is_dead else
+                        f"re-assessment fell to Avoid (score {result.master.final_score:.0f})"
+                    )
+                    self._storage.archive(token, reason)
 
         interest = self._operator_interest(token)
         events = self._rules.evaluate(result, previous_score=previous_score,

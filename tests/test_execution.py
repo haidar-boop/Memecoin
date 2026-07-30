@@ -676,3 +676,79 @@ async def test_100_percent_button_sizing_actually_clears_execute_buy():
         sol_amount = balance * 1.0  # 100%
         msg = await ex.execute_buy(intent(sol_amount))
         assert "BUY confirmed" in msg
+
+
+# ---- Auto-holding on live trades (review finding 2026-07-30: the holding-only
+# protective-alert gate counts nothing but the holdings table, so a coin bought
+# via the bot's own Buy button must be recorded there or its rug/security
+# warnings would be silenced unless the operator separately typed /holding) ----
+
+from meme_intelligence.core.models import TokenIdentity  # noqa: E402
+
+TOKEN_ID = TokenIdentity(chain="solana", address=MINT)
+
+
+async def test_confirmed_buy_auto_marks_holding():
+    kp = new_keypair()
+    jup = FakeJupiter(quote={"outAmount": "500000", "routePlan": []}, swap_b64=swap_tx_b64(kp))
+    rpc = FakeRpc(sol=5 * LAMPORTS, sig="HOLDSIG", status="confirmed")
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        ex = make_live(storage, kp, jupiter=jup, rpc=rpc)
+        msg = await ex.execute_buy(intent(0.1))
+        assert "BUY confirmed" in msg
+        assert storage.is_holding(TOKEN_ID)   # position is now guarded
+
+
+async def test_pending_buy_still_marks_holding():
+    """Pending confirmation means money MAY be in the coin — the safe
+    direction is to guard it (a stale flag costs noise; a missing one costs
+    a silent rug)."""
+    kp = new_keypair()
+    jup = FakeJupiter(quote={"outAmount": "500000", "routePlan": []}, swap_b64=swap_tx_b64(kp))
+    rpc = FakeRpc(sol=5 * LAMPORTS, sig="PENDSIG", status=None)  # never confirms
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        ex = make_live(storage, kp, jupiter=jup, rpc=rpc)
+        msg = await ex.execute_buy(intent(0.1))
+        assert "still pending" in msg
+        assert storage.is_holding(TOKEN_ID)
+
+
+async def test_confirmed_dump_releases_the_holding():
+    kp = new_keypair()
+    jup = FakeJupiter(quote={"outAmount": "1"}, swap_b64=swap_tx_b64(kp))
+    rpc = FakeRpc(sol=5 * LAMPORTS, token=1000, sig="DUMPSIG", status="confirmed")
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        storage.set_holding(TOKEN_ID)
+        ex = make_live(storage, kp, jupiter=jup, rpc=rpc)
+        msg = await ex.execute_sell_all(MINT)
+        assert "DUMP confirmed" in msg
+        assert not storage.is_holding(TOKEN_ID)  # 100% exit: stop guarding
+
+
+async def test_pending_dump_keeps_the_holding():
+    """An unconfirmed dump must NOT release: if the sell never landed the
+    operator still holds the coin, and releasing would silence its warnings."""
+    kp = new_keypair()
+    jup = FakeJupiter(quote={"outAmount": "1"}, swap_b64=swap_tx_b64(kp))
+    rpc = FakeRpc(sol=5 * LAMPORTS, token=1000, sig="PENDDUMP", status=None)
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        storage.set_holding(TOKEN_ID)
+        ex = make_live(storage, kp, jupiter=jup, rpc=rpc)
+        msg = await ex.execute_sell_all(MINT)
+        assert "still pending" in msg
+        assert storage.is_holding(TOKEN_ID)
+
+
+async def test_holding_write_failure_never_breaks_the_buy_reply():
+    kp = new_keypair()
+    jup = FakeJupiter(quote={"outAmount": "500000", "routePlan": []}, swap_b64=swap_tx_b64(kp))
+    rpc = FakeRpc(sol=5 * LAMPORTS, sig="OKSIG", status="confirmed")
+
+    class BrokenHoldings(Storage):
+        def set_holding(self, token, note=None):
+            raise RuntimeError("db locked")
+
+    with BrokenHoldings(":memory:", now_func=lambda: NOW) as storage:
+        ex = make_live(storage, kp, jupiter=jup, rpc=rpc)
+        msg = await ex.execute_buy(intent(0.1))
+        assert "BUY confirmed" in msg and "OKSIG" in msg  # trade reply intact
