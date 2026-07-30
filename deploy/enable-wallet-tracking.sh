@@ -54,8 +54,9 @@ else
     # the phone as a buy signal either.
     set_kv MEMEINTEL_ALERTS_MOMENTUM_MIN_SECURITY_SCORE 50
     echo "Wallet tracking ENABLED with the provided Helius key."
-    echo "Credit protection active: lookups only on alert-worthy coins,"
-    echo "max 200/day, 60-min per-coin cooldown (all tunable in .env)."
+    echo "Credit protection active: lookups only on alert-worthy coins that"
+    echo "also survive the rug check, max 300/day, 60-min per-coin cooldown"
+    echo "(all tunable in .env)."
 fi
 
 if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files meme-intelligence.service >/dev/null 2>&1; then
