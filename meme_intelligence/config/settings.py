@@ -201,6 +201,17 @@ class AlertThresholds:
     # 0.0 = OFF, so existing behavior is unchanged until set (Rule 18).
     opportunity_min_liquidity_usd: float = 0.0
     opportunity_min_market_cap_usd: float = 0.0
+    # HARD floor for BUY-SIDE alerts — these actually SUPPRESS (operator
+    # request 2026-07-30, "make it a little stricter"). The comfort floors
+    # above only annotate (a stale comment once claimed they suppressed — they
+    # never did, the documented landmine). Below a set hard floor the alert is
+    # dropped outright, at any priority; protective warnings still fire. Both
+    # default 0.0 = OFF, so nothing changes until set. Unknown liquidity/mcap is
+    # already blocked by ``_untradeable`` regardless of these (Rule 8). A modest
+    # liquidity floor (e.g. 15000) removes dust launches — the $0.22-pool junk —
+    # without touching real coins like a $246k pool.
+    hard_min_liquidity_usd: float = 0.0
+    hard_min_market_cap_usd: float = 0.0
     # Operator "don't send me coins that already ran" CEILING for BUY-SIDE
     # alerts. ABOVE these, the coin is no longer an early opportunity — the move
     # the operator wants to catch already happened (a multi-million-dollar pool
@@ -275,6 +286,7 @@ class AlertThresholds:
                     f"alert threshold '{name}' must be positive, got {value}")
         for name in ("opportunity_min_liquidity_usd", "opportunity_min_market_cap_usd",
                      "opportunity_max_liquidity_usd", "opportunity_max_market_cap_usd",
+                     "hard_min_liquidity_usd", "hard_min_market_cap_usd",
                      "opportunity_max_age_hours", "checklist_new_launch_minutes"):
             value = getattr(self, name)
             if not math.isfinite(value) or value < 0:

@@ -326,7 +326,7 @@ class AutomationRules:
         # warning.
         if (deterministic_risk_veto is not None
                 or self._untradeable(result) or self._oversized(result)
-                or self._too_old(result)):
+                or self._below_hard_floor(result) or self._too_old(result)):
             events = [e for e in events if e.alert_type not in _BUY_SIDE_ALERT_TYPES]
         else:
             if self._score_declining(result, previous_score):
@@ -360,6 +360,25 @@ class AutomationRules:
             return True
         mcap = result.pair.effective_market_cap
         if mcap is None or not math.isfinite(mcap) or mcap <= 0.0:
+            return True
+        return False
+
+    def _below_hard_floor(self, result: PipelineResult) -> bool:
+        """True when the coin sits below a SET hard liquidity/market-cap floor —
+        a real SUPPRESS, unlike the comfort floors which only annotate (operator
+        request 2026-07-30). Both floors default 0.0 = OFF, so behavior is
+        unchanged until the operator sets one. A KNOWN value at or above the
+        floor passes; an unknown value is left to ``_untradeable`` (which already
+        blocks None/0), so this method never double-judges missing data — it only
+        acts on a real number that is genuinely too small (Rule 8)."""
+        t = self._t
+        liq = result.pair.liquidity_usd
+        if (t.hard_min_liquidity_usd > 0.0 and liq is not None
+                and math.isfinite(liq) and liq < t.hard_min_liquidity_usd):
+            return True
+        mcap = result.pair.effective_market_cap
+        if (t.hard_min_market_cap_usd > 0.0 and mcap is not None
+                and math.isfinite(mcap) and mcap < t.hard_min_market_cap_usd):
             return True
         return False
 

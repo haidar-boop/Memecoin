@@ -954,3 +954,47 @@ async def test_checklist_names_fdv_when_that_is_the_source():
     reported = rules._market_cap_check(
         await pipeline_result(pair=make_pair(market_cap=400_000.0)))
     assert "FDV" not in reported.detail
+
+
+async def test_hard_liquidity_floor_actually_suppresses():
+    """The operator's 2026-07-30 'a little stricter' request: hard_min_liquidity
+    SUPPRESSES a real-but-thin coin, where the comfort floor only annotates it."""
+    rules = AutomationRules(
+        AlertThresholds(hard_min_liquidity_usd=15_000.0),
+        AlertEngineSettings(), now_func=lambda: NOW)
+    thin = await pipeline_result(pair=make_pair(liquidity_usd=4_000.0))
+    assert not ({e.alert_type for e in rules.evaluate(thin)} & _BUY_SIDE_ALERT_TYPES)
+
+
+async def test_hard_floor_lets_a_real_coin_through():
+    """A $246k pool (the Moon Doge shape) clears a $15k floor and still alerts —
+    the floor removes dust, not real coins."""
+    rules = AutomationRules(
+        AlertThresholds(hard_min_liquidity_usd=15_000.0),
+        AlertEngineSettings(), now_func=lambda: NOW)
+    real = await pipeline_result(pair=make_pair(liquidity_usd=246_000.0,
+                                                market_cap=250_000.0))
+    assert {e.alert_type for e in rules.evaluate(real)} & _BUY_SIDE_ALERT_TYPES
+
+
+async def test_the_comfort_floor_still_only_annotates():
+    """Guards the distinction the operator was almost tripped by: setting the
+    COMFORT floor does NOT suppress a thin-but-real coin (it only rides a note),
+    which is why the hard floor was needed."""
+    rules = AutomationRules(
+        AlertThresholds(opportunity_min_liquidity_usd=15_000.0),
+        AlertEngineSettings(), now_func=lambda: NOW)
+    thin = await pipeline_result(pair=make_pair(liquidity_usd=4_000.0))
+    assert {e.alert_type for e in rules.evaluate(thin)} & _BUY_SIDE_ALERT_TYPES
+
+
+async def test_hard_floor_off_by_default():
+    result = await pipeline_result(pair=make_pair(liquidity_usd=4_000.0))
+    assert {e.alert_type for e in make_rules().evaluate(result)} & _BUY_SIDE_ALERT_TYPES
+
+
+def test_hard_floor_validates_and_loads_from_env():
+    with pytest.raises(ConfigurationError, match="hard_min_liquidity_usd"):
+        AlertThresholds(hard_min_liquidity_usd=-1.0)
+    s = Settings.from_env(env={"MEMEINTEL_ALERTS_HARD_MIN_LIQUIDITY_USD": "15000"})
+    assert s.alerts.hard_min_liquidity_usd == 15000.0
