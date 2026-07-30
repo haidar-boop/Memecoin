@@ -549,7 +549,6 @@ class OnChainSecurityCollector(BaseCollector):
         ranked = sorted(held.items(), key=lambda item: item[1], reverse=True)
         amounts = [amount for _, amount in ranked]
         top_percent = 100.0 * amounts[0] / supply
-        top10_percent = 100.0 * sum(amounts[:10]) / supply
         notes: list[str] = []
         if custody_share > 0.0:
             notes.append(f"measured against total supply; {custody_share:.1f}% is in "
@@ -559,9 +558,29 @@ class OnChainSecurityCollector(BaseCollector):
             # of supply held by the top ten (there just are not ten), but say so.
             notes.append(f"only {len(amounts)} non-custody owners in the top "
                          f"{len(accounts)} accounts")
+        # top10_holder_percent is deliberately NOT emitted. It is arithmetically
+        # degenerate on the coins this bot actually sees, measured live rather
+        # than argued (2026-07-30, full censuses verified against getTokenSupply):
+        #
+        #   * 6 of 8 sampled coins had <= 12 real non-custody holders; median 7
+        #     for the fresh cluster. With fewer than ten holders the "top ten"
+        #     IS every holder, so top10-of-float came out at exactly 100.0000%
+        #     on all six — zero variance, no distributional content.
+        #   * Measured against total supply it equalled (100 - custody share) to
+        #     four decimal places on those same six coins. It does not measure
+        #     concentration, it measures how far through graduation a coin is.
+        #   * It is worse than uninformative on a thin coin. One coin reported
+        #     8.33% (distribution 100/100, PASS) and thirty minutes later its
+        #     three largest token accounts were CLOSED and 99.9% of supply sat
+        #     in the pool. The figure certified healthy distribution immediately
+        #     before every holder left.
+        #
+        # A number with no information that can still cross a threshold is a
+        # fabricated fact (Rule 8), so the field stays None and the analyzer's
+        # top10 thresholds get no input from this layer. The honest replacement
+        # is a real holder_count from a full census — see the module docstring.
         return OnChainSecurityFacts(
             top_holder_percent=min(100.0, top_percent),
-            top10_holder_percent=min(100.0, top10_percent),
             top_holder_owner=ranked[0][0],
             census_owner_count=len(held),
             excluded_owners=tuple(sorted(excluded)),

@@ -2889,3 +2889,97 @@ probe's own plumbing works end to end against the live database.
 Note for anyone writing the next deploy script: `Settings.from_env()` does not
 load `.env`. Use `get_settings()`, and run from the repo root, since the `.env`
 path is resolved relative to the working directory.
+
+## 2026-07-30 (later) — The 8 vetoed coins were identified on chain. The veto is correct.
+
+The operator ran the probe with his key working: 25 coins, 13 with facts, **8 of
+those 13 would lose every buy-side alert**. The probe printed STOP, because 8 of
+13 is the shape of the exclusion bug that has silenced him twice. So each of the
+8 was identified individually against live chain state before touching anything.
+
+**Every one of the 8 top holders is a real keyed wallet, not custody.** The
+decisive evidence was stronger than the off-curve test: each is a verified
+**ed25519 signer** on its own transactions. On-curve shows a key *could* exist;
+a valid signature shows one *does*, and no PDA can produce one.
+
+Three of them share an identical rug template, which is why they clustered at
+50.02 / 50.29 / 50.46%:
+
+* Token-2022 mint, 100,000,000,000 supply, mint and freeze authority revoked.
+* The deployer receives 100% of supply in the mint transaction.
+* It sends exactly 12.5% to each of four freshly created sibling wallets and
+  keeps exactly **50.0000%**. 50 + 4x12.5 = 100, which is why top-1 lands at ~50%
+  and top-10 at ~99.9%.
+* The excess above 50% is the dev buying its own coin back through PumpSwap —
+  reconciled to the exact sum of three self-signed swap deltas on C0IN.
+* The three deployers are three DIFFERENT addresses, so "one missed
+  infrastructure account" is falsified for that cohort.
+
+The others: 棒哥's 99.91% holder is a bundler that took 20% in the first swap off a
+Meteora DBC curve and consolidated 7-8 sniper wallets into itself over 96 txs
+($91k volume in a ~10-minute life). TNOS/EiaWUDEd's 46.59% holder paid 23.02 SOL
+into a pump.fun curve; six keyed wallets took ~79% of supply **in a single slot**
+and its bag has not moved a unit since. BBT's 40% holder is the deployer itself —
+minted 100% to its own ATA, revoked authorities, created the Orca pool, then
+hand-transferred 20/20/16% to three wallets within 160 seconds, leaving 96%
+dev-controlled; the ticker is additionally a U+202E right-to-left-override spoof
+of "The Bitcoin Bull" with a fabricated $41B FDV.
+
+**The exclusion logic was verified working on all 11 coins examined.** Every
+custody account present — PumpSwap pools, an Orca Whirlpool, pump.fun bonding
+curves — was caught by BOTH the off-curve and the program-owned test
+independently. Zero custody leaked into any reported figure. The three control
+coins reported clean are genuinely clean: censuses enumerated 100.000000% of
+supply, so their 2.31% / 5.53% / 0.18% maxima are true maxima, and two of the
+three have since moved balance materially (one exited entirely, one is steadily
+selling) — affirmative real-wallet evidence.
+
+So the STOP was a false alarm from a crude ">50% of coins with facts" heuristic.
+On this population the layer does what the operator asked for.
+
+### But top10_holder_percent is degenerate, and is now not emitted
+
+Independently measured on 8 live coins with full verified censuses:
+
+* **6 of 8 had <= 12 real non-custody holders**; median 7 on the fresh ones.
+  With fewer than ten holders the "top ten" IS every holder, so top10-of-float
+  came out at exactly **100.0000% on all six** — zero variance.
+* Against total supply it equalled **(100 - custody share) to four decimal
+  places** on those same six. It does not measure concentration; it measures how
+  far through graduation a coin is.
+* It is anti-informative on a thin coin. Mint 43YaAJ2X reported top10 = 8.33%
+  (distribution 100/100, rug 0, PASS) at 09:42. By 10:30 its three largest token
+  accounts were CLOSED and an off-curve account held 99.938% of supply. The
+  figure certified healthy distribution half an hour before a total exodus.
+
+A value carrying no information that can still cross a threshold is a fabricated
+fact (Rule 8), so the collector no longer emits it and the analyzer's top10
+thresholds get no input from this layer. Note this did NOT cause the 8 vetoes —
+all eight had top-1 above 30, which is sufficient on its own — but it would have
+caused trouble later, and it makes the PASS verdicts less trustworthy than the
+VETO ones.
+
+### Open, and needing the operator's decision rather than a guess
+
+1. **MARS's top holder holds 33,718 distinct mints.** On-curve, System-owned,
+   0.93 SOL — so all three custody tests read it as a person, but an address
+   holding tens of thousands of mints is infrastructure, not a whale. This is the
+   one probable false positive in the batch and wants a "holds implausibly many
+   mints" heuristic.
+2. **One signal alone can silence a coin.** `RugSignalWeights.
+   top_holder_concentration` is 15.0 and `ai.verify_skip_rug_score` is 10.0, so
+   concentration — the newest and most artifact-prone input in the system —
+   unilaterally strips every buy-side alert with no corroborating second signal.
+   Changing that means touching the rug engine, which is the operator's no-touch
+   zone; it needs his explicit consent.
+3. **The denominator.** Concentration is still a share of TOTAL supply with
+   custody removed only from the numerator, guarded by
+   `max_custody_share_for_concentration=50`. A reviewer measured that guard
+   suppressing values too small to matter (0.006-4.2%) while leaving the harmful
+   graduated-coin case untouched, and argues for float denomination under a new
+   field name with a minimum-float guard, wired score-only until the cut point is
+   re-fitted to his labelled outcomes. That is a real redesign and is NOT done.
+4. **An unreconciled figure.** TNOS/EiaWUDEd's reported top10 of 99.00% did not
+   match a fresh census (92.05% including the pool, 81.62% excluding it) while
+   its top-1 matched to four significant figures. Most likely a different
+   snapshot moment; unexplained, and recorded rather than guessed at.

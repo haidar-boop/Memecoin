@@ -155,7 +155,7 @@ async def test_concentration_excludes_custody_and_aggregates_by_owner(monkeypatc
 
     # Whale = 60k + 40k = 100k of 1M = 10%, NOT two separate 6%/4% holders.
     assert facts.top_holder_percent == pytest.approx(10.0)
-    assert facts.top10_holder_percent == pytest.approx(11.0)  # + Small 1%
+    assert facts.top10_holder_percent is None  # deliberately not emitted  # + Small 1%
     assert facts.census_owner_count == 2
     assert any(RAYDIUM_AUTHORITY in e for e in facts.excluded_owners)
     assert any(INCINERATOR in e for e in facts.excluded_owners)
@@ -185,7 +185,7 @@ async def test_a_pumpfun_bonding_curve_is_excluded_by_being_program_owned(monkey
 
     # 3% (the biggest REAL buyer), not 40%.
     assert facts.top_holder_percent == pytest.approx(3.0)
-    assert facts.top10_holder_percent == pytest.approx(5.0)
+    assert facts.top10_holder_percent is None  # deliberately not emitted
     assert any("program-owned" in e for e in facts.excluded_owners)
 
 
@@ -539,7 +539,7 @@ async def test_fewer_than_ten_real_holders_still_reports_and_says_so(monkeypatch
     patch_rpc(monkeypatch, c, handler)
     facts = await c.get_holder_concentration(MINT)
     assert facts.top_holder_percent == pytest.approx(20.0)
-    assert facts.top10_holder_percent == pytest.approx(30.0)
+    assert facts.top10_holder_percent is None  # deliberately not emitted
     assert any("non-custody owners" in n for n in facts.notes)
 
 
@@ -903,3 +903,38 @@ async def test_the_reported_owner_is_the_largest_one_not_merely_the_first(monkey
     facts = await c.get_holder_concentration(MINT)
     assert facts.top_holder_percent == pytest.approx(40.0)
     assert facts.top_holder_owner == W_WHALE
+
+
+@pytest.mark.asyncio
+async def test_top10_is_never_emitted_because_it_is_degenerate_here(monkeypatch):
+    """Measured live 2026-07-30, not reasoned about: 6 of 8 sampled coins had <=12
+    real holders (median 7 on fresh ones). With fewer than ten holders the "top
+    ten" is every holder, so top10-of-float was exactly 100.0000% on all six —
+    zero variance. Against total supply it equalled (100 - custody share) to four
+    decimals, i.e. it measures graduation progress, not distribution. And it is
+    anti-informative: one coin reported 8.33% and PASSED, and thirty minutes
+    later its three largest accounts were closed with 99.9% of supply in the
+    pool. A value with no information that can still cross a threshold is a
+    fabricated fact."""
+    c = make_collector()
+
+    def handler(method, params):
+        if method == "getTokenSupply":
+            return supply(1_000)
+        if method == "getTokenLargestAccounts":
+            # Six real holders — exactly the shape where top10 saturates.
+            return largest(("a", 300), ("b", 200), ("c", 200),
+                           ("d", 150), ("e", 100), ("f", 50))
+        if method == "getMultipleAccounts":
+            if params[1]["encoding"] == "jsonParsed":
+                return token_accounts(W_A, W_B, W_WHALE, W_SMALL, W_DEV, W_OTHER)
+            return owner_kinds(*([SYSTEM] * 6))
+        raise AssertionError(method)
+
+    patch_rpc(monkeypatch, c, handler)
+    facts = await c.get_holder_concentration(MINT)
+
+    assert facts.top_holder_percent == pytest.approx(30.0), "top-1 is still real"
+    assert facts.top10_holder_percent is None, (
+        "top10 would be 100% of every coin with under ten holders — a threshold "
+        "crossing carrying no information")
