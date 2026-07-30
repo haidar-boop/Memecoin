@@ -683,19 +683,20 @@ class LearningService:
     def get_learning_metrics(self, *, persist: bool = True) -> dict:
         """Compute the self-evaluation metrics over resolved predictions."""
         self._maybe_reload_analog()
-        records: list[PredictionRecord] = []
-        for record in self._store.resolved_records():
-            coin_id = self._store.coin_id(record.token)
-            prediction = self._store.get_prediction(coin_id) if coin_id else None
-            if not prediction:
-                continue
-            records.append(PredictionRecord(
+        # One JOIN instead of three queries and a full snapshot-history load
+        # per resolved coin — this loop reads only the bucket and the payload,
+        # and it runs on the event loop from /mind and from the veto gate
+        # (bug-hunt finding, 2026-07-29). Identical rows, identical order.
+        records: list[PredictionRecord] = [
+            PredictionRecord(
                 predicted_distribution=prediction.get("distribution", {}),
                 predicted_label=prediction.get("predicted_label", ""),
-                actual_label=record.final_bucket.value,
+                actual_label=bucket,
                 archetype=prediction.get("archetype"),
                 novelty_flagged=prediction.get("novelty_flagged", False),
-            ))
+            )
+            for bucket, prediction in self._store.graded_predictions()
+        ]
         metrics = compute_metrics(records)
         metrics["ensemble_accuracy"] = self._ensemble.accuracy_report()
         metrics["analog_memory_size"] = self._analog.size

@@ -455,6 +455,40 @@ class LearningStore:
             ))
         return records
 
+    def graded_predictions(self) -> list[tuple[str, dict]]:
+        """``(final_bucket, prediction payload)`` for every resolved coin that
+        has a stored prediction — exactly what the self-evaluation metrics need.
+
+        ``get_learning_metrics`` used to walk ``resolved_records()`` and then
+        issue ``coin_id()`` + ``get_prediction()`` per coin: three queries per
+        coin plus a full snapshot-history load, all of which it discarded — it
+        reads only the bucket and the payload. At ~28k graded calls that is
+        ~84,000 queries and every coin's entire price trajectory in RAM, run
+        synchronously on the asyncio event loop by /mind and by the veto gate,
+        stalling the scanner and the Telegram poller together on a single vCPU
+        (bug-hunt finding, 2026-07-29).
+
+        One JOIN, same rows, same order. Deliberately NOT limited: the accuracy
+        this feeds is what earns the p(rug) veto its authority, and truncating
+        the sample would move that operating point.
+        """
+        rows = self._conn.execute(
+            """SELECT c.final_bucket AS bucket, p.payload AS payload
+               FROM learning_coins c
+               JOIN learning_predictions p ON p.coin_id = c.id
+               WHERE c.final_bucket IS NOT NULL
+               ORDER BY c.updated_at DESC""",
+        ).fetchall()
+        out: list[tuple[str, dict]] = []
+        for row in rows:
+            try:
+                payload = json.loads(row["payload"])
+            except (TypeError, ValueError):
+                continue  # a corrupt payload is not a graded prediction
+            if isinstance(payload, dict):
+                out.append((row["bucket"], payload))
+        return out
+
     def _labels_for(self, coin_id: int) -> list[OutcomeLabel]:
         rows = self._conn.execute(
             """SELECT horizon_hours, bucket, forward_return_percent, resolved_at
