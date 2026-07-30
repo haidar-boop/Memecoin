@@ -1,6 +1,10 @@
 # Build Status — Parts 1 through 33 (built or verified-satisfied)
 
-**1085 tests passing** (as of 2026-07-29). ~14,000+ lines of source,
+**1144 tests passing** (as of 2026-07-30; 1044 pass in a bare sandbox — the
+other 100 need faiss/lightgbm/hdbscan/solders/anthropic, which are installed on
+the droplet). The 2026-07-30 addition is the on-chain holder-concentration + LP
+burn collector, shipped OFF — see DECISIONS_LOG 2026-07-30 and run
+`deploy/onchain_facts_probe.py` before enabling it. ~14,000+ lines of source,
 ~8,000+ lines of tests. Parts 20-33 completed a verification pass (see
 `next_steps/INDEX.md`); the only unbuilt items are the web dashboard
 (**discarded by the operator 2026-07-10 — do not build**) and

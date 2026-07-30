@@ -35,6 +35,35 @@ already describes the required outcome.
 The payload in fixtures_goplus_thin_mint.json is the REAL GoPlus response for
 that mint, captured live, so the fixture cannot drift into being kinder than
 production.
+
+CORRECTION, 2026-07-30 — read this before citing these tests
+------------------------------------------------------------
+On-chain collection now exists (`collectors/onchain_security.py`). Investigating
+this specific mint live REFUTED the story above in one important respect, and the
+tests below no longer mean what their names suggest about THIS coin:
+
+* **The 88.45% was the pump.fun bonding curve, not a whale.** The mint graduated
+  off the curve at 2026-07-29T18:56:40Z — the same day as the screenshot — and
+  the curve account reads exactly 0 today. A bonding curve is custody, not a
+  holder; counting it would make every healthy new launch look ~99%
+  concentrated. So a CORRECT census reports single digits for this coin (3.49%
+  today, largest real wallet), and it PASSES the security gate.
+* **The "LP 100% unlocked" was also a pre-graduation artifact.** On chain the LP
+  is 100% BURNED (minted 4193388289387, burned the same amount, supply 0).
+* The coin did lose ~91% of its pool SOL — but to holders dumping, not to an LP
+  withdrawal. Burned LP prevents a rug-by-withdrawal and does nothing about a
+  rug-by-dump, which is the holdings guard's job, not this layer's.
+
+So: concentration collection does NOT retroactively catch this coin, and nobody
+should claim it does. What these tests still correctly pin is the ANALYZER's
+behaviour — given a genuine 88.45% holder and 0% LP, it blocks the coin at 73.8
+unaided — and that behaviour is real and is what the new layer feeds. A live coin
+with a genuine 49.14% single holder was found during the same investigation, so
+the check does fire on real concentration.
+
+The end-to-end acceptance criterion now lives in
+`tests/test_onchain_security_pipeline.py::
+test_a_known_bad_coin_is_blocked_and_a_known_good_one_still_passes`.
 """
 
 import dataclasses as dc

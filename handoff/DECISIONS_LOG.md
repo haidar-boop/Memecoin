@@ -2655,3 +2655,108 @@ computes both from chain and whose 94 tests pass; its offsets are claims to be
 verified live, not facts to be copied.
 
 Suite: **1085 passing**.
+
+## 2026-07-30 — On-chain holder concentration + LP burn: built, shipped OFF
+
+The open project from the previous handoff. GoPlus returns no holder and no LP
+data for a fresh mint, so the two facts that decide a rug were `None` on 499 of
+the operator's 500 alerted coins, the security score was a constant ~100 that
+passed 100% of buy-side alerts, and `RugEngine`'s `top_holder_concentration` and
+`liquidity_unlocked` signals had never once had an input.
+
+New: `collectors/onchain_security.py` (the collector), `OnChainSecuritySettings`,
+a gate + Rule 9 merge in `workflow/pipeline.py`, wiring through
+`controller.py` / `__main__.py`, and `deploy/onchain_facts_probe.py` (the
+read-only "what would it report" measurement). 57 new tests; suite 1085 -> 1142.
+
+**Ships OFF** (`MEMEINTEL_ONCHAIN_SECURITY_ENABLED=false`). It changes which
+facts reach the analyzer and therefore which coins can earn an alert, so it gets
+measured against his real database before it is switched on — the discipline that
+caught the coverage cap.
+
+### Verified live before writing the decoder, not after
+
+Raydium AMM v4 `LiquidityStateV4` decoded from a live mainnet pool and
+cross-checked so a wrong offset could not pass: 752 bytes under program
+`675kPX9M…1Mp8`; `baseVault@336` and `quoteVault@368` each own a token account
+whose `mint` equals `baseMint@400` / `quoteMint@432`; `lpMint@464` resolves via
+`getTokenSupply` (garbage would not); `lpReserve@720` = 55465149717186 against
+supply 55459414131915 -> 0.0103% burned. Re-confirmed across five v4 pools. A
+survey of 25 other AMM programs found no 752-byte accounts (CPMM 637, Whirlpool
+653, DLMM 904, DAMM v2 1112, CLMM 1544, PumpSwap 300) — but four programs could
+not be scanned, so **length is the second check behind the program-id check**,
+never the only one.
+
+### Three live findings that changed the design
+
+1. **The hardcoded custody address list is load-bearing.** The intended design
+   was a single structural rule: exclude any holder whose owner account is
+   program-owned (a PDA), since AMM vaults and bonding curves are custody rather
+   than holders. That rule is necessary but NOT sufficient — Raydium's v4 vault
+   authority `5Q544fKr…ge4j1` is **System-owned with zero-length data**, a
+   signer-only PDA that is structurally identical to a person. On one real mint
+   its vault held 94.6% of supply, so dropping the address constant would report
+   a healthy graduated coin as 94.6% concentrated and block it. Both mechanisms
+   are required and there is a test naming this counterexample.
+
+2. **A real wallet can have no account at all.** Holders rent-drained to zero
+   lamports return `null` from `getMultipleAccounts` while still holding tokens
+   (observed at 1.30% and 0.35% of two supplies). Absence is therefore treated as
+   a wallet: calling it custody would delete genuine holders and UNDER-state
+   concentration, the direction that lets a rug through.
+
+3. **`getTokenLargestAccounts` is disabled on public RPC** — HTTP 429 with
+   `x-ratelimit-method-limit: 0`, deterministically, while cheap calls on the
+   same connection succeed. So concentration needs a Helius key. The collector
+   refuses the census up front when it has no key rather than spending the retry
+   ladder (4 attempts, ~30s) per coin on a guaranteed failure inside the scan
+   cycle — found by actually running the probe, not by reading the code.
+
+### The screenshot coin does NOT reproduce, and this layer does not catch it
+
+This is the uncomfortable part and it must not be quietly dropped. The coin that
+motivated the whole project — rugcheck DANGER 65, "single holder 88.45%", "LP
+100% unlocked" — was investigated live:
+
+* The 88.45% was **the pump.fun bonding curve**, not a whale. The coin graduated
+  off the curve the same day as the screenshot; the curve reads exactly 0 now. A
+  curve is custody, so a *correct* census reports single digits (3.49% today) and
+  the coin **passes** the gate.
+* On chain the LP is **100% burned**, not unlocked; that report was generated
+  pre-graduation, when no LP mint or pool existed yet.
+* The coin did lose ~91% of its pool SOL — to holders dumping, not an LP pull.
+
+So concentration collection would not have saved that trade under any defensible
+exclusion policy, and nobody should claim otherwise. `test_security_thin_evidence
+.py` now carries this correction in its docstring. What survives intact is the
+narrower, still-valuable claim: the analyzer separates a genuinely concentrated
+coin from a healthy one by 26 points once it HAS the facts, and a live coin with
+a genuine **49.14%** single holder was found during the same investigation — the
+check does fire on real concentration.
+
+Two honest limits, documented in the module and in `.env.example` rather than
+buried: LP burn covers **Raydium AMM v4 only**, and current pump.fun coins
+graduate to **PumpSwap** (~300 bytes), so their LP status reports `None`. And a
+burned LP is not liquidity safety — the screenshot coin proves a fully-burned
+pool can still be drained by dumping.
+
+### Deliberately NOT built
+
+* **PumpSwap LP.** The pAMM pool appears to keep an equivalent `lp_supply` at
+  offset 203 of its 301-byte account, arithmetically consistent on one pool
+  (it exceeds minted LP by exactly 100, the min-liquidity lock). One reviewer
+  explicitly flagged the *semantics* as unvalidated. An unvalidated formula is
+  how a wrong number ships — this is the highest-value next step, and it needs
+  the same live cross-checking the Raydium layout got.
+* **A true holder count.** `getTokenLargestAccounts` sees at most 20 accounts, so
+  `SecurityProfile.holder_count` is never written from here; a census size there
+  would be a fabricated population figure. A complete enumeration via
+  `getProgramAccounts(memcmp mint@0, no dataSize filter — Token-2022 accounts are
+  170/165/191 bytes, so a dataSize:165 filter returns ~0.7% of them)` would give
+  a real count AND a completeness proof (amounts must sum to `getTokenSupply`),
+  but it is an unbounded call on a coin with many holders and the operator
+  watches his Helius spend. Needs his sign-off on cost first.
+* **`treat_zero_burn_as_unlocked`** exists as a lever, defaulting True. A pool
+  whose LP is locked in a locker rather than burned reads 0% and takes a
+  30-point deduction. True catches the genuinely-unlocked rug, the dominant case
+  on fresh Solana pools; flip it if the probe shows healthy coins caught by it.

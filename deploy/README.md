@@ -99,6 +99,37 @@ pip install -r requirements.txt   # only needed if deps changed
 sudo systemctl restart meme-intelligence
 ```
 
+## 7. Read-only probes (run these BEFORE any change that tightens a gate)
+
+Both open the database read-only and are safe against the live monitor. Paste as
+one block each.
+
+```bash
+cd ~/meme-intelligence
+source .venv/bin/activate
+python3 deploy/security_evidence_report.py
+```
+Which rug-relevant facts the bot actually has today. This is the "before".
+
+```bash
+cd ~/meme-intelligence
+source .venv/bin/activate
+python3 deploy/onchain_facts_probe.py --limit 25
+```
+What the on-chain holder/LP layer *would* report on real alerted coins, and what
+it would do to each score. **Run this before setting
+`MEMEINTEL_ONCHAIN_SECURITY_ENABLED=true`.**
+
+Good output looks like: a handful of coins in the "would now be BLOCKED" list,
+each one you would agree is bad. If most coins flip to BLOCKED, stop — that is
+what a wrong holder-exclusion rule looks like, and it would take the bot off the
+air. Two earlier "make it stricter" changes would have silenced 99% of alerts and
+were caught by exactly this kind of measurement.
+
+Needs `MEMEINTEL_HELIUS_API_KEY` for the concentration column —
+`getTokenLargestAccounts` is disabled on public RPC, so without a key the probe
+honestly reports "unknown" instead of a number.
+
 ## Sizing / cost check
 
 - Droplet: $6 USD/mo (~$8 CAD) — well under your $50 CAD budget, leaves

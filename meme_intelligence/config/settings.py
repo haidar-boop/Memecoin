@@ -1011,6 +1011,92 @@ class LiquidityProbeSettings:
 
 
 @dataclass(frozen=True)
+class OnChainSecuritySettings:
+    """Reading the two facts that decide a rug straight off the Solana chain.
+
+    Why this exists (DECISIONS_LOG 2026-07-29, late night): GoPlus returns no
+    holder distribution and no LP data for a fresh pump.fun mint, so
+    ``SecurityProfile.top_holder_percent`` / ``top10_holder_percent`` /
+    ``lp_locked_percent`` are ``None`` on essentially every coin the operator is
+    alerted about — measured on his live database, 499 of 500. That makes the
+    security score a constant ~100 that passes 100% of buy-side alerts, and
+    leaves two written-and-weighted ``RugEngine`` signals
+    (``top_holder_concentration``, ``liquidity_unlocked``) that have never once
+    had an input. This layer fills those fields from chain state so the EXISTING
+    analyzer can do its job — no new scoring mechanism (the coverage cap that
+    was tried instead is gone; it would have blocked 99% of his alerts).
+
+    Ships OFF (``enabled=False``). The standing rule for anything that can
+    change which coins reach the phone: measure it against his real data with
+    ``deploy/onchain_facts_probe.py`` BEFORE switching it on.
+    """
+
+    enabled: bool = False
+    # A holder census costs a handful of RPC calls per coin. Bounded and gated
+    # the same way wallet intelligence is (Rule 11) — the operator watches his
+    # Helius spend and exhausted a free tier in ~3 days once. 0 = unlimited /
+    # off, matching WalletIntelSettings' convention.
+    max_lookups_per_day: int = 500
+    cooldown_minutes: float = 30.0
+    # getTokenLargestAccounts returns at most 20 accounts, so asking for more
+    # cannot widen the census; it only bounds how many we resolve to owners.
+    top_accounts_limit: int = 20
+    # Reading holder concentration means resolving token accounts to owner
+    # wallets and then classifying each owner. When True, an owner whose
+    # account is owned by a PROGRAM (a PDA: an AMM vault, a bonding curve, a
+    # staking pool) is excluded from concentration — it is custody, not a
+    # holder. This is the single highest-risk switch in the module: counting
+    # those makes every healthy coin look ~90% concentrated and would silence
+    # the operator. Off only for diagnostics.
+    exclude_program_owned_accounts: bool = True
+    # Timeout for one RPC call. Kept below the pipeline's own patience so a
+    # slow census degrades to "unknown" rather than stalling a scan cycle.
+    timeout_seconds: float = 8.0
+    requests_per_minute: float = 120.0
+    # Public-RPC fallback when no Helius key is configured (Rule 9 — degrade
+    # gracefully rather than going dark). Empty = no fallback, layer stays off.
+    fallback_rpc_url: str = "https://api.mainnet-beta.solana.com"
+    # Burned and locked are DIFFERENT claims. This layer can verify a burn with
+    # arithmetic and cannot verify a third-party lock at all (that needs the
+    # locker program's account layout). The value feeds SecurityProfile's
+    # `lp_locked_percent`, whose analyzer semantics are "locked OR burned", so a
+    # burn figure is an honest FLOOR for it.
+    #
+    # The edge that matters: a pool whose LP is locked in a locker rather than
+    # burned reads 0% here, which deducts 30 points for "liquidity can be
+    # pulled" — a coin blocked for being safe in a way we cannot see. That is
+    # the "don't silence the operator" failure mode, so it gets a lever. True
+    # (default) reports the 0 and catches the genuinely-unlocked rug, which is
+    # the dominant case on fresh Solana pools and the whole point of this work.
+    # Set False if `deploy/onchain_facts_probe.py` shows healthy coins being
+    # caught by it; then a 0% burn reports as unknown instead.
+    treat_zero_burn_as_unlocked: bool = True
+
+    def __post_init__(self) -> None:
+        if self.max_lookups_per_day < 0:
+            raise ConfigurationError(
+                "onchain_security max_lookups_per_day must be >= 0 (0 = unlimited), "
+                f"got {self.max_lookups_per_day}")
+        if not math.isfinite(self.cooldown_minutes) or self.cooldown_minutes < 0:
+            raise ConfigurationError(
+                "onchain_security cooldown_minutes must be >= 0 (0 = off), "
+                f"got {self.cooldown_minutes}")
+        if not (0 < self.top_accounts_limit <= 20):
+            # The RPC itself caps at 20; a larger number would be a silent lie
+            # about how wide the census actually is.
+            raise ConfigurationError(
+                "onchain_security top_accounts_limit must be within (0, 20] — "
+                f"getTokenLargestAccounts returns at most 20, got {self.top_accounts_limit}")
+        if not math.isfinite(self.timeout_seconds) or self.timeout_seconds <= 0:
+            raise ConfigurationError(
+                f"onchain_security timeout_seconds must be positive, got {self.timeout_seconds}")
+        if not math.isfinite(self.requests_per_minute) or self.requests_per_minute <= 0:
+            raise ConfigurationError(
+                "onchain_security requests_per_minute must be positive, "
+                f"got {self.requests_per_minute}")
+
+
+@dataclass(frozen=True)
 class MomentumSubWeights:
     """Sub-weights inside the momentum score (Part 14, Section 5 — 4 x 25)."""
 
@@ -1731,6 +1817,8 @@ class Settings:
     social: SocialIntelSettings = field(default_factory=SocialIntelSettings)
     smart_money_weights: SmartMoneySubWeights = field(default_factory=SmartMoneySubWeights)
     liquidity_probe: LiquidityProbeSettings = field(default_factory=LiquidityProbeSettings)
+    onchain_security: OnChainSecuritySettings = field(
+        default_factory=OnChainSecuritySettings)
     ai: AISettings = field(default_factory=AISettings)
     backtest: BacktestSettings = field(default_factory=BacktestSettings)
     learning: LearningSettings = field(default_factory=LearningSettings)
@@ -1812,6 +1900,8 @@ class Settings:
             social=_load_group(SocialIntelSettings, "SOCIAL", env),
             smart_money_weights=_load_group(SmartMoneySubWeights, "SMART_MONEY_WEIGHTS", env),
             liquidity_probe=_load_group(LiquidityProbeSettings, "LIQUIDITY_PROBE", env),
+            onchain_security=_load_group(
+                OnChainSecuritySettings, "ONCHAIN_SECURITY", env),
             ai=_load_group(AISettings, "AI", env),
             backtest=_load_group(BacktestSettings, "BACKTEST", env),
             learning=_load_group(LearningSettings, "LEARNING", env),

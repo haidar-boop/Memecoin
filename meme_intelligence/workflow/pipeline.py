@@ -94,6 +94,7 @@ class ResearchPipeline:
         goplus_client,  # GoPlusClient-compatible (get_token_security)
         *,
         wallet_service=None,  # WalletDataService (Solana); costs metered credits
+        onchain_security_collector=None,  # OnChainSecurityCollector; bounded RPC per coin
         jupiter_client=None,  # JupiterClient-compatible (check_round_trip_liquidity)
         community_client=None,  # CoinGeckoClient-compatible (get_community_profile)
         social_client=None,  # LunarCrushClient-compatible (get_community_profile); costs metered credits
@@ -113,6 +114,17 @@ class ResearchPipeline:
         self._wallet_lookups_today = 0
         self._wallet_budget_warned_day: str | None = None
         self._wallet_last_lookup: "OrderedDict[tuple[str, str], datetime]" = OrderedDict()
+        # On-chain security facts (holder concentration + LP burn). Same
+        # cooldown/budget bookkeeping shape as the wallet gate above — a direct
+        # copy rather than a shared abstraction, matching how the social gate
+        # was added (Rule 21; the wallet gate is deployed and must not be
+        # touched, Rule 3).
+        self._onchain_security = onchain_security_collector
+        self._onchain_security_settings = settings.onchain_security
+        self._onchain_lookup_day: str | None = None
+        self._onchain_lookups_today = 0
+        self._onchain_budget_warned_day: str | None = None
+        self._onchain_last_lookup: "OrderedDict[tuple[str, str], datetime]" = OrderedDict()
         self._jupiter = jupiter_client
         self._liquidity_probe = settings.liquidity_probe
         self._community_client = community_client
@@ -153,6 +165,7 @@ class ResearchPipeline:
         research_mode: ResearchMode = ResearchMode.STANDARD,
         force_wallet_check: bool = False,
         force_social_check: bool = False,
+        force_onchain_security: bool = False,
     ) -> PipelineResult | None:
         """Full chain for one pair; ``None`` when security data is unavailable
         (a token that cannot be security-screened is not analyzable — Part 4).
@@ -194,9 +207,23 @@ class ResearchPipeline:
             self._community_client.get_community_profile(pair.base_token)
             if self._community_client is not None else _no_call()
         )
-        goplus_outcome, jupiter_outcome, community_outcome = await asyncio.gather(
+        # On-chain holder/LP facts join the same concurrent leg: they depend on
+        # nothing GoPlus returns, and they must land in `profile` BEFORE the
+        # security analyzer runs (that is the entire point — those fields are
+        # what the analyzer is missing). Because it runs pre-assess, its gate
+        # cannot consult the security score the way the wallet gate does; it
+        # screens on the pair facts alone. See ``_onchain_security_allows``.
+        onchain_security_enabled = self._onchain_security_gate(
+            pair, forced=force_onchain_security)
+        onchain_security_coro = (
+            self._onchain_security.collect(pair.base_token.address, pair.pair_address)
+            if onchain_security_enabled else _no_call()
+        )
+        (goplus_outcome, jupiter_outcome, community_outcome,
+         onchain_security_outcome) = await asyncio.gather(
             self._goplus.get_token_security(pair.chain, pair.base_token.address),
-            jupiter_coro, community_coro, return_exceptions=True,
+            jupiter_coro, community_coro, onchain_security_coro,
+            return_exceptions=True,
         )
 
         if isinstance(goplus_outcome, CollectorError):
@@ -229,6 +256,21 @@ class ResearchPipeline:
                     live_sell_route_found=probe.live_sell_route_found,
                     live_round_trip_loss_percent=probe.live_round_trip_loss_percent,
                 )
+
+        # The two facts that decide a rug, read from chain. Merged BEFORE the
+        # assessment so they participate in the existing sub-scores rather than
+        # needing any new mechanism (DECISIONS_LOG 2026-07-29 late night: with
+        # these present the analyzer already separates the known-bad coin at
+        # 73.8 from a known-good one at 100.0, unaided).
+        if onchain_security_enabled:
+            if isinstance(onchain_security_outcome, (CollectorError, ValueError)):
+                self._logger.info("on-chain security facts unavailable for %s: %s",
+                                  pair.base_token.address, onchain_security_outcome)
+            elif isinstance(onchain_security_outcome, BaseException):
+                raise onchain_security_outcome
+            elif onchain_security_outcome is not None:
+                profile = self._merge_onchain_security(
+                    profile, onchain_security_outcome, pair)
 
         try:
             security = self._security.assess(profile, pair)
@@ -354,6 +396,132 @@ class ResearchPipeline:
         if self._ai is not None and not security.is_destructive:
             result = await self._enrich_with_ai(result, research_mode)
         return result
+
+    # ---- On-chain security facts: gate + multi-source merge ----
+
+    def _onchain_security_gate(self, pair: DexPair, *, forced: bool) -> bool:
+        """Should this coin get a holder census + LP read this cycle?
+
+        Runs BEFORE scoring, so unlike ``_gate_allows`` it cannot screen on the
+        security score — it screens on the pair facts that can rule a coin out
+        regardless of how it scores: not on Solana, not tradeable, past the
+        operator's size ceiling, or past his freshness window. Then the same
+        spend bounds the wallet gate uses (Rule 11 — the operator watches his
+        Helius spend and exhausted a free tier in ~3 days once).
+
+        ``forced`` (``/check``, holdings) skips the cooldown and budget: a
+        deliberate operator lookup is never starved by a scanner budget.
+        """
+        if self._onchain_security is None or not self._onchain_security_settings.enabled:
+            return False
+        if pair.chain not in ("solana", "sol"):
+            return False   # the decoder and the census are Solana-only
+        if forced:
+            self._note_onchain_lookup(pair, forced=True)
+            return True
+        if not self._worth_onchain_security(pair):
+            return False
+        s = self._onchain_security_settings
+        if s.cooldown_minutes > 0:
+            last = self._onchain_last_lookup.get(self._lookup_key(pair))
+            if (last is not None
+                    and (self._now() - last).total_seconds() < s.cooldown_minutes * 60.0):
+                return False
+        if s.max_lookups_per_day > 0:
+            self._roll_onchain_budget_day()
+            if self._onchain_lookups_today >= s.max_lookups_per_day:
+                if self._onchain_budget_warned_day != self._onchain_lookup_day:
+                    self._onchain_budget_warned_day = self._onchain_lookup_day
+                    self._logger.warning(
+                        "on-chain security daily budget exhausted (%d lookups) — "
+                        "further gated censuses wait for the next UTC day; "
+                        "/check and holdings lookups are unaffected",
+                        s.max_lookups_per_day)
+                return False
+        self._note_onchain_lookup(pair, forced=False)
+        return True
+
+    def _worth_onchain_security(self, pair: DexPair) -> bool:
+        """Could this coin still plausibly earn a buy-side alert, judged on pair
+        facts alone? Mirrors ``AutomationRules._untradeable`` / ``_oversized`` /
+        ``_too_old`` so RPC calls are not spent on coins the operator can never
+        be pitched. Unknown liquidity/mcap counts as untradeable; unknown age
+        does NOT count as old (Rule 8, matching the alert engine)."""
+        liq, mcap = pair.liquidity_usd, pair.effective_market_cap
+        if liq is None or not math.isfinite(liq) or liq <= 0.0:
+            return False
+        if mcap is None or not math.isfinite(mcap) or mcap <= 0.0:
+            return False
+        t = self._alert_thresholds
+        if t.opportunity_max_liquidity_usd > 0.0 and liq > t.opportunity_max_liquidity_usd:
+            return False
+        if t.opportunity_max_market_cap_usd > 0.0 and mcap > t.opportunity_max_market_cap_usd:
+            return False
+        if t.opportunity_max_age_hours > 0.0:
+            age = self._pair_age_hours(pair)
+            if age is not None and age > t.opportunity_max_age_hours:
+                return False
+        return True
+
+    def _roll_onchain_budget_day(self) -> None:
+        today = self._now().date().isoformat()
+        if today != self._onchain_lookup_day:
+            self._onchain_lookup_day = today
+            self._onchain_lookups_today = 0
+
+    def _note_onchain_lookup(self, pair: DexPair, *, forced: bool) -> None:
+        key = self._lookup_key(pair)
+        self._onchain_last_lookup[key] = self._now()
+        self._onchain_last_lookup.move_to_end(key)
+        while len(self._onchain_last_lookup) > 4096:  # bounded like the scanner caches
+            self._onchain_last_lookup.popitem(last=False)
+        if not forced:
+            self._roll_onchain_budget_day()
+            self._onchain_lookups_today += 1
+
+    def _merge_onchain_security(self, profile, facts, pair: DexPair):
+        """Fold chain-read facts into the GoPlus profile (Rule 9).
+
+        One source never silently overwrites another's red flag. Where both have
+        a value, the WORSE one wins — higher concentration, lower LP locked —
+        and the disagreement is logged. ``holder_count`` is deliberately never
+        written: ``getTokenLargestAccounts`` sees at most 20 accounts and cannot
+        know the total holder population, so a census size there would be a
+        fabricated number (Rule 8).
+        """
+        updates: dict[str, float] = {}
+        for field_name, chain_value, worse in (
+            ("top_holder_percent", facts.top_holder_percent, max),
+            ("top10_holder_percent", facts.top10_holder_percent, max),
+            ("lp_locked_percent", facts.lp_burned_percent, min),
+        ):
+            if chain_value is None or not math.isfinite(chain_value):
+                continue
+            existing = getattr(profile, field_name)
+            if existing is None or not math.isfinite(existing):
+                updates[field_name] = chain_value
+                continue
+            kept = worse(existing, chain_value)
+            if kept != existing or chain_value != existing:
+                self._logger.info(
+                    "on-chain %s for %s disagrees with the provider "
+                    "(provider=%.2f chain=%.2f) — keeping the more cautious %.2f",
+                    field_name, pair.base_token.address, existing, chain_value, kept)
+            updates[field_name] = kept
+
+        if not updates:
+            if facts.notes:
+                self._logger.info("no on-chain security facts for %s: %s",
+                                  pair.base_token.address, "; ".join(facts.notes))
+            return profile
+
+        self._logger.info(
+            "on-chain security facts for %s: %s%s",
+            pair.base_token.address,
+            ", ".join(f"{name}={value:.2f}" for name, value in sorted(updates.items())),
+            f" (excluded {len(facts.excluded_owners)} custody account(s))"
+            if facts.excluded_owners else "")
+        return dataclasses.replace(profile, **updates)
 
     # ---- Wallet-intelligence credit gate (Rule 11, 2026-07-17 rebuild) ----
 

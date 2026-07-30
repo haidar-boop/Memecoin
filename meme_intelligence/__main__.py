@@ -60,7 +60,7 @@ from meme_intelligence.collectors.security_data import GoPlusClient
 from meme_intelligence.config.settings import Settings, get_settings
 from meme_intelligence.core.cache import TTLCache
 from meme_intelligence.core.errors import CollectorError, InsufficientDataError
-from meme_intelligence.core.logging_setup import setup_logging
+from meme_intelligence.core.logging_setup import get_logger, setup_logging
 from meme_intelligence.core.models import DexPair
 from meme_intelligence.core.rate_limiter import RateLimiter
 from meme_intelligence.scanners.discovery import DiscoveryEngine, scan_new_pools
@@ -180,6 +180,54 @@ def build_social_service(settings: Settings) -> LunarCrushClient | None:
         rate_limiter=RateLimiter.per_minute(
             settings.providers.lunarcrush_requests_per_minute),
         **_shared_collector_kwargs(settings),
+    )
+
+
+def build_onchain_security(settings: Settings):
+    """Holder-concentration + LP-burn collector, or None when the layer is off.
+
+    Off unless ``MEMEINTEL_ONCHAIN_SECURITY_ENABLED=true`` — this changes which
+    facts reach the security analyzer, and therefore which coins can earn an
+    alert, so it ships dark and gets measured with
+    ``deploy/onchain_facts_probe.py`` first.
+
+    Uses the main Helius key when present and falls back to public RPC
+    otherwise. The fallback can still read LP burn but NOT holder concentration:
+    ``getTokenLargestAccounts`` is disabled on the public endpoint (verified
+    live — HTTP 429, ``x-ratelimit-method-limit: 0``), so a keyless install gets
+    honest "unknown" concentration rather than a fabricated number. Warned about
+    at startup so it is diagnosable from the journal rather than a silent gap.
+    """
+    if not settings.onchain_security.enabled:
+        return None
+    from meme_intelligence.collectors.onchain_security import OnChainSecurityCollector
+    logger = get_logger("main")
+    if not settings.helius_api_key:
+        if not settings.onchain_security.fallback_rpc_url:
+            logger.warning(
+                "on-chain security layer is enabled but has no Helius key and no "
+                "fallback RPC url — staying off")
+            return None
+        logger.warning(
+            "on-chain security layer is enabled without a Helius key: LP burn will "
+            "work via public RPC, but holder concentration will report UNKNOWN "
+            "(getTokenLargestAccounts is disabled on the public endpoint). Set "
+            "MEMEINTEL_HELIUS_API_KEY to collect concentration.")
+    # _shared_collector_kwargs passes timeout_seconds explicitly, which would
+    # shadow this layer's own (shorter) timeout and leave
+    # OnChainSecuritySettings.timeout_seconds inert — a setting whose value does
+    # nothing while its name and docstring promise otherwise. This codebase has
+    # shipped exactly that bug before (the coverage cap's inert value), so
+    # override it rather than relying on a setdefault that can never fire.
+    collector_kwargs = _shared_collector_kwargs(settings)
+    collector_kwargs["timeout_seconds"] = settings.onchain_security.timeout_seconds
+    return OnChainSecurityCollector(
+        settings.onchain_security,
+        api_key=settings.helius_api_key,
+        rpc_url=settings.providers.helius_rpc_url,
+        rate_limiter=RateLimiter.per_minute(
+            settings.onchain_security.requests_per_minute),
+        **collector_kwargs,
     )
 
 
@@ -1032,6 +1080,16 @@ async def _cmd_monitor(args, settings) -> int:
                       "X/Twitter social intelligence stays off.")
             else:
                 stack.push_async_callback(social_client.close)
+        # Holder concentration + LP burn read from chain. Off unless
+        # MEMEINTEL_ONCHAIN_SECURITY_ENABLED=true; measure with
+        # deploy/onchain_facts_probe.py before switching it on.
+        onchain_security = build_onchain_security(settings)
+        if onchain_security is not None:
+            stack.push_async_callback(onchain_security.close)
+        elif settings.onchain_security.enabled:
+            print("Note: MEMEINTEL_ONCHAIN_SECURITY_ENABLED is on but the layer "
+                  "could not be built (no Helius key and no fallback RPC url) — "
+                  "holder/LP facts stay off.")
         if settings.ai.enable_in_monitor or settings.ai.verify_opportunities:
             ai_service = build_judgment_service(settings)
             if ai_service is None and settings.ai.enable_in_monitor:
@@ -1090,6 +1148,7 @@ async def _cmd_monitor(args, settings) -> int:
                 pumpportal_client=pumpportal,
                 pumpfun_client=pumpfun,
                 wallet_service=wallet_service,
+                onchain_security_collector=onchain_security,
                 social_client=social_client,
                 ai_service=ai_service,
                 learning_service=learning_service,
