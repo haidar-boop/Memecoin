@@ -209,3 +209,113 @@ def test_report_carries_no_score_or_verdict_field():
     for forbidden in ("score", "verdict", "veto", "rug"):
         assert not any(forbidden in name for name in ClusterReport.__dataclass_fields__), forbidden
         assert not any(forbidden in name for name in Cluster.__dataclass_fields__), forbidden
+
+
+# ---------------------------------------------------------------------------
+# Review fixes (2026-07-30 adversarial pass)
+# ---------------------------------------------------------------------------
+
+def test_an_unknown_origin_funder_never_drags_a_holder_into_a_cluster():
+    """Review finding: F is a top holder whose origin read FAILED, W is funded
+    by F. Pass 3 must NOT cluster (F,W) — 'an unknown origin never clusters',
+    and F must not be both a cluster member and counted unreadable."""
+    stakes = [HolderStake("F", 60.0), HolderStake("W", 40.0)]
+    origins = {
+        "F": WalletOrigin(wallet="F", kind=UNKNOWN, note="rpc timeout"),
+        # W's funder is F; its activity read failed too -> None.
+        "W": WalletOrigin(wallet="W", kind=FRESH, funder="F",
+                          funder_is_infrastructure=None),
+    }
+    report = cluster_holders(stakes, origins, SETTINGS)
+    assert report.clusters == ()
+    assert report.unknown_origins == 1
+    # The invariant the review found broken: counts must sum to holders_examined.
+    total = (sum(c.size for c in report.clusters) + report.independent_holders
+             + report.established_holders + report.unknown_origins)
+    assert total == report.holders_examined == 2
+
+
+def test_a_cex_that_is_a_top_holder_does_not_cluster_its_withdrawers():
+    """Review finding: a CEX/router which happens to be a top holder funded two
+    independent holders. Pass 3 must honour its infrastructure flag, not
+    re-open the exact false positive Pass 2 blocks."""
+    stakes = [HolderStake("Cex", 30.0), HolderStake("A", 10.0), HolderStake("B", 9.0)]
+    origins = {
+        "Cex": WalletOrigin(wallet="Cex", kind=ESTABLISHED),
+        "A": WalletOrigin(wallet="A", kind=FRESH, funder="Cex",
+                          funder_is_infrastructure=True),
+        "B": WalletOrigin(wallet="B", kind=FRESH, funder="Cex",
+                          funder_is_infrastructure=True),
+    }
+    report = cluster_holders(stakes, origins, SETTINGS)
+    assert report.clusters == ()
+    assert "Cex" in report.infrastructure_funders
+
+
+def test_a_mass_airdrop_first_signature_is_not_a_bundle():
+    """Review finding: getSignaturesForAddress indexes txs a wallet never signed,
+    so a multisend/airdrop is the shared 'first signature' of many independent
+    recipients. More than a tight batch sharing one first sig is treated as a
+    fan-out, not co-creation."""
+    stakes = [HolderStake(f"R{i}", 5.0) for i in range(10)]
+    origins = {f"R{i}": WalletOrigin(wallet=f"R{i}", kind=FRESH,
+                                     first_signature="AIRDROP")
+               for i in range(10)}
+    report = cluster_holders(stakes, origins, SETTINGS)
+    assert report.clusters == (), "10 airdrop recipients are not one actor"
+    assert any("infrastructure" in n or "airdrop" in n for n in report.notes)
+
+
+def test_a_tight_cocreation_batch_still_clusters():
+    """The other side: a real 4-wallet co-creation batch (under the fan-out
+    limit) must still be caught."""
+    stakes = [HolderStake(f"S{i}", 12.0) for i in range(4)]
+    origins = {f"S{i}": WalletOrigin(wallet=f"S{i}", kind=FRESH,
+                                     first_signature="BATCH")
+               for i in range(4)}
+    report = cluster_holders(stakes, origins, SETTINGS)
+    assert len(report.clusters) == 1
+    assert report.clusters[0].size == 4
+
+
+# ---------------------------------------------------------------------------
+# Renderer honesty (review: never claim "independently funded" without checking)
+# ---------------------------------------------------------------------------
+
+def _render(report):
+    from meme_intelligence.alerts.telegram_commands import _render_bundle
+    return _render_bundle("zZrp7eEPmghHC44PpmQE3q4F8QFjBmsC9dPNgWx7wZ3",
+                          report, [], SETTINGS)
+
+
+def test_all_established_holders_do_not_read_as_independently_funded():
+    """Review finding: 6 long-history holders were never funder-checked, yet the
+    old headline said 'they look independently funded'. It must say the origins
+    were not established."""
+    report = ClusterReport(holders_examined=6, established_holders=6,
+                           independent_holders=0, unknown_origins=0)
+    text = _render(report)
+    assert "independently funded" not in text.split("traced-independent")[0] \
+        or "NOT a clean bill" in text
+    assert "NOT a clean bill of health" in text
+
+
+def test_mostly_unknown_origins_do_not_read_as_clean():
+    report = ClusterReport(holders_examined=10, independent_holders=2,
+                           unknown_origins=8)
+    text = _render(report)
+    assert "NOT a clean bill of health" in text
+
+
+def test_genuinely_traced_independent_holders_may_be_called_so():
+    report = ClusterReport(holders_examined=8, independent_holders=7,
+                           unknown_origins=1)
+    text = _render(report)
+    assert "look\nindependently funded" in text or "independently funded" in text
+
+
+def test_the_render_always_warns_about_what_it_can_miss():
+    report = ClusterReport(holders_examined=5, independent_holders=5)
+    text = _render(report)
+    assert "defeats this check" in text
+    assert "NOT proof of fair distribution" in text

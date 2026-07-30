@@ -115,6 +115,11 @@ FRESH = "fresh"
 ESTABLISHED = "established"
 UNKNOWN = "unknown"
 
+# A shared first-signature is co-creation evidence only for a tight batch. More
+# than this many top holders sharing one first transaction is a mass
+# airdrop/multisend fan-out (independent recipients), not a bundle.
+_MAX_COCREATION_GROUP = 6
+
 
 @dataclass(frozen=True)
 class HolderStake:
@@ -218,23 +223,29 @@ def cluster_holders(
         # keep the reason on both original wallets' trails for rendering
         evidence[a].append(why)
 
-    unknown = 0
     infra: set[str] = set()
 
-    # Pass 1 — same first transaction: co-created wallets are one actor.
+    # Pass 1 — same first transaction. Wallets born in one transaction are very
+    # likely one actor — BUT getSignaturesForAddress indexes every tx a wallet
+    # merely appears in, so a mass airdrop/multisend that is the first on-chain
+    # touch of many UNRELATED recipients would share a first signature too
+    # (review finding). So a signature shared by more than a handful of top
+    # holders is treated as a probable airdrop fan-out, not a bundle, and is not
+    # clustered on. A tight co-creation batch (the real bundle shape) is a
+    # handful of wallets.
     by_first_sig: dict[str, list[str]] = {}
     for wallet in wallets:
         origin = origins.get(wallet)
-        if origin is None or origin.kind == UNKNOWN:
-            unknown += 1
-            continue
-        if origin.kind == FRESH and origin.first_signature:
+        if origin is not None and origin.kind == FRESH and origin.first_signature:
             by_first_sig.setdefault(origin.first_signature, []).append(wallet)
     for signature, group in by_first_sig.items():
+        if len(group) > _MAX_COCREATION_GROUP:
+            infra.add(signature)          # airdrop/multisend fan-out, not a bundle
+            continue
         for other in group[1:]:
             note_join(group[0], other,
-                      f"first transaction is the same as {group[0][:6]}… "
-                      f"(co-created, sig {signature[:10]}…)")
+                      f"first on-chain transaction is shared with {group[0][:6]}… "
+                      f"(likely co-created, sig {signature[:10]}…)")
 
     # Pass 2 — same funder, both fresh, funder not infrastructure.
     by_funder: dict[str, list[str]] = {}
@@ -247,42 +258,53 @@ def cluster_holders(
             continue
         if origin.funder_is_infrastructure is None:
             # Unchecked funder activity: clustering on it could invent a bundle
-            # out of shared CEX withdrawals, so it is NOT an edge (Rule 8) —
-            # but it is still recorded for pass 3 (funder-is-a-holder needs no
-            # activity check: a top holder funding another top holder is
-            # evidence regardless of how busy the funder is).
-            if origin.funder in percent_of:
-                by_funder.setdefault(origin.funder, []).append(wallet)
+            # out of shared CEX withdrawals, so it is NOT an edge (Rule 8).
             continue
         by_funder.setdefault(origin.funder, []).append(wallet)
     for funder, group in by_funder.items():
         for other in group[1:]:
             note_join(group[0], other, f"funded by the same wallet {funder[:6]}…")
 
-    # Pass 3 — the funder is itself a top holder: deployer + siblings join.
+    # Pass 3 — the funder is itself a top holder: deployer + siblings join. The
+    # SAME infrastructure guard as Pass 2 applies (``funder_is_infrastructure``
+    # here describes this wallet's funder). Only an explicitly-checked,
+    # non-infrastructure funder is evidence — a review found that without this,
+    # a CEX/router that happens to be a top holder, or a funder whose activity
+    # could not be read, was dragged into a cluster, violating the module's own
+    # "an unknown origin never clusters" promise.
     for wallet in wallets:
         origin = origins.get(wallet)
         if origin is None or origin.kind != FRESH or not origin.funder:
             continue
-        if origin.funder in percent_of and origin.funder != wallet:
-            note_join(origin.funder, wallet,
-                      f"funded by top holder {origin.funder[:6]}… "
-                      f"({percent_of[origin.funder]:.1f}%)")
+        funder = origin.funder
+        if funder not in percent_of or funder == wallet:
+            continue
+        if origin.funder_is_infrastructure:
+            infra.add(funder)                 # CEX/router that is also a holder
+            continue
+        if origin.funder_is_infrastructure is None:
+            continue                          # activity unread — not evidence (Rule 8)
+        note_join(funder, wallet,
+                  f"funded by top holder {funder[:6]}… "
+                  f"({percent_of[funder]:.1f}%)")
 
     # Collect groups.
     groups: dict[str, list[str]] = {}
     for wallet in wallets:
         groups.setdefault(uf.find(wallet), []).append(wallet)
 
+    # Counts derived from the FINAL groups, so no wallet is ever tallied in both
+    # a cluster and a singleton bucket (the double-count the review found).
     clusters: list[Cluster] = []
     independent = 0
     established = 0
+    unknown = 0
     for members in groups.values():
         if len(members) == 1:
             origin = origins.get(members[0])
             if origin is None or origin.kind == UNKNOWN:
-                continue                      # counted under unknown, not here
-            if origin.kind == ESTABLISHED:
+                unknown += 1                   # could not read — NOT independent
+            elif origin.kind == ESTABLISHED:
                 established += 1               # busy trader, reported separately
             else:
                 independent += 1               # fresh, real funder, matched no one
@@ -304,9 +326,9 @@ def cluster_holders(
                      f"origins — they are counted separately, not assumed "
                      f"independent")
     if infra:
-        notes.append(f"{len(infra)} shared funder(s) are high-traffic "
-                     f"infrastructure (exchange/router) — NOT treated as "
-                     f"bundle evidence")
+        notes.append(f"{len(infra)} shared funder(s) or batch transaction(s) are "
+                     f"high-traffic infrastructure (exchange/router/airdrop) — "
+                     f"NOT treated as bundle evidence")
 
     return ClusterReport(
         clusters=tuple(clusters),

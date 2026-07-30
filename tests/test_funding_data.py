@@ -221,16 +221,16 @@ async def test_service_excludes_custody_before_spending_lookups(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_service_skips_activity_check_for_holder_funders(monkeypatch):
-    """A funder who is himself a top holder needs no activity check — that edge
-    stands on its own, and skipping saves calls on exactly the bundled case."""
+async def test_holder_funders_are_activity_checked_so_pass3_can_honour_infra(monkeypatch):
+    """A funder who is himself a top holder IS activity-checked (review fix): a
+    CEX/router that happens to be a top holder must carry a real infrastructure
+    flag, or the engine's Pass 3 has nothing to honour and clusters independent
+    withdrawers. The extra call per distinct funder is the accepted cost."""
     client = make_client()
-    sig_calls = []
 
     def handler(method, params):
         if method == "getSignaturesForAddress":
-            sig_calls.append(params[0])
-            return sig_entries(3)
+            return sig_entries(3)          # FUNDER is NOT high-activity here
         if method == "getTransaction":
             return tx_with_payer(FUNDER)   # funder IS the other top holder
         raise AssertionError(method)
@@ -241,10 +241,32 @@ async def test_service_skips_activity_check_for_holder_funders(monkeypatch):
         client, SETTINGS)
     stakes, origins, notes = await service.gather("Mint111111111111111111111111111111111111111")
 
-    assert sorted(sig_calls) == sorted([FUNDER, WALLET]), \
-        "exactly one signature page per holder, none extra for the funder"
     assert origins[WALLET].funder == FUNDER
+    # Explicitly checked and found NOT infrastructure -> a real bundle edge.
     assert origins[WALLET].funder_is_infrastructure is False
+
+
+@pytest.mark.asyncio
+async def test_a_high_activity_holder_funder_is_flagged_infrastructure(monkeypatch):
+    """The case the check exists for: the funder-holder saturates its page (a
+    CEX), so its edge must be marked infrastructure, not a bundle."""
+    client = make_client()
+
+    def handler(method, params):
+        if method == "getSignaturesForAddress":
+            if params[0] == FUNDER:
+                return sig_entries(_SIGNATURE_PAGE_LIMIT)   # busy CEX
+            return sig_entries(3)
+        if method == "getTransaction":
+            return tx_with_payer(FUNDER)
+        raise AssertionError(method)
+
+    patch_rpc(monkeypatch, client, handler)
+    service = BundleService(
+        FakeHelius([FakeHolding(FUNDER, 40.0), FakeHolding(WALLET, 9.0)]),
+        client, SETTINGS)
+    stakes, origins, notes = await service.gather("Mint111111111111111111111111111111111111111")
+    assert origins[WALLET].funder_is_infrastructure is True
 
 
 @pytest.mark.asyncio

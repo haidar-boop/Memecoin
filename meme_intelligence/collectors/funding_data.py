@@ -9,11 +9,15 @@ this module only fetches observations and never draws conclusions.
 Cost model (Rule 11 — the operator watches his Helius spend)
 ------------------------------------------------------------
 Per coin: one top-holders census (3 RPC calls via the existing HeliusClient)
-plus, per non-custody holder, ONE ``getSignaturesForAddress`` page and — only
-for fresh wallets — ONE ``getTransaction``. Each *distinct* funder costs one
-more signature page to classify it as infrastructure or not. Top-20 worst case
-is ~60 bounded calls, on-demand only: this runs when the operator sends
-``/bundle``, never inside the scan loop.
+plus, per non-custody holder, UP TO ``max_signature_pages`` (default 5)
+``getSignaturesForAddress`` pages to reach its true origin, plus — for fresh
+wallets — ONE ``getTransaction``. Each *distinct* funder costs one more
+signature page to classify it. The measured worst case for a top-20 coin whose
+every holder sits at the pagination boundary is **~143 RPC calls** (3 + 20×5 +
+20 + 20), NOT the ~60 an earlier version of this note claimed (review finding).
+Bounded and on-demand: it runs only when the operator sends ``/bundle`` and a
+60s result cache dedups repeat taps on the same coin — but repeated taps across
+DIFFERENT coins are not budgeted, so it is not for bulk use.
 
 Honesty rules (Rule 8)
 ----------------------
@@ -248,12 +252,14 @@ class BundleService:
         for stake in stakes:
             origins[stake.wallet] = await self._funding.get_wallet_origin(stake.wallet)
 
-        # Classify each distinct funder's activity once. A funder that is
-        # itself a top holder needs no check (that edge stands on its own);
-        # skipping it saves calls on exactly the bundled case.
-        holder_set = {stake.wallet for stake in stakes}
+        # Classify EVERY distinct funder's activity once, including funders that
+        # are themselves top holders. An earlier version skipped holder-funders
+        # (to save calls) and forced them to "not infrastructure" — but a review
+        # showed that let a CEX/router which happens to be a top holder cluster
+        # independent withdrawers, because the engine's Pass 3 then had no infra
+        # flag to honour. One extra page per distinct funder closes that.
         funders = sorted({origin.funder for origin in origins.values()
-                          if origin.funder and origin.funder not in holder_set})
+                          if origin.funder})
         activity: dict[str, bool | None] = {}
         for funder in funders:
             activity[funder] = await self._funding.is_high_activity(funder)
@@ -263,12 +269,6 @@ class BundleService:
                 origins[wallet] = WalletOrigin(
                     wallet=origin.wallet, kind=origin.kind, funder=origin.funder,
                     funder_is_infrastructure=activity[origin.funder],
-                    first_signature=origin.first_signature,
-                    first_slot=origin.first_slot, note=origin.note)
-            elif origin.funder and origin.funder in holder_set:
-                origins[wallet] = WalletOrigin(
-                    wallet=origin.wallet, kind=origin.kind, funder=origin.funder,
-                    funder_is_infrastructure=False,
                     first_signature=origin.first_signature,
                     first_slot=origin.first_slot, note=origin.note)
         return stakes, origins, notes

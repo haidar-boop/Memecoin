@@ -185,37 +185,55 @@ def _render_bundle(address: str, report, notes: list[str], settings) -> str:
         lines.append("")
         for index, cluster in enumerate(flagged, 1):
             lines.append(f"CLUSTER {index}: {cluster.combined_percent:.1f}% of "
-                         f"supply looks like ONE actor ({cluster.size} wallets)")
+                         f"supply shares funding ({cluster.size} wallets) — "
+                         f"likely ONE actor")
             for wallet in cluster.members[:5]:
                 lines.append(f"  {_short(wallet)}")
             if cluster.size > 5:
                 lines.append(f"  …and {cluster.size - 5} more")
             for reason in cluster.evidence[:3]:
                 lines.append(f"  why: {reason}")
-    elif report.clusters:
-        pass  # only minor clusters — summarized below
-    elif report.holders_examined and not report.unknown_origins:
-        lines.append("")
-        lines.append("No funding links found among the top holders — they look "
-                     "independently funded.")
 
     if minor:
         lines.append("")
         lines.append(f"{len(minor)} smaller cluster(s) under "
                      f"{settings.min_cluster_percent_to_flag:.0f}% (noise-level)")
 
+    # The honest headline for "nothing flagged" depends on WHY nothing was
+    # flagged. Only say the holders look independent when the check actually
+    # ESTABLISHED that for most of them — a review found the old wording claimed
+    # "independently funded" for coins where origins were merely unread,
+    # established-and-never-checked, or defeated by a one-hop evasion.
+    checked = report.independent_holders
+    unchecked = report.established_holders + report.unknown_origins
+    if not report.clusters:
+        lines.append("")
+        if report.holders_examined == 0:
+            lines.append("No holders to examine.")
+        elif checked > unchecked and checked > 0:
+            lines.append(f"No shared funding found among the {checked} holders "
+                         f"whose origin could be traced — those look "
+                         f"independently funded.")
+        else:
+            lines.append("No shared funding found — BUT most top holders' "
+                         "origins could not be established (see below), so this "
+                         "is NOT a clean bill of health.")
+
     lines.append("")
-    lines.append(f"independent: {report.independent_holders} | "
-                 f"long-history: {report.established_holders} | "
+    lines.append(f"traced-independent: {report.independent_holders} | "
+                 f"long-history (unchecked): {report.established_holders} | "
                  f"unreadable: {report.unknown_origins}")
     if report.unknown_origins:
         lines.append("Unreadable origins are NOT counted as independent — the "
                      "picture above may understate clustering.")
     if report.established_holders:
-        lines.append("Long-history wallets are busy traders, not fresh bundle "
-                     "wallets — but a very active bot fleet can hide here.")
+        lines.append("Long-history wallets were NOT funding-checked (too busy to "
+                     "page back) — an aged bot fleet can hide here.")
     for note in report.notes:
         lines.append(f"note: {note}")
+    lines.append("What this can miss: a bundler who funds each wallet from a "
+                 "separate fresh wallet, one hop, or via an exchange defeats "
+                 "this check. A clean result is NOT proof of fair distribution.")
     lines.append("Info only — this does not change any alert or score.")
     return "\n".join(lines)
 
