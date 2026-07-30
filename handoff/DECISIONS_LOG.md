@@ -2961,11 +2961,22 @@ VETO ones.
 
 ### Open, and needing the operator's decision rather than a guess
 
-1. **MARS's top holder holds 33,718 distinct mints.** On-curve, System-owned,
-   0.93 SOL — so all three custody tests read it as a person, but an address
-   holding tens of thousands of mints is infrastructure, not a whale. This is the
-   one probable false positive in the batch and wants a "holds implausibly many
-   mints" heuristic.
+1. **MARS is NOT a false positive — corrected 2026-07-30.** It was initially
+   flagged as the one probable miss because its top holder
+   `cornGuBy1GCTZ5vot2iRnKVX6Fr341zvnHDMBWR2goN` owns **33,718 distinct token
+   accounts**, which is the classic infrastructure tell. Chased down: it is the
+   sole signer and fee payer on all three transactions that built the position,
+   so a private key exists, and its behaviour is identical across sampled
+   transactions spanning months — spend exactly 0.0005 SOL of WSOL, receive a
+   large token balance, **never sell**. It is a fixed-stake micro-sniper bot
+   buying the first slice of every new bonding curve, where 0.0005 SOL buys a
+   huge share of a zero-price curve; MARS is its 2,222nd position and its 0.93
+   SOL balance fits exactly. MARS itself is worthless ($0.22 liquidity, $1 FDV),
+   bought out entirely by bots at ~10% each. One key genuinely controls 64.38%
+   of a dead coin, so the veto is correct. **That makes it 8 of 8 vetoes correct,
+   not 7**, and the "holds implausibly many mints" heuristic is NOT supported by
+   this case — a sniping bot with a key is a real holder that can dump. Do not
+   add that heuristic on MARS's evidence.
 2. **One signal alone can silence a coin.** `RugSignalWeights.
    top_holder_concentration` is 15.0 and `ai.verify_skip_rug_score` is 10.0, so
    concentration — the newest and most artifact-prone input in the system —
