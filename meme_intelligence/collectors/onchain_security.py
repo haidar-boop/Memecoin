@@ -267,6 +267,12 @@ class OnChainSecurityFacts:
 
     top_holder_percent: float | None = None
     top10_holder_percent: float | None = None
+    # The owner address behind ``top_holder_percent``, so a human can check
+    # whether it is a person or an undetected vault. The probe's "STOP, check
+    # whether an AMM vault is being counted as a holder" message was unusable
+    # without this: it named the risk and withheld the one fact needed to settle
+    # it (found in the field, 2026-07-30).
+    top_holder_owner: str | None = None
     # Named for what it IS. The pipeline maps this onto SecurityProfile's
     # `lp_locked_percent`, whose analyzer semantics are "locked OR burned".
     lp_burned_percent: float | None = None
@@ -540,7 +546,8 @@ class OnChainSecurityCollector(BaseCollector):
                        f"share-of-total-supply figure would understate real "
                        f"concentration several-fold, so none is reported",))
 
-        amounts = sorted(held.values(), reverse=True)
+        ranked = sorted(held.items(), key=lambda item: item[1], reverse=True)
+        amounts = [amount for _, amount in ranked]
         top_percent = 100.0 * amounts[0] / supply
         top10_percent = 100.0 * sum(amounts[:10]) / supply
         notes: list[str] = []
@@ -555,6 +562,7 @@ class OnChainSecurityCollector(BaseCollector):
         return OnChainSecurityFacts(
             top_holder_percent=min(100.0, top_percent),
             top10_holder_percent=min(100.0, top10_percent),
+            top_holder_owner=ranked[0][0],
             census_owner_count=len(held),
             excluded_owners=tuple(sorted(excluded)),
             notes=tuple(notes),
@@ -714,6 +722,7 @@ class OnChainSecurityCollector(BaseCollector):
         return OnChainSecurityFacts(
             top_holder_percent=concentration.top_holder_percent,
             top10_holder_percent=concentration.top10_holder_percent,
+            top_holder_owner=concentration.top_holder_owner,
             lp_burned_percent=lp.lp_burned_percent,
             census_owner_count=concentration.census_owner_count,
             excluded_owners=concentration.excluded_owners,

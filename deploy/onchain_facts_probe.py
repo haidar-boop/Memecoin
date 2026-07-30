@@ -289,6 +289,14 @@ async def main() -> int:
                   f"top10={fmt(facts.top10_holder_percent)} "
                   f"lp_burned={fmt(facts.lp_burned_percent)} "
                   f"cov {before.coverage:.0%}->{after.coverage:.0%}{crossed}")
+            # WHO the top holder is, and how many accounts were excluded as
+            # custody. Without this the STOP verdict below names the risk ("is an
+            # AMM vault being counted as a holder?") and withholds the only fact
+            # that can settle it — paste the address into solscan.io/account/<x>
+            # and it is obvious in seconds whether it is a person or a pool.
+            if facts.top_holder_owner:
+                print(f"{'':22}  top holder = {facts.top_holder_owner}  "
+                      f"({len(facts.excluded_owners)} account(s) excluded as custody)")
     finally:
         await collector.close()
         await dex.close()
@@ -309,9 +317,13 @@ async def main() -> int:
     lost = len({*newly_blocked, *newly_vetoed})
     if filled and lost / max(1, filled) > 0.5:
         print("STOP. More than half the coins with facts would stop passing. That is "
-              "the shape of a wrong exclusion rule, not a strict gate — read the "
-              "per-coin lines above and check whether an AMM vault or bonding "
-              "curve is being counted as a holder before enabling anything.")
+              "the shape of a wrong exclusion rule, not a strict gate.")
+        print("HOW TO CHECK: take the 'top holder =' address from any line marked "
+              "LOSES BUY-SIDE ALERTS and open solscan.io/account/<address>. If it "
+              "is a liquidity pool, an AMM vault or a bonding curve, the exclusion "
+              "rule is wrong and this must NOT be enabled. If it is an ordinary "
+              "wallet holding a big slice of a junk coin, the veto is doing its "
+              "job and the count above is the layer working, not failing.")
     elif not filled:
         print("Nothing was established on any coin. With no Helius key that is "
               "expected for concentration; if a key IS set, the layer is not "

@@ -853,3 +853,53 @@ async def test_a_keyless_collector_can_still_read_lp_burn(monkeypatch):
     facts = await c.collect(MINT, POOL)
     assert facts.lp_burned_percent == pytest.approx(100.0)
     assert facts.top_holder_percent is None
+
+
+@pytest.mark.asyncio
+async def test_the_top_holder_owner_is_reported_so_a_human_can_check_it(monkeypatch):
+    """The probe's STOP verdict asks "is an AMM vault being counted as a holder?"
+    and that question is unanswerable without the address. Field failure
+    2026-07-30: the operator got the warning and no way to act on it."""
+    c = make_collector()
+
+    def handler(method, params):
+        if method == "getTokenSupply":
+            return supply(1_000)
+        if method == "getTokenLargestAccounts":
+            return largest(("acc_big", 400), ("acc_small", 100))
+        if method == "getMultipleAccounts":
+            if params[1]["encoding"] == "jsonParsed":
+                return token_accounts(W_WHALE, W_SMALL)
+            return owner_kinds(SYSTEM, SYSTEM)
+        raise AssertionError(method)
+
+    patch_rpc(monkeypatch, c, handler)
+    facts = await c.get_holder_concentration(MINT)
+    assert facts.top_holder_percent == pytest.approx(40.0)
+    assert facts.top_holder_owner == W_WHALE, (
+        "the address behind the percentage must travel with it")
+
+
+@pytest.mark.asyncio
+async def test_the_reported_owner_is_the_largest_one_not_merely_the_first(monkeypatch):
+    """Guards the ranking: dict order is insertion order, which is
+    largest-token-account order, NOT largest-OWNER order once balances are
+    aggregated across accounts."""
+    c = make_collector()
+
+    def handler(method, params):
+        if method == "getTokenSupply":
+            return supply(1_000)
+        if method == "getTokenLargestAccounts":
+            # W_SMALL leads on a single account, but W_WHALE totals more.
+            return largest(("acc_a", 300), ("acc_b", 200), ("acc_c", 200))
+        if method == "getMultipleAccounts":
+            if params[1]["encoding"] == "jsonParsed":
+                return token_accounts(W_SMALL, W_WHALE, W_WHALE)
+            return owner_kinds(SYSTEM, SYSTEM)
+        raise AssertionError(method)
+
+    patch_rpc(monkeypatch, c, handler)
+    facts = await c.get_holder_concentration(MINT)
+    assert facts.top_holder_percent == pytest.approx(40.0)
+    assert facts.top_holder_owner == W_WHALE
