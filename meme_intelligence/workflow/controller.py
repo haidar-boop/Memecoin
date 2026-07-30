@@ -805,15 +805,22 @@ class ContinuousScanner:
         self._feed_learning(result, stats, creator=creator)
 
     def _operator_interest(self, token) -> bool:
-        """Was the operator ever POINTED at this token? (interest gate)
+        """Is a protective alert on this token guarding a real decision?
 
-        True when ANY buy-side alert was previously delivered for it (only
-        delivered alerts are recorded, so a history row means the pitch
-        actually reached his phone) — the only way the operator learns
-        about a token, hence the only way a protective alert can be
-        guarding a real decision. Fails OPEN: if history cannot be read,
-        alerts keep their full priority rather than being silently demoted
-        (Rule 6 — an error must not suppress a warning).
+        Two modes (alert_engine.protective_alerts_holding_only):
+
+        * holding-only (operator request 2026-07-30, the default): True only
+          for a coin the operator MARKED AS BOUGHT (/holding). "I keep
+          getting security updates and I don't care unless I'm holding a
+          coin" — a coin that was merely pitched in the past no longer keeps
+          protective alerts at full priority.
+        * legacy (setting false): also True when ANY buy-side alert was
+          previously delivered for it (only delivered alerts are recorded,
+          so a history row means the pitch actually reached his phone).
+
+        Fails OPEN either way: if the lookup errors, alerts keep their full
+        priority rather than being silently demoted (Rule 6 — an error must
+        not suppress a warning).
         """
         try:
             # A coin the operator MARKED AS BOUGHT (/holding, Project 2) is
@@ -822,6 +829,8 @@ class ContinuousScanner:
             # even if the original recommendation predates the database.
             if self._storage.is_holding(token):
                 return True
+            if self._settings.alert_engine.protective_alerts_holding_only:
+                return False
             history = self._storage.alert_history(token, limit=100)
         except Exception as exc:  # noqa: BLE001 — advisory lookup, fail open
             self._logger.warning("interest lookup failed for %s (alerts keep "

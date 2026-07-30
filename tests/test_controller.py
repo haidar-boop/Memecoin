@@ -804,10 +804,21 @@ async def test_dead_watchlist_token_archived_with_postmortem():
         assert death.priority is AlertPriority.LOW  # interest gate: never recommended
 
 
-async def test_recommended_token_keeps_full_priority_postmortem():
-    """The interest gate must NOT silence tokens the operator was pointed
-    at: with a prior HIGH opportunity alert on record, the death post-mortem
-    arrives at its full MEDIUM priority."""
+def legacy_interest_settings() -> Settings:
+    """Recheck settings with the pre-2026-07-30 ever-pitched interest gate."""
+    return Settings.from_env(env={
+        "MEMEINTEL_WORKFLOW_WATCHLIST_RECHECK_CYCLES": "1",
+        "MEMEINTEL_ALERT_ENGINE_PROTECTIVE_ALERTS_HOLDING_ONLY": "false",
+    })
+
+
+async def test_recommended_token_keeps_full_priority_postmortem_legacy_mode():
+    """LEGACY interest mode (protective_alerts_holding_only=false): the gate
+    must NOT silence tokens the operator was pointed at — with a prior HIGH
+    opportunity alert on record, the death post-mortem arrives at its full
+    MEDIUM priority. (Under the 2026-07-30 holding-only default the same
+    setup demotes to LOW — covered by
+    test_pitched_but_not_held_postmortem_demotes_to_low.)"""
     from meme_intelligence.alerts.notification_engine import AlertEvent
     from meme_intelligence.core.enums import AlertPriority as _AP
 
@@ -823,7 +834,7 @@ async def test_recommended_token_keeps_full_priority_postmortem():
         market = FakeMarketService({"TokenDying": dead_pair})
         scanner = make_scanner_with_market(
             storage, [], {"TokenDying": clean_profile(dying)},
-            market, settings=fast_recheck_settings(), sink=sink,
+            market, settings=legacy_interest_settings(), sink=sink,
         )
         await scanner.run(max_cycles=1)
 
@@ -831,11 +842,11 @@ async def test_recommended_token_keeps_full_priority_postmortem():
         assert death.priority is AlertPriority.MEDIUM
 
 
-async def test_medium_pitched_token_gets_full_priority_postmortem_with_ack():
-    """Operator rule (2026-07-28): ANY delivered buy-side alert — including
-    the MEDIUM tiers that reach his medium delivery floor — counts as a
-    pitch. When that coin later dies, the post-mortem must arrive at full
-    priority AND explicitly acknowledge the earlier call."""
+async def test_pitched_but_not_held_postmortem_demotes_to_low():
+    """Operator rule 2026-07-30 ("I don't care unless I'm holding a coin"):
+    under the holding-only default, a coin that was PITCHED but never marked
+    /holding gets its death post-mortem demoted to LOW — recorded in history
+    but below the phone's delivery floor."""
     from meme_intelligence.alerts.notification_engine import AlertEvent
     from meme_intelligence.core.enums import AlertPriority as _AP
 
@@ -845,6 +856,36 @@ async def test_medium_pitched_token_gets_full_priority_postmortem_with_ack():
     sink = RecordingSink()
     with Storage(":memory:", now_func=lambda: NOW) as storage:
         storage.update_watchlist(dying, WatchlistTier.TIER_1_HIGH_PRIORITY, score=85.0)
+        storage.record_alert(  # pitched earlier — but the operator never bought
+            AlertEvent(_AP.HIGH, "strong_candidate", dying, "was strong", ()),
+            source="test")
+        market = FakeMarketService({"TokenDying": dead_pair})
+        scanner = make_scanner_with_market(
+            storage, [], {"TokenDying": clean_profile(dying)},
+            market, settings=fast_recheck_settings(), sink=sink,
+        )
+        await scanner.run(max_cycles=1)
+
+        death = next(e for e in sink.sent if e.alert_type == "token_death")
+        assert death.priority is AlertPriority.LOW
+
+
+async def test_medium_pitched_token_gets_full_priority_postmortem_with_ack():
+    """Operator rule (2026-07-28): ANY delivered buy-side alert — including
+    the MEDIUM tiers that reach his medium delivery floor — counts as a
+    pitch. Under the 2026-07-30 holding-only gate the coin must ALSO be held
+    for the post-mortem to keep full priority; when it is, the ack line
+    naming the earlier call still arrives."""
+    from meme_intelligence.alerts.notification_engine import AlertEvent
+    from meme_intelligence.core.enums import AlertPriority as _AP
+
+    dying = TokenIdentity(chain="solana", address="TokenDying", symbol="DIE")
+    dead_pair = _dc.replace(make_pair(address="TokenDying", symbol="DIE"),
+                            liquidity_usd=25.0)
+    sink = RecordingSink()
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        storage.update_watchlist(dying, WatchlistTier.TIER_1_HIGH_PRIORITY, score=85.0)
+        storage.set_holding(dying)  # the operator actually bought this one
         storage.record_alert(  # a MEDIUM pitch that reached the phone
             AlertEvent(_AP.MEDIUM, "momentum", dying, "was moving", ()),
             source="test")
@@ -1040,14 +1081,17 @@ async def test_social_service_runs_when_opted_in():
 
 
 async def test_security_change_triggers_critical_alert_on_recheck():
-    """Part 18 Section 10 end-to-end: a token turning honeypot between
-    analyses produces a CRITICAL security_change alert."""
+    """Part 18 Section 10 end-to-end: a HELD token turning honeypot between
+    analyses produces a CRITICAL security_change alert. (Held because under
+    the 2026-07-30 holding-only gate, security changes on unheld coins
+    demote to LOW — the whole point of the operator's request.)"""
     tracked = TokenIdentity(chain="solana", address="TokenTurn", symbol="TURN")
     tracked_pair = make_pair(address="TokenTurn", symbol="TURN")
     sink = RecordingSink()
 
     with Storage(":memory:", now_func=lambda: NOW) as storage:
         storage.update_watchlist(tracked, WatchlistTier.TIER_1_HIGH_PRIORITY, score=80.0)
+        storage.set_holding(tracked)
 
         # First recheck: clean profile establishes the facts baseline.
         goplus_profiles = {"TokenTurn": clean_profile(tracked)}
@@ -1078,6 +1122,30 @@ async def test_held_token_is_operator_interest_without_alert_history():
         assert scanner._operator_interest(pair.base_token) is False
         storage.set_holding(pair.base_token)
         assert scanner._operator_interest(pair.base_token) is True
+
+
+async def test_pitch_history_is_not_interest_under_holding_only_default():
+    """2026-07-30: with protective_alerts_holding_only on (the default), a
+    prior delivered pitch no longer grants interest — only /holding does.
+    With the setting off, the legacy ever-pitched behavior returns."""
+    from meme_intelligence.alerts.notification_engine import AlertEvent
+    from meme_intelligence.config.settings import AlertEngineSettings
+    from meme_intelligence.core.enums import AlertPriority as _AP
+
+    assert AlertEngineSettings().protective_alerts_holding_only is True
+
+    pair = make_pair()
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        storage.record_alert(
+            AlertEvent(_AP.HIGH, "strong_candidate", pair.base_token, "pitched", ()),
+            source="test")
+
+        scanner, _ = make_scanner(storage, [], {})  # default settings
+        assert scanner._operator_interest(pair.base_token) is False
+
+        legacy = make_scanner_with_market(storage, [], {}, FakeMarketService({}),
+                                          settings=legacy_interest_settings())
+        assert legacy._operator_interest(pair.base_token) is True
 
 
 async def test_muted_token_delivery_suppressed_but_analysis_recorded():

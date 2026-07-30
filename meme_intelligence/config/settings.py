@@ -1202,6 +1202,18 @@ class AlertEngineSettings:
     # priority — still logged and recorded in alert history, but below every
     # external sink's minimum priority, so the phone stays quiet.
     risk_alerts_require_interest: bool = True
+    # Operator request 2026-07-30 ("I keep getting security updates and I
+    # don't care unless I'm holding a coin"): tighten the interest gate from
+    # "any coin ever pitched" to "coins marked as HELD (/holding) only".
+    # Under this mode a protective alert (security_change, risk_warning,
+    # whale_exit, token_death...) keeps full priority only for a coin the
+    # operator marked with /holding; a coin that was merely pitched in the
+    # past demotes to LOW like any other non-interest token. Buy-side
+    # opportunity alerts are untouched — this narrows only the follow-up
+    # noise. A protective alert arriving in the SAME batch as a live pitch
+    # still comes through (it guards the decision being pitched right now).
+    # Set false to restore the wider ever-pitched behavior.
+    protective_alerts_holding_only: bool = True
 
     def __post_init__(self) -> None:
         for name, value in dataclasses.asdict(self).items():
