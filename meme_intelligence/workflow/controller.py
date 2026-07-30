@@ -496,7 +496,8 @@ class ContinuousScanner:
         # A manual, operator-initiated lookup is exactly the deliberate,
         # rare spend the credit gate is not meant to block (2026-07-17).
         return await self._pipeline.analyze_pair(
-            pair, regime=self._regime, force_wallet_check=True, force_social_check=True)
+            pair, regime=self._regime, force_wallet_check=True, force_social_check=True,
+            force_onchain_security=True)
 
     async def run(self, max_cycles: int | None = None) -> list[CycleStats]:
         """Run scan cycles until stopped or ``max_cycles`` is reached."""
@@ -603,6 +604,8 @@ class ContinuousScanner:
             result = await self._pipeline.analyze_pair(
                 candidate.pair, regime=self._regime,
                 force_wallet_check=self._storage.is_holding(candidate.pair.base_token),
+                force_onchain_security=self._storage.is_holding(
+                    candidate.pair.base_token),
                 force_social_check=self._storage.is_holding(candidate.pair.base_token))
             if result is None:
                 # Security data not indexed yet — do NOT mark as seen: a
@@ -693,6 +696,7 @@ class ContinuousScanner:
             result = await self._pipeline.analyze_pair(
                 pair, regime=self._regime,
                 force_wallet_check=self._storage.is_holding(pair.base_token),
+                force_onchain_security=self._storage.is_holding(pair.base_token),
                 force_social_check=self._storage.is_holding(pair.base_token))
             if result is None:
                 # Security data not indexed yet — retry rather than losing
@@ -1230,6 +1234,7 @@ class ContinuousScanner:
             result = await self._pipeline.analyze_pair(
                 pair, regime=self._regime,
                 force_wallet_check=self._storage.is_holding(pair.base_token),
+                force_onchain_security=self._storage.is_holding(pair.base_token),
                 force_social_check=self._storage.is_holding(pair.base_token))
             if result is None:
                 continue
@@ -1332,6 +1337,7 @@ class ContinuousScanner:
             result = await self._pipeline.analyze_pair(
                 pair, regime=self._regime,
                 force_wallet_check=self._storage.is_holding(pair.base_token),
+                force_onchain_security=self._storage.is_holding(pair.base_token),
                 force_social_check=self._storage.is_holding(pair.base_token))
             if result is None:
                 # Security data still not indexed — re-pace (do NOT leave it

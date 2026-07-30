@@ -21,8 +21,22 @@ What it will and will not claim (Rule 8)
   and a pump.fun bonding curve routinely hold most of a young coin's supply and
   are not "a holder". Counting them makes every healthy coin look ~90%
   concentrated, which would silence the operator's alerts — the single highest
-  risk in this work. Exclusion is therefore structural: an owner whose account
-  is owned by a *program* (a PDA — vault, curve, staking pool) is custody.
+  risk in this work, and a review measured the first version of this module
+  doing exactly that on 11 of 11 live coins. Exclusion therefore runs three
+  independent tests, and all three are needed:
+  1. **off-curve** (:func:`is_off_curve`) — an address that is not a valid
+     ed25519 point provably has no private key, so nobody holds it. This is what
+     catches AMM vault authorities, which are *System-owned with zero-length
+     data* and so invisible to test 3.
+  2. **known address** (``_CUSTODY_OWNERS``) — covers the System Program
+     address, which is on-curve and so invisible to test 1.
+  3. **program-owned account** — catches state-holding custody: pump.fun bonding
+     curves and PumpSwap pools, whose authorities are per-pool PDAs that no
+     address list could enumerate.
+* **When custody dominates supply, no concentration is reported.** See
+  ``max_custody_share_for_concentration``: a share-of-total-supply figure on a
+  coin whose curve holds 85% understates real concentration several-fold and
+  would read as healthy.
 * **A partial census reports nothing.** If any of the largest accounts cannot be
   resolved to an owner, the concentration figures are withheld rather than
   understated: an unresolved account could itself be the top holder.
@@ -56,9 +70,7 @@ lp_reserve (u64 LE)             720  55465149717186 vs supply 55459414131915
 ===========================  ======  ==================================================
 
 A wrong offset yields wildly different garbage rather than a set of mutually
-consistent cross-checks, which is what makes this trustworthy. Every v4 pool
-vault is owned by the single constant authority below, so excluding that one
-address excludes every Raydium v4 vault without having to know the pool.
+consistent cross-checks, which is what makes this trustworthy.
 
 Independently re-verified 2026-07-30 across five live v4 pools (SOL/USDC, WIF,
 POPCAT, RAY, stSOL) — all 752 bytes under that program id. A survey of 25 other
@@ -96,6 +108,7 @@ docstring; ``deploy/onchain_facts_probe.py`` reports them per coin.
 from __future__ import annotations
 
 import base64
+import hashlib
 import struct
 from dataclasses import dataclass, field
 from typing import Any
@@ -130,24 +143,41 @@ _OFF_QUOTE_MINT = 432
 _OFF_LP_MINT = 464
 _OFF_LP_RESERVE = 720
 
-# Custody authorities excluded by ADDRESS. **This list is load-bearing, not a
-# shortcut — do not delete it in favour of the structural rule below.**
+# Custody authorities excluded by ADDRESS.
 #
-# Verified live 2026-07-30: the Raydium v4 vault authority
-# 5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1 is owned by the SYSTEM PROGRAM
-# and carries zero-length data, so it is indistinguishable from an ordinary
-# wallet by the structural test. It is a signer-only PDA: it never stores state,
-# it only signs. On mint 6Gni19FJsmz8X26fNpWWHydYCTuj59WPqREMbNdzpump its vault
-# held 94.6% of supply — so dropping this constant would report a healthy
-# graduated coin as 94.6% concentrated and block it. That is the
-# silence-the-operator failure this module exists to avoid.
+# This list is now a belt-and-braces layer, NOT the primary defence — the
+# off-curve test (:func:`is_off_curve`) catches every one of these vault
+# authorities structurally, plus the ones nobody thought to list. The history is
+# worth keeping because it shows why one rule was not enough:
 #
-# The structural rule catches the state-holding custody accounts (pump.fun
-# bonding curves, PumpSwap pool PDAs); this list catches the signer-only ones.
-# Both are required.
-_CUSTODY_OWNERS = frozenset({_RAYDIUM_AMM_V4_AUTHORITY}) | _BURN_OWNERS
+# The first version of this module relied only on "the owner's account is owned
+# by a program". Every AMM vault authority defeats that test — they are
+# System-owned with ZERO-LENGTH data, structurally identical to a person,
+# because they are signer-only PDAs that never store state. A review measured
+# the consequence live: 11 of 11 fresh tradeable coins lost every buy-side
+# alert, because vault authorities for Raydium v4 (5Q544fKr…), Raydium CPMM
+# (GpMZbSM2…), Meteora DAMM v2 (HLnpSz9h…, which owns 390k token accounts) and
+# Meteora DBC (FhVo3mqL…) were each counted as a whale holding 50-94% of supply.
+# That is the silence-the-operator failure, reproduced.
+#
+# All four are OFF-CURVE, as is the pump.fun-era infrastructure address
+# BwWK17cb… (46,732 SOL), while three known real holder wallets are on-curve —
+# verified live 2026-07-30. So the off-curve test covers them all without a list
+# to maintain. The entries below are kept for the one case it cannot cover: the
+# System Program address is a valid curve point.
+_CUSTODY_OWNERS = frozenset({
+    _RAYDIUM_AMM_V4_AUTHORITY,
+    "GpMZbSM2GgvTKHJirzeGfMFoaZ8UR2X7F4v8vHTvxFbL",  # Raydium CPMM authority
+    "HLnpSz9h2S4hiLQ43rnSD9XkcUThA7B8hQMKmDaiTLcC",  # Meteora DAMM v2 authority
+    "FhVo3mqL8PW5pH5U2CN4XE33DokiyZnUwuGpH2hmHLuM",  # Meteora DBC authority
+    "BwWK17cbHxwWBKZkUYvzxLcNQ1YVyaFezduWbtm2de6s",  # pump.fun-era infrastructure
+}) | _BURN_OWNERS
 
 _B58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+# ed25519 curve parameters, for the off-curve custody test below.
+_ED25519_P = 2**255 - 19
+_ED25519_D = (-121665 * pow(121666, _ED25519_P - 2, _ED25519_P)) % _ED25519_P
 
 
 def encode_base58(raw: bytes) -> str:
@@ -166,6 +196,64 @@ def encode_base58(raw: bytes) -> str:
             break
         out.append("1")
     return "".join(reversed(out))
+
+
+def decode_base58(address: str) -> bytes | None:
+    """32 raw bytes from a Solana address string, or ``None`` if it isn't one."""
+    number = 0
+    for char in address:
+        index = _B58_ALPHABET.find(char)
+        if index < 0:
+            return None
+        number = number * 58 + index
+    try:
+        return number.to_bytes(32, "big")
+    except OverflowError:
+        return None
+
+
+def is_off_curve(address: str) -> bool:
+    """True when ``address`` is provably NOT anyone's wallet.
+
+    A Solana wallet address IS an ed25519 public key, so it must decompress to a
+    valid curve point. Program-derived addresses are, by construction, chosen so
+    that they do *not* — that is precisely how a program proves an address has no
+    private key behind it. So "off the curve" is not a heuristic: it is proof
+    that no keypair exists and therefore that no person holds this.
+
+    This is the load-bearing custody test, and it needs no RPC call and no
+    maintained address list. Verified live 2026-07-30 against the vault
+    authorities that were silently breaking the previous design — Raydium AMM v4
+    ``5Q544fKr…``, Raydium CPMM ``GpMZbSM2…``, Meteora DAMM v2 ``HLnpSz9h…``,
+    Meteora DBC ``FhVo3mqL…``, and the pump.fun-era infrastructure address
+    ``BwWK17cb…`` (46,732 SOL) — all five are off-curve, while three known real
+    holder wallets are on-curve. Every one of those five is System-owned with
+    zero-length data, so the program-owned test below cannot see any of them.
+
+    Unparseable input returns False: "I could not check" must not read as
+    "provably not a holder", which would silently delete supply from the census.
+    """
+    raw = decode_base58(address)
+    if raw is None:
+        return False
+    y = int.from_bytes(raw, "little")
+    sign = y >> 255
+    y &= (1 << 255) - 1
+    if y >= _ED25519_P:
+        return True           # not a canonical field element: no such point
+    numerator = (y * y - 1) % _ED25519_P
+    denominator = (_ED25519_D * y * y + 1) % _ED25519_P
+    if denominator == 0:
+        return True
+    x2 = numerator * pow(denominator, _ED25519_P - 2, _ED25519_P) % _ED25519_P
+    if x2 == 0:
+        return sign != 0
+    x = pow(x2, (_ED25519_P + 3) // 8, _ED25519_P)
+    if x * x % _ED25519_P != x2:
+        x = x * pow(2, (_ED25519_P - 1) // 4, _ED25519_P) % _ED25519_P
+        if x * x % _ED25519_P != x2:
+            return True       # no square root: the point does not exist
+    return False
 
 
 @dataclass(frozen=True)
@@ -236,6 +324,45 @@ class OnChainSecurityCollector(BaseCollector):
         self._s = settings
         self._api_key = api_key
         self._path = f"/?api-key={api_key}" if api_key else "/"
+
+    # ---- helpers ----
+
+    @staticmethod
+    def _digest(mint: str, addresses: list[str]) -> str:
+        """Stable fingerprint of the exact request a cached response answers.
+
+        sha256 is used as a content fingerprint, not for security — it just keeps
+        the key bounded and collision-free so a cached response can never be
+        zipped against a different account list.
+        """
+        payload = f"{mint}|{'|'.join(addresses)}".encode()
+        return hashlib.sha256(payload).hexdigest()
+
+    @staticmethod
+    def _parsed_owner(info: Any) -> str | None:
+        """Owner wallet from a jsonParsed token account, or ``None``.
+
+        ``data`` is a dict when the node parsed the account and the documented
+        ``[base64, "base64"]`` LIST when it could not — a list has no ``.get``,
+        so the obvious chained access raises AttributeError. That escaped
+        ``collect``'s CollectorError handler, propagated through the pipeline and
+        aborted the whole scan cycle at that coin (review finding). Reachable
+        with a Token-2022 extension a validator's parser does not know, and most
+        current pump.fun mints are Token-2022.
+        """
+        if not isinstance(info, dict):
+            return None
+        data = info.get("data")
+        if not isinstance(data, dict):
+            return None
+        parsed = data.get("parsed")
+        if not isinstance(parsed, dict):
+            return None
+        fields = parsed.get("info")
+        if not isinstance(fields, dict):
+            return None
+        owner = fields.get("owner")
+        return owner if isinstance(owner, str) and owner else None
 
     # ---- RPC plumbing ----
 
@@ -315,20 +442,23 @@ class OnChainSecurityCollector(BaseCollector):
             return OnChainSecurityFacts(
                 notes=("every largest-account entry was malformed",))
 
+        # Cache keys carry a digest of the EXACT request they answer. Keying by
+        # length plus first element let a stale response be zipped positionally
+        # against a different, fresher account list — the fabricated-whale bug
+        # already fixed twice in wallet_data.get_top_holders, and a review caught
+        # this module repeating it.
+        accounts_key = self._digest(mint, [address for address, _ in accounts])
         owners_result = await self._rpc(
             "getMultipleAccounts",
             [[address for address, _ in accounts], {"encoding": "jsonParsed"}],
-            cache_key=f"onchain:owners:{mint}:{len(accounts)}:{accounts[0][0]}",
+            cache_key=f"onchain:owners:{accounts_key}",
             cache_ttl=120.0)
         owner_infos = (owners_result or {}).get("value") or []
 
         by_owner: dict[str, int] = {}
         unresolved = 0
         for (address, amount), info in zip(accounts, owner_infos, strict=False):
-            owner = None
-            if isinstance(info, dict):
-                owner = (((info.get("data") or {}).get("parsed") or {})
-                         .get("info") or {}).get("owner")
+            owner = self._parsed_owner(info)
             if not owner:
                 unresolved += 1
                 continue
@@ -347,9 +477,17 @@ class OnChainSecurityCollector(BaseCollector):
                        f"rather than under-reported",))
 
         excluded: list[str] = []
-        custody_by_address = {owner for owner in by_owner if owner in _CUSTODY_OWNERS}
-        for owner in custody_by_address:
-            excluded.append(f"{owner} (known custody/burn address)")
+        custody_by_address: set[str] = set()
+        for owner in by_owner:
+            if owner in _CUSTODY_OWNERS:
+                custody_by_address.add(owner)
+                excluded.append(f"{owner} (known custody/burn address)")
+            elif is_off_curve(owner):
+                # Provably keyless: no private key can exist for an off-curve
+                # address, so nobody holds this. Catches every AMM vault
+                # authority without an address list to maintain.
+                custody_by_address.add(owner)
+                excluded.append(f"{owner} (off-curve: provably not a wallet)")
 
         remaining = [owner for owner in by_owner if owner not in custody_by_address]
         program_owned: set[str] = set()
@@ -376,10 +514,39 @@ class OnChainSecurityCollector(BaseCollector):
                 notes=("every top account is custody (pool vault, burn, or bonding "
                        "curve) — no real holder is visible in the top accounts",))
 
+        # THE DENOMINATOR PROBLEM (review finding, 2026-07-30). Custody is
+        # removed from the numerator but `supply` is the total, so on a coin
+        # whose curve or pool holds most of the supply the reported figure is
+        # deflated several-fold: a dev holding 67% of the tradeable float can
+        # read as 10% "of circulating supply", which is how the analyzer prints
+        # it. That turns an honest "distribution unverified" into an affirmative
+        # "distribution healthy" — the one direction Rule 8 forbids, and it also
+        # puts the top-10 thresholds arithmetically out of reach.
+        #
+        # Reporting against the float instead would inflate every pre-graduation
+        # coin and risks the silencing failure, so neither number is published
+        # when custody dominates: no number is the honest answer, and it is the
+        # answer the probe can act on.
+        custody_amount = sum(amount for owner, amount in by_owner.items()
+                             if owner not in held)
+        custody_share = 100.0 * custody_amount / supply
+        if custody_share > self._s.max_custody_share_for_concentration:
+            return OnChainSecurityFacts(
+                census_owner_count=len(held),
+                excluded_owners=tuple(sorted(excluded)),
+                notes=(f"{custody_share:.1f}% of supply sits in custody (pool vault "
+                       f"or bonding curve), above the "
+                       f"{self._s.max_custody_share_for_concentration:.0f}% limit — a "
+                       f"share-of-total-supply figure would understate real "
+                       f"concentration several-fold, so none is reported",))
+
         amounts = sorted(held.values(), reverse=True)
         top_percent = 100.0 * amounts[0] / supply
         top10_percent = 100.0 * sum(amounts[:10]) / supply
         notes: list[str] = []
+        if custody_share > 0.0:
+            notes.append(f"measured against total supply; {custody_share:.1f}% is in "
+                         f"custody and excluded from the numerator")
         if len(amounts) < 10:
             # top10 over fewer than 10 real holders is still the correct share
             # of supply held by the top ten (there just are not ten), but say so.
@@ -416,7 +583,7 @@ class OnChainSecurityCollector(BaseCollector):
         """
         result = await self._rpc(
             "getMultipleAccounts", [owners, {"encoding": "base64"}],
-            cache_key=f"onchain:ownerkind:{len(owners)}:{owners[0]}", cache_ttl=600.0)
+            cache_key=f"onchain:ownerkind:{self._digest('', owners)}", cache_ttl=120.0)
         infos = (result or {}).get("value") or []
         program_owned: set[str] = set()
         failed: list[str] = []

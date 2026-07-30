@@ -2760,3 +2760,99 @@ pool can still be drained by dumping.
   whose LP is locked in a locker rather than burned reads 0% and takes a
   30-point deduction. True catches the genuinely-unlocked rug, the dominant case
   on fresh Solana pools; flip it if the probe shows healthy coins caught by it.
+
+### Review pass on the same build (4 reviewers + verification): 8 findings fixed
+
+A code + security review of the above found real defects, including one that
+would have reproduced the project's cardinal failure. Recorded because the
+reasoning matters more than the diff.
+
+**1. CRITICAL — the exclusion rule silenced 11 of 11 live coins.** The design
+rested on one structural test: exclude a holder whose owner account is owned by a
+*program*. Every AMM vault authority defeats it. They are signer-only PDAs —
+System-owned, zero-length data, indistinguishable from a person. A reviewer ran
+the real collector against the 14 newest Solana pools from the bot's own
+discovery feed: **11 of 11 resolvable coins lost every buy-side alert**, because
+vault authorities for Raydium CPMM (`GpMZbSM2…`), Meteora DAMM v2 (`HLnpSz9h…`,
+which owns 390k token accounts), Meteora DBC (`FhVo3mqL…`) and a pump.fun-era
+infrastructure address (`BwWK17cb…`, 46,732 SOL) were each counted as a whale
+holding 50-94% of supply. The same shape as the two previously-reverted
+"stricter" changes.
+
+**The fix is better than the address list it replaces:** an address that is not a
+valid ed25519 curve point provably has no private key, so nobody holds it —
+Solana PDAs are chosen off-curve for exactly this reason. Independently
+re-verified: all five authorities above are off-curve; three known real holder
+wallets are on-curve; the System Program address is on-curve (hence the address
+list is kept for it). Costs no RPC call and needs no list maintained as new AMMs
+appear. Exclusion now runs three tests — off-curve, known address, program-owned
+— and each covers a case the others cannot see.
+
+**2. HIGH — filling these fields trips the rug veto, not just the score.** A
+merged `top_holder_percent` over 30 scores 15 rug points and `lp_locked_percent`
+under 50 scores 20; both clear `ai.verify_skip_rug_score` (10), and the
+scanner's deterministic risk veto then strips EVERY buy-side alert. So the
+80-point security gate is almost never the deciding mechanism: a coin with a
+genuine 49% holder scores 83 (passes) and goes silent anyway. **The rug engine
+was not touched** — that is the operator's no-touch zone. Instead this is now
+documented everywhere it matters and the probe reports it as "newly RUG-VETOED".
+Whether these facts SHOULD trip a hard veto is an operator decision, and it is
+the main thing to settle with him before enabling the layer.
+
+**3. HIGH — the denominator understated concentration.** Custody was removed from
+the numerator but not the denominator, so on a coin whose curve holds 85% a dev
+holding 67% of the tradeable float read as 10% "of circulating supply" — which
+the analyzer treats as healthy, and which puts the top-10 thresholds
+arithmetically out of reach. That converts an honest "unverified" into an
+affirmative all-clear, the one direction Rule 8 forbids. Reporting against the
+float instead would inflate every pre-graduation coin and risk the silencing
+failure, so above `max_custody_share_for_concentration` (50%) **neither figure is
+published**, and below it the custody share travels with the number in `notes`.
+
+**4. CRITICAL — cache-key contamination.** `_program_owned`'s key was
+`ownerkind:{len}:{owners[0]}`: two coins sharing a top holder (routine when one
+bundler is the largest holder of several of its own launches) with the same owner
+count collided, and a cached classification was zipped positionally onto a
+different coin's owner list — deleting a real 40% whale, or promoting a bonding
+curve to a holder. This is the same fabricated-whale defect already fixed twice
+in `wallet_data.get_top_holders`. Both cache keys now carry a sha256 of the exact
+address list, and the TTL was cut from 600s to 120s to match the account list's.
+
+**5. MEDIUM — a crash that would abort the scan cycle.** With `jsonParsed`, a
+node that cannot parse an account returns the documented `[base64, "base64"]`
+LIST for `data`; `(info.get("data") or {}).get(...)` then raises AttributeError,
+which is not a `CollectorError`, so it escaped the collector, propagated through
+the pipeline and killed the cycle at that coin. Reachable via a Token-2022
+extension a validator's parser does not know — and most current pump.fun mints
+are Token-2022. Now type-checked at every level.
+
+**6. MEDIUM — the mandated probe measured the wrong things.** It passed
+`pool_address=None` unconditionally, so the LP half was never exercised and
+printed "LP unknown" for 100% of rows *by construction* — which its own docstring
+pre-excused as expected, turning a structural blind spot into false reassurance.
+It also assessed without a `DexPair`, so liquidity was never observed (baseline
+read 100.0 where production reads 82.2) and the alert engine's liquidity
+sub-gate was invisible, and it compared only against the security gate, so it
+reported coins as "still pass" that lose every alert. It now resolves the live
+pool, assesses with the pair, and reports all three mechanisms.
+
+**7. MEDIUM — `force_onchain_security` was never wired.** Three docs promised
+"/check and holdings bypass the cooldown and budget" while only tests set the
+flag, so the facts were collected *only* in unattended scanning of sub-1h coins
+and never where a human would catch a wrong number. Now wired at every site that
+already forces a wallet lookup.
+
+**8. `treat_zero_burn_as_unlocked` now defaults FALSE.** Per finding 2 the
+consequence of a 0% reading is a total buy-side veto, not the "30-point
+deduction" the original comment claimed in three places. And the upside is
+mostly absent: 0 of the 100 newest Solana pools measured are Raydium AMM v4, so
+this read rarely produces a number on his real population.
+
+The 5th agent, an adversarial verifier meant to try to refute all of the above,
+died on an API error. Findings 1 and the off-curve fix were therefore verified by
+hand instead (live, against the named addresses); the rest were each accompanied
+by an executed reproduction and were confirmed by reading the code. Suite 1085 ->
+1155.
+
+**Standing conclusion: do not enable this layer yet.** The measurement is the
+next step, not the switch, and the veto question needs the operator's answer.

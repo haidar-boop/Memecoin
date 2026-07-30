@@ -15,6 +15,7 @@ import pytest
 from meme_intelligence.collectors.onchain_security import (
     OnChainSecurityCollector,
     encode_base58,
+    is_off_curve,
 )
 from meme_intelligence.config.settings import OnChainSecuritySettings
 from meme_intelligence.core.cache import TTLCache
@@ -28,6 +29,31 @@ INCINERATOR = "1nc1nerator11111111111111111111111111111111"
 RAYDIUM_AUTHORITY = "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1"
 RAYDIUM_V4_PROGRAM = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8"
 PUMP_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+# Off-curve, and deliberately NOT in _CUSTODY_OWNERS: stands in for the vault
+# authority of an AMM nobody has enumerated yet.
+OFFCURVE_UNLISTED = "DYk2ooHQGWpS5J3MtycUs1PNKuSQhx1wAwkxaNk3zt9j"
+
+# Synthetic owner addresses. These MUST be genuine ON-CURVE ed25519 points:
+# the collector now treats an off-curve address as provably-not-a-wallet
+# custody, so a made-up string like W_WHALE would be silently excluded and
+# the test would pass for the wrong reason.
+W_WHALE = "DGirC9hJVDMfidznPm3aoGMNQv9i5vJoX5CivyHeXwB1"
+W_SMALL = "CpcfeMHQPg57epWopPGhBBw1P8t168XrN1XH7TBL7LHk"
+W_BUYER1 = "5qH2nkxSZnhMG5KaBxpfVEfXFikRWBCHQAjxYTEgtwQr"
+W_BUYER2 = "3eYnMWpNveAK1tA6ywhP2uZfoigW8NL3HycGrHwednXX"
+W_CURVEPDA = "CgPkVvVLxiD45DjM4A3Q5eJozoemb1du5NdhLxNSn1eP"
+W_DEV = "GepdsZTKRG56mt1qnrEXhNRRafTDNQpGMkns8EgXfwPk"
+W_OTHER = "3SbCcQgjWXDQ4raLzEaE4d33oZ8kST9Txn3mHDqP9qJx"
+W_REALHOLDER = "4yszLiJUZihSLP8pmAGBgXCBar2mB93YPDC1ToT93eAC"
+W_REALWHALE = "2YyYjJYsuESE3jrirLugWhamd14mRstmcWxNNmqL5uKe"
+W_PERPOOLPDA = "9DQZuoUxLaC7AkkCt5K1RqTp99pR9tgqCGuY8K8DVw8Z"
+W_FRESHWALLET = "2nzTPL7EBhmE8XhBW8dRNzNTM5omACrG5oLQrNUgvX7R"
+W_OWNER2 = "4EtCmgs4WCVGFThTH4vxR6uLe6nRvPXXjKo457u56FwT"
+W_OWNER1 = "F4hQEnp74zoxiBrfV3YcuL7j9PkDobBCMapkw9CbZkZS"
+W_MYSTERY = "rZ2MLKNeZALTZQCRT3NXDUAQP9sUBVHgcHWDfgQRL9T"
+W_A = "DgHxBc1mGMQy72bivv9DUQ82ysJuvXsknsuc38LP2LE1"
+W_B = "49XgaBak2nz64k4BFcgwV1y6QkEzMqePqiCfSXBN7jGt"
+W_HOLDER = "2BnBAQbkw7Ym1s27MsYixUFAQxTzhEq64wAeCWU5DteV"
 
 SETTINGS = OnChainSecuritySettings()
 
@@ -114,13 +140,13 @@ async def test_concentration_excludes_custody_and_aggregates_by_owner(monkeypatc
         if method == "getTokenSupply":
             return supply(1_000_000)
         if method == "getTokenLargestAccounts":
-            return largest(("acc_vault", 700_000), ("acc_whale_a", 60_000),
+            return largest(("acc_vault", 200_000), ("acc_whale_a", 60_000),
                            ("acc_whale_b", 40_000), ("acc_burn", 100_000),
                            ("acc_small", 10_000))
         if method == "getMultipleAccounts":
             if params[1]["encoding"] == "jsonParsed":
-                return token_accounts(RAYDIUM_AUTHORITY, "Whale", "Whale",
-                                      INCINERATOR, "Small")
+                return token_accounts(RAYDIUM_AUTHORITY, W_WHALE, W_WHALE,
+                                      INCINERATOR, W_SMALL)
             return owner_kinds(SYSTEM, SYSTEM)  # Whale, Small — both real wallets
         raise AssertionError(method)
 
@@ -137,30 +163,83 @@ async def test_concentration_excludes_custody_and_aggregates_by_owner(monkeypatc
 
 @pytest.mark.asyncio
 async def test_a_pumpfun_bonding_curve_is_excluded_by_being_program_owned(monkeypatch):
-    """THE trap this module exists to avoid. The curve holds 92% of a brand-new
-    coin's supply. Counting it makes every healthy launch look 92% concentrated,
-    which would block essentially every alert — silencing the operator."""
+    """THE trap this module exists to avoid: the curve is not a holder. Counting
+    it makes every healthy launch look 92% concentrated, which would block
+    essentially every alert — silencing the operator."""
     c = make_collector()
 
     def handler(method, params):
         if method == "getTokenSupply":
             return supply(1_000_000_000)
         if method == "getTokenLargestAccounts":
-            return largest(("acc_curve", 920_000_000), ("acc_buyer1", 30_000_000),
+            return largest(("acc_curve", 400_000_000), ("acc_buyer1", 30_000_000),
                            ("acc_buyer2", 20_000_000))
         if method == "getMultipleAccounts":
             if params[1]["encoding"] == "jsonParsed":
-                return token_accounts("CurvePda", "Buyer1", "Buyer2")
+                return token_accounts(W_CURVEPDA, W_BUYER1, W_BUYER2)
             return owner_kinds(PUMP_PROGRAM, SYSTEM, SYSTEM)
         raise AssertionError(method)
 
     patch_rpc(monkeypatch, c, handler)
     facts = await c.get_holder_concentration(MINT)
 
-    # 3% (the biggest REAL buyer), not 92%.
+    # 3% (the biggest REAL buyer), not 40%.
     assert facts.top_holder_percent == pytest.approx(3.0)
     assert facts.top10_holder_percent == pytest.approx(5.0)
     assert any("program-owned" in e for e in facts.excluded_owners)
+
+
+@pytest.mark.asyncio
+async def test_custody_dominating_supply_withholds_rather_than_deflating(monkeypatch):
+    """The denominator trap. Custody leaves the numerator but not the
+    denominator, so on a coin whose curve holds 85% a dev with 67% of the
+    tradeable FLOAT reads as 10% "of circulating supply" — which the analyzer
+    treats as healthy, converting an honest unknown into a false all-clear.
+    Above the custody limit, neither figure is published."""
+    c = make_collector()
+
+    def handler(method, params):
+        if method == "getTokenSupply":
+            return supply(1_000_000_000)
+        if method == "getTokenLargestAccounts":
+            return largest(("acc_curve", 850_000_000), ("acc_dev", 100_000_000),
+                           ("acc_other", 50_000_000))
+        if method == "getMultipleAccounts":
+            if params[1]["encoding"] == "jsonParsed":
+                return token_accounts(W_CURVEPDA, W_DEV, W_OTHER)
+            return owner_kinds(PUMP_PROGRAM, SYSTEM, SYSTEM)
+        raise AssertionError(method)
+
+    patch_rpc(monkeypatch, c, handler)
+    facts = await c.get_holder_concentration(MINT)
+
+    assert facts.top_holder_percent is None, (
+        "10% of supply would read as healthy while being 67% of the float")
+    assert facts.top10_holder_percent is None
+    assert any("sits in custody" in n for n in facts.notes)
+
+
+@pytest.mark.asyncio
+async def test_a_reported_figure_says_how_much_custody_was_excluded(monkeypatch):
+    """Below the limit the number is published, but the deflation factor has to
+    travel with it so the probe can show it."""
+    c = make_collector()
+
+    def handler(method, params):
+        if method == "getTokenSupply":
+            return supply(1_000)
+        if method == "getTokenLargestAccounts":
+            return largest(("acc_curve", 300), ("acc_dev", 200))
+        if method == "getMultipleAccounts":
+            if params[1]["encoding"] == "jsonParsed":
+                return token_accounts(W_CURVEPDA, W_DEV)
+            return owner_kinds(PUMP_PROGRAM, SYSTEM)
+        raise AssertionError(method)
+
+    patch_rpc(monkeypatch, c, handler)
+    facts = await c.get_holder_concentration(MINT)
+    assert facts.top_holder_percent == pytest.approx(20.0)
+    assert any("30.0% is in custody" in n for n in facts.notes)
 
 
 @pytest.mark.asyncio
@@ -177,7 +256,7 @@ async def test_an_owner_with_no_account_is_a_real_wallet_not_custody(monkeypatch
             return largest(("acc1", 400))
         if method == "getMultipleAccounts":
             if params[1]["encoding"] == "jsonParsed":
-                return token_accounts("FreshWallet")
+                return token_accounts(W_FRESHWALLET)
             return owner_kinds(None)   # account does not exist
         raise AssertionError(method)
 
@@ -187,29 +266,62 @@ async def test_an_owner_with_no_account_is_a_real_wallet_not_custody(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_the_raydium_vault_authority_is_excluded_even_though_it_looks_like_a_wallet(
-        monkeypatch):
-    """The counterexample that makes `_CUSTODY_OWNERS` load-bearing.
+@pytest.mark.parametrize("authority,label", [
+    ("5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1", "Raydium AMM v4"),
+    ("GpMZbSM2GgvTKHJirzeGfMFoaZ8UR2X7F4v8vHTvxFbL", "Raydium CPMM"),
+    ("HLnpSz9h2S4hiLQ43rnSD9XkcUThA7B8hQMKmDaiTLcC", "Meteora DAMM v2"),
+    ("FhVo3mqL8PW5pH5U2CN4XE33DokiyZnUwuGpH2hmHLuM", "Meteora DBC"),
+    ("BwWK17cbHxwWBKZkUYvzxLcNQ1YVyaFezduWbtm2de6s", "pump.fun-era infra"),
+])
+def test_every_known_vault_authority_is_provably_not_a_wallet(authority, label):
+    """The measured failure of the first design, turned into a guard.
 
-    Verified live 2026-07-30: Raydium's v4 vault authority is owned by the SYSTEM
-    PROGRAM with zero-length data — a signer-only PDA, structurally identical to
-    a person. On a real mint its vault held 94.6% of supply. If the address list
-    were ever dropped in favour of the structural rule alone, this coin would be
-    reported as 94.6% concentrated and blocked — a healthy graduated coin
-    silenced, which is the failure this module exists to prevent.
+    Each of these is System-owned with ZERO-LENGTH data, so the program-owned
+    test cannot see any of them, and each was measured holding 50-94% of a live
+    coin's supply. Counting them as whales cost 11 of 11 live coins every
+    buy-side alert. All five are off-curve — an address that is not a valid
+    ed25519 point cannot have a private key, so nobody holds it.
     """
+    assert is_off_curve(authority), f"{label} authority must be provably keyless"
+
+
+@pytest.mark.parametrize("wallet", [
+    "ArB1hBWhRKxpqEykMN25cFrZdwUfg71FNUfh921PFapW",
+    "6uRXCp3v13N4FKfMiU1oS7ztnnbNXPLWc9HSp6X8a5oq",
+    "DvR7f6MMpTzRsmYHyBapogbBxSXt4g8sjskENsqamfro",
+])
+def test_real_holder_wallets_are_not_mistaken_for_custody(wallet):
+    """The other direction, and the more dangerous one: excluding a real whale
+    hides a rug. These three were observed holding real balances on chain."""
+    assert not is_off_curve(wallet)
+
+
+def test_an_unparseable_address_is_not_treated_as_custody():
+    """"I could not check" must never read as "provably not a holder" — that
+    would silently delete supply from the census (Rule 8)."""
+    assert not is_off_curve("not-a-base58-address!!!")
+    assert not is_off_curve("")
+
+
+@pytest.mark.asyncio
+async def test_an_off_curve_vault_authority_is_excluded_without_any_rpc_hint(
+        monkeypatch):
+    """End to end: the vault authority looks exactly like a plain wallet to every
+    RPC-based test, and is still excluded."""
     c = make_collector()
 
     def handler(method, params):
         if method == "getTokenSupply":
             return supply(1_000_000)
         if method == "getTokenLargestAccounts":
-            return largest(("acc_vault", 946_000), ("acc_holder", 20_000))
+            return largest(("acc_vault", 400_000), ("acc_holder", 20_000))
         if method == "getMultipleAccounts":
             if params[1]["encoding"] == "jsonParsed":
-                return token_accounts(RAYDIUM_AUTHORITY, "RealHolder")
-            # Both look like plain wallets to the structural test — that IS the
-            # live finding: the authority is System-owned with no data.
+                # Deliberately NOT one of the listed authorities: this proves the
+                # off-curve test stands on its own, so a vault belonging to some
+                # AMM nobody has enumerated yet is still excluded.
+                return token_accounts(OFFCURVE_UNLISTED, W_REALHOLDER)
+            # System-owned with no data — indistinguishable from a person here.
             return owner_kinds(SYSTEM, SYSTEM)
         raise AssertionError(method)
 
@@ -217,8 +329,8 @@ async def test_the_raydium_vault_authority_is_excluded_even_though_it_looks_like
     facts = await c.get_holder_concentration(MINT)
 
     assert facts.top_holder_percent == pytest.approx(2.0), (
-        "the AMM vault must not be reported as a 94.6% whale")
-    assert any(RAYDIUM_AUTHORITY in e for e in facts.excluded_owners)
+        "an unlisted AMM vault must not be reported as a 40% whale")
+    assert any("off-curve" in e for e in facts.excluded_owners)
 
 
 @pytest.mark.asyncio
@@ -245,8 +357,14 @@ async def test_a_rate_limited_census_reports_unknown_not_zero(monkeypatch):
 @pytest.mark.asyncio
 async def test_a_pumpswap_pool_is_excluded_by_the_structural_rule(monkeypatch):
     """Modern pump.fun coins graduate to PumpSwap, whose pool authority is a
-    PER-POOL PDA — no constant can enumerate them, so the structural rule is
-    what has to catch these. Live: it took a raw 79.04% down to 3.49%."""
+    PER-POOL PDA — no address list can enumerate them, so the program-owned rule
+    is what catches these. Uses the real measured numbers from that live coin:
+    the pool held 79.04% and the largest real wallet 3.49%.
+
+    The pool IS correctly excluded — but because custody then exceeds the 50%
+    limit, the figure is withheld rather than published as 3.49%. That is the
+    intended outcome: 3.49% of total supply is 16.7% of the tradeable float, and
+    publishing the smaller number would read as healthier than the coin is."""
     c = make_collector()
     pumpswap = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"
 
@@ -257,13 +375,16 @@ async def test_a_pumpswap_pool_is_excluded_by_the_structural_rule(monkeypatch):
             return largest(("acc_pool", 790_427), ("acc_whale", 34_933))
         if method == "getMultipleAccounts":
             if params[1]["encoding"] == "jsonParsed":
-                return token_accounts("PerPoolPda", "RealWhale")
+                return token_accounts(W_PERPOOLPDA, W_REALWHALE)
             return owner_kinds(pumpswap, SYSTEM)
         raise AssertionError(method)
 
     patch_rpc(monkeypatch, c, handler)
     facts = await c.get_holder_concentration(MINT)
-    assert facts.top_holder_percent == pytest.approx(3.4933, abs=0.001)
+    assert any("program-owned" in e for e in facts.excluded_owners), (
+        "the per-pool PDA must be recognised as custody")
+    assert facts.top_holder_percent is None
+    assert any("79.0% of supply sits in custody" in n for n in facts.notes)
 
 
 @pytest.mark.asyncio
@@ -279,7 +400,7 @@ async def test_an_unresolved_largest_account_withholds_both_figures(monkeypatch)
         if method == "getTokenLargestAccounts":
             return largest(("acc1", 800), ("acc2", 100))
         if method == "getMultipleAccounts":
-            return token_accounts(None, "Owner2")   # first one unresolvable
+            return token_accounts(None, W_OWNER2)   # first one unresolvable
         raise AssertionError(method)
 
     patch_rpc(monkeypatch, c, handler)
@@ -301,7 +422,7 @@ async def test_a_short_owner_response_withholds_rather_than_truncating(monkeypat
         if method == "getTokenLargestAccounts":
             return largest(("acc1", 500), ("acc2", 300), ("acc3", 100))
         if method == "getMultipleAccounts":
-            return token_accounts("Owner1")   # two missing
+            return token_accounts(W_OWNER1)   # two missing
         raise AssertionError(method)
 
     patch_rpc(monkeypatch, c, handler)
@@ -323,7 +444,7 @@ async def test_an_unclassifiable_owner_withholds(monkeypatch):
             return largest(("acc1", 900))
         if method == "getMultipleAccounts":
             if params[1]["encoding"] == "jsonParsed":
-                return token_accounts("Mystery")
+                return token_accounts(W_MYSTERY)
             return {"value": [{"data": ["", "base64"]}]}   # no 'owner' field
         raise AssertionError(method)
 
@@ -346,7 +467,7 @@ async def test_all_custody_reports_no_holder_rather_than_zero(monkeypatch):
             return largest(("acc_curve", 1_000))
         if method == "getMultipleAccounts":
             if params[1]["encoding"] == "jsonParsed":
-                return token_accounts("CurvePda")
+                return token_accounts(W_CURVEPDA)
             return owner_kinds(PUMP_PROGRAM)
         raise AssertionError(method)
 
@@ -391,7 +512,7 @@ async def test_malformed_amount_entries_withhold(monkeypatch):
                               {"address": "acc2", "amount": "300"}]}
         if method == "getMultipleAccounts":
             if params[1]["encoding"] == "jsonParsed":
-                return token_accounts("Owner2")
+                return token_accounts(W_OWNER2)
             return owner_kinds(SYSTEM)
         raise AssertionError(method)
 
@@ -411,7 +532,7 @@ async def test_fewer_than_ten_real_holders_still_reports_and_says_so(monkeypatch
             return largest(("a", 200), ("b", 100))
         if method == "getMultipleAccounts":
             if params[1]["encoding"] == "jsonParsed":
-                return token_accounts("A", "B")
+                return token_accounts(W_A, W_B)
             return owner_kinds(SYSTEM, SYSTEM)
         raise AssertionError(method)
 
@@ -597,7 +718,7 @@ async def test_collect_returns_both_facts(monkeypatch):
             return largest(("acc1", 250))
         if method == "getMultipleAccounts":
             if params[1]["encoding"] == "jsonParsed":
-                return token_accounts("Holder")
+                return token_accounts(W_HOLDER)
             return owner_kinds(SYSTEM)
         if method == "getAccountInfo":
             return {"value": {"owner": RAYDIUM_V4_PROGRAM,
@@ -645,7 +766,7 @@ async def test_no_pool_address_still_runs_the_census(monkeypatch):
             return largest(("acc1", 120))
         if method == "getMultipleAccounts":
             if params[1]["encoding"] == "jsonParsed":
-                return token_accounts("Holder")
+                return token_accounts(W_HOLDER)
             return owner_kinds(SYSTEM)
         raise AssertionError(method)
 

@@ -535,6 +535,7 @@ async def _gather_assessments(
                 # (2026-07-17 review finding — mirrors /check; same for the
                 # social gate, Roadmap item 5).
                 force_wallet_check=True,
+                force_onchain_security=True,
                 force_social_check=True,
             )
     finally:

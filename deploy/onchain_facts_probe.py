@@ -45,6 +45,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from meme_intelligence.__main__ import build_dexscreener
 from meme_intelligence.analyzers.security_analyzer import SecurityAnalyzer
 from meme_intelligence.collectors.onchain_security import OnChainSecurityCollector
 from meme_intelligence.config.settings import Settings
@@ -76,7 +77,15 @@ def load_rows(db: str, limit: int) -> list[sqlite3.Row]:
 
 
 def profile_from_row(row: sqlite3.Row) -> SecurityProfile | None:
-    """Rebuild the recorded GoPlus profile, ignoring fields the model dropped."""
+    """Rebuild the recorded GoPlus profile, ignoring fields the model dropped.
+
+    Values are type-checked, not just name-filtered. A stored row is provider
+    JSON that ultimately came from attacker-chosen token metadata, and a nested
+    object where a float belongs sails through the name filter and then raises
+    ``TypeError: '<' not supported between 'dict' and 'float'`` inside the
+    analyzer — killing the whole probe run partway through instead of skipping
+    one bad coin (review finding).
+    """
     try:
         facts = json.loads(row["facts"])
     except (TypeError, ValueError):
@@ -84,8 +93,12 @@ def profile_from_row(row: sqlite3.Row) -> SecurityProfile | None:
     if not isinstance(facts, dict):
         return None
     known = {f.name for f in dataclasses.fields(SecurityProfile)}
-    payload = {k: v for k, v in facts.items() if k in known}
-    payload.pop("token", None)
+    payload = {}
+    for key, value in facts.items():
+        if key not in known or key == "token":
+            continue
+        if value is None or isinstance(value, (bool, int, float, str)):
+            payload[key] = value
     payload.setdefault("source", "goplus")
     try:
         return SecurityProfile(
@@ -98,6 +111,37 @@ def profile_from_row(row: sqlite3.Row) -> SecurityProfile | None:
 
 def fmt(value, suffix="%"):
     return "unknown" if value is None else f"{value:.2f}{suffix}"
+
+
+def rug_veto(settings: Settings, profile: SecurityProfile, pair) -> str | None:
+    """The reason the rug engine would veto this coin, or None.
+
+    Mirrors the concentration/LP half of ``ContinuousScanner._deterministic_
+    risk_veto``, which strips EVERY buy-side alert when the rug score reaches
+    ``ai.verify_skip_rug_score`` (10 by default). This matters far more than the
+    80-point security gate: ``top_holder_concentration`` is weighted 15 and
+    ``liquidity_unlocked`` 20, so either signal alone clears the veto bar. A
+    probe that reported only the security gate called coins "still pass" that in
+    reality go completely silent (review finding).
+
+    Deployer reputation and dev-outflow inputs are not modelled here — this is
+    the floor of the veto risk, not the ceiling.
+    """
+    from meme_intelligence.learning.models import CoinSnapshot
+    from meme_intelligence.learning.rug_engine import RugEngine
+
+    snapshot = CoinSnapshot.from_dict({
+        "age_seconds": 0.0,
+        "volume_1h_usd": pair.volume_1h if pair is not None else None,
+        "holder_count": profile.holder_count,
+        "dev_outflow_usd": None,
+    })
+    rug = RugEngine(settings.rug_signal_weights, settings.rug_thresholds).assess(
+        security=profile, snapshots=[snapshot])
+    if rug.score >= settings.ai.verify_skip_rug_score:
+        names = ", ".join(s.name for s in rug.signals) if rug.signals else "?"
+        return f"rug {rug.score:.0f} >= {settings.ai.verify_skip_rug_score:.0f}: {names}"
+    return None
 
 
 async def main() -> int:
@@ -142,20 +186,38 @@ async def main() -> int:
     )
 
     newly_blocked: list[str] = []
+    newly_vetoed: list[str] = []
     already_blocked = would_pass = 0
     conc_unknown = lp_unknown = 0
     filled = 0
 
+    dex = build_dexscreener(settings)
     try:
         for row in rows:
             profile = profile_from_row(row)
             if profile is None:
                 continue
             label = f"{row['symbol'] or '?':<10} {row['address'][:12]}…"
-            before = analyzer.assess(profile)
+
+            # The live pool is needed for two reasons the first version of this
+            # probe got wrong: without a pool address the LP half is never
+            # exercised at all (it printed 'LP unknown' for 100% of rows by
+            # construction, which reads as reassurance), and without a DexPair
+            # the analyzer never observes liquidity, so the alert engine's
+            # liquidity sub-gate stays invisible and the baseline score is wrong.
+            pair = None
+            try:
+                pairs = await dex.get_token_pairs(row["address"], chain="solana")
+                pair = max(pairs, key=lambda p: p.liquidity_usd or 0.0) if pairs else None
+            except (MemeIntelError, OSError) as exc:
+                print(f"{label}  could not resolve a pool ({exc}) — LP half skipped")
+
+            before = analyzer.assess(profile, pair)
+            before_veto = rug_veto(settings, profile, pair)
 
             try:
-                facts = await collector.collect(row["address"], None)
+                facts = await collector.collect(
+                    row["address"], pair.pair_address if pair is not None else None)
             except (MemeIntelError, OSError) as exc:
                 print(f"{label}  RPC unavailable: {exc}")
                 continue
@@ -184,14 +246,35 @@ async def main() -> int:
                 continue
 
             filled += 1
-            after = analyzer.assess(dataclasses.replace(profile, **updates))
-            crossed = ""
+            enriched = dataclasses.replace(profile, **updates)
+            after = analyzer.assess(enriched, pair)
+            after_veto = rug_veto(settings, enriched, pair)
+
+            # Three separate ways a coin loses its buy-side alerts, and the
+            # security gate is the WEAKEST of them. The rug-engine veto fires at
+            # 10 points, so a single concentration or LP signal (15 and 20
+            # points) is enough on its own to delete every buy-side alert — even
+            # for a coin whose security score still passes 80.
+            verdicts = []
             if before.overall_score >= gate > after.overall_score:
-                crossed = "  <== would now be BLOCKED"
+                verdicts.append("security gate")
                 newly_blocked.append(label)
-            elif after.overall_score >= gate:
+            if after_veto and not before_veto:
+                verdicts.append(f"RUG VETO ({after_veto})")
+                newly_vetoed.append(label)
+            liq_before = (before.sub_scores or {}).get("liquidity")
+            liq_after = (after.sub_scores or {}).get("liquidity")
+            if (liq_before is not None and liq_after is not None
+                    and liq_before >= settings.alerts.liquidity > liq_after):
+                verdicts.append("liquidity sub-gate")
+
+            if verdicts:
+                crossed = "  <== LOSES BUY-SIDE ALERTS: " + ", ".join(verdicts)
+            elif after.overall_score >= gate and not after_veto:
+                crossed = ""
                 would_pass += 1
             else:
+                crossed = "  (was already blocked)"
                 already_blocked += 1
             print(f"{label}  {before.overall_score:6.1f} -> {after.overall_score:6.1f}  "
                   f"top={fmt(facts.top_holder_percent)} "
@@ -200,6 +283,7 @@ async def main() -> int:
                   f"cov {before.coverage:.0%}->{after.coverage:.0%}{crossed}")
     finally:
         await collector.close()
+        await dex.close()
 
     total = len(rows)
     print()
@@ -207,12 +291,15 @@ async def main() -> int:
     print(f"facts filled in               {filled}")
     print(f"concentration unknown         {conc_unknown}")
     print(f"LP status unknown             {lp_unknown}")
-    print(f"would now be BLOCKED          {len(newly_blocked)}"
+    print(f"newly blocked by the gate     {len(newly_blocked)}"
           f"{'  (' + ', '.join(n.split()[0] for n in newly_blocked) + ')' if newly_blocked else ''}")
+    print(f"newly RUG-VETOED (all alerts) {len(newly_vetoed)}"
+          f"{'  (' + ', '.join(n.split()[0] for n in newly_vetoed) + ')' if newly_vetoed else ''}")
     print(f"still pass                    {would_pass}")
     print(f"were already below the gate   {already_blocked}")
     print()
-    if filled and len(newly_blocked) / max(1, filled) > 0.5:
+    lost = len({*newly_blocked, *newly_vetoed})
+    if filled and lost / max(1, filled) > 0.5:
         print("STOP. More than half the coins with facts would stop passing. That is "
               "the shape of a wrong exclusion rule, not a strict gate — read the "
               "per-coin lines above and check whether an AMM vault or bonding "

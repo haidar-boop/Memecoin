@@ -1049,6 +1049,18 @@ class OnChainSecuritySettings:
     # those makes every healthy coin look ~90% concentrated and would silence
     # the operator. Off only for diagnostics.
     exclude_program_owned_accounts: bool = True
+    # When more than this share of supply sits in custody (pool vault, bonding
+    # curve), no concentration figure is reported at all.
+    #
+    # Why (review finding 2026-07-30): custody is removed from the numerator but
+    # the denominator is total supply, so on a coin whose curve holds 85% a dev
+    # holding 67% of the *tradeable float* reads as 10% "of circulating supply"
+    # — which is how the analyzer prints it, and which reads as healthy. It also
+    # puts the top-10 thresholds arithmetically out of reach. Reporting against
+    # the float instead would inflate every pre-graduation coin and risks the
+    # silencing failure, so above this line neither number is published.
+    # 100 = never withhold on this basis (diagnostics only).
+    max_custody_share_for_concentration: float = 50.0
     # Timeout for one RPC call. Kept below the pipeline's own patience so a
     # slow census degrades to "unknown" rather than stalling a scan cycle.
     timeout_seconds: float = 8.0
@@ -1062,15 +1074,25 @@ class OnChainSecuritySettings:
     # `lp_locked_percent`, whose analyzer semantics are "locked OR burned", so a
     # burn figure is an honest FLOOR for it.
     #
-    # The edge that matters: a pool whose LP is locked in a locker rather than
-    # burned reads 0% here, which deducts 30 points for "liquidity can be
-    # pulled" — a coin blocked for being safe in a way we cannot see. That is
-    # the "don't silence the operator" failure mode, so it gets a lever. True
-    # (default) reports the 0 and catches the genuinely-unlocked rug, which is
-    # the dominant case on fresh Solana pools and the whole point of this work.
-    # Set False if `deploy/onchain_facts_probe.py` shows healthy coins being
-    # caught by it; then a 0% burn reports as unknown instead.
-    treat_zero_burn_as_unlocked: bool = True
+    # The edge that matters: a pool whose LP is locked in a locker program
+    # rather than burned reads 0% here — a coin penalised for being safe in a
+    # way this layer cannot see.
+    #
+    # DEFAULTS TO FALSE, on a review finding (2026-07-30) that corrected an
+    # earlier assumption twice over. The consequence is not the "30-point
+    # deduction" an earlier version of this comment claimed: a merged
+    # lp_locked_percent below RugThresholds.min_lp_locked_percent (50) scores 20
+    # rug points, which clears ai.verify_skip_rug_score (10), and the scanner's
+    # deterministic risk veto then strips EVERY buy-side alert for that coin. So
+    # a True default converts a question this layer cannot answer into total
+    # silence. And the upside it was supposed to buy is largely absent: 0 of the
+    # 100 newest Solana pools measured were Raydium AMM v4 at all (they are
+    # pump.fun, PumpSwap and Meteora), so on the operator's actual population
+    # this read rarely produces a number either way.
+    #
+    # Set True only after `deploy/onchain_facts_probe.py` shows, on real coins,
+    # that the coins it newly vetoes are ones you would agree are bad.
+    treat_zero_burn_as_unlocked: bool = False
 
     def __post_init__(self) -> None:
         if self.max_lookups_per_day < 0:
@@ -1094,6 +1116,8 @@ class OnChainSecuritySettings:
             raise ConfigurationError(
                 "onchain_security requests_per_minute must be positive, "
                 f"got {self.requests_per_minute}")
+        _check_range("onchain_security max_custody_share_for_concentration",
+                     self.max_custody_share_for_concentration, 0.0, 100.0)
 
 
 @dataclass(frozen=True)
