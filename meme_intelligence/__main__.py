@@ -182,6 +182,50 @@ def build_social_service(settings: Settings) -> LunarCrushClient | None:
     )
 
 
+def build_bundle_service(settings: Settings, *, helius_rate_limiter=None):
+    """/bundle wallet funding-cluster service, or None without a Helius key.
+
+    The holder census (getTokenLargestAccounts) is disabled on public RPC —
+    verified live 2026-07-30, deterministic 429 with x-ratelimit-method-limit: 0
+    — so without a key the command honestly reports itself unavailable instead
+    of returning empty results. Shares the process-wide Helius rate limiter so
+    a /bundle sweep cannot 429 a live trade's balance read (the incident that
+    motivated the shared-bucket pattern).
+    """
+    if not settings.helius_api_key:
+        return None
+    from meme_intelligence.collectors.funding_data import BundleService, FundingClient
+
+    helius = HeliusClient(
+        settings.helius_api_key,
+        rpc_url=settings.providers.helius_rpc_url,
+        api_url=settings.providers.helius_api_url,
+        rate_limiter=helius_rate_limiter or RateLimiter.per_minute(
+            settings.providers.helius_requests_per_minute),
+        **_shared_collector_kwargs(settings),
+    )
+    funding_kwargs = _shared_collector_kwargs(settings)
+    # The layer's own (shorter) timeout must not be shadowed by the shared
+    # HTTP default — an inert setting is a documented trap in this codebase.
+    funding_kwargs["timeout_seconds"] = settings.wallet_clusters.timeout_seconds
+    funding = FundingClient(
+        settings.wallet_clusters,
+        api_key=settings.helius_api_key,
+        rpc_url=settings.providers.helius_rpc_url,
+        rate_limiter=helius_rate_limiter or RateLimiter.per_minute(
+            settings.wallet_clusters.requests_per_minute),
+        **funding_kwargs,
+    )
+    service = BundleService(helius, funding, settings.wallet_clusters)
+    # BundleService.close() closes only the funding client; the helius client
+    # is owned here too, so wrap both.
+    async def close_all() -> None:
+        await service.close()
+        await helius.close()
+    service.close_all = close_all
+    return service
+
+
 def build_jupiter(settings: Settings) -> JupiterClient | None:
     """Live round-trip sell-test client, or None when no key is configured (Project 1)."""
     if not settings.jupiter_api_key:
@@ -1093,6 +1137,10 @@ async def _cmd_monitor(args, settings) -> int:
                         helius_rate_limiter=helius_rate_limiter)
                     if exec_rpc is not None:
                         stack.push_async_callback(exec_rpc.close)
+                    bundle_service = build_bundle_service(
+                        settings, helius_rate_limiter=helius_rate_limiter)
+                    if bundle_service is not None:
+                        stack.push_async_callback(bundle_service.close_all)
                     context = CommandContext(
                         storage=storage,
                         settings=settings,
@@ -1101,6 +1149,7 @@ async def _cmd_monitor(args, settings) -> int:
                         learning_service=learning_service,
                         executor=executor,
                         boost_lookup=dex.get_token_boost,
+                        bundle_service=bundle_service,
                     )
                     listener = TelegramCommandListener(
                         settings.telegram_bot_token, settings.telegram_chat_id,

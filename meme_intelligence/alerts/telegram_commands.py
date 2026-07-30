@@ -104,6 +104,7 @@ _HELP_TEXT = "\n".join([
     "/mind - learning-layer report card + feedback tallies",
     "/winners - what the bot's recorded winners had in common (read-only)",
     "/dev <address> - the deployer's track record across coins the bot watched",
+    "/bundle <address> - are the top holders really one actor? (funding clusters)",
     "/mute <address> - silence ALL alerts for a token",
     "/unmute <address> - restore alerts for a token",
     "/buy <address> <sol> - buy that many SOL of a token (live if enabled)",
@@ -131,6 +132,9 @@ class CommandContext:
     # (address, chain) -> TokenBoost|None — DexScreener paid-boost lookup for
     # /boost. Optional (None = the command reports it is unavailable).
     boost_lookup: Callable[..., Awaitable[Any]] | None = None
+    # BundleService for /bundle — wallet funding-cluster analysis (operator
+    # request 2026-07-30). Optional (None = command reports what it needs).
+    bundle_service: Any = None
 
 
 def _fmt_duration(seconds: float | None) -> str:
@@ -159,6 +163,61 @@ def _opt(value, spec: str = ".2f") -> str:
         return format(value, spec)
     except (TypeError, ValueError):
         return "n/a"
+
+
+def _short(address: str) -> str:
+    return address if len(address) <= 12 else f"{address[:6]}…{address[-4:]}"
+
+
+def _render_bundle(address: str, report, notes: list[str], settings) -> str:
+    """Phone-sized rendering of a ClusterReport. Descriptive only — the report
+    deliberately has no score, and none is synthesized here."""
+    lines = [f"BUNDLE CHECK — {_short(address)}",
+             f"top holders examined: {report.holders_examined}"]
+    for note in notes:
+        lines.append(f"  ({note})")
+
+    flagged = [c for c in report.clusters
+               if c.combined_percent >= settings.min_cluster_percent_to_flag]
+    minor = [c for c in report.clusters if c not in flagged]
+
+    if flagged:
+        lines.append("")
+        for index, cluster in enumerate(flagged, 1):
+            lines.append(f"CLUSTER {index}: {cluster.combined_percent:.1f}% of "
+                         f"supply looks like ONE actor ({cluster.size} wallets)")
+            for wallet in cluster.members[:5]:
+                lines.append(f"  {_short(wallet)}")
+            if cluster.size > 5:
+                lines.append(f"  …and {cluster.size - 5} more")
+            for reason in cluster.evidence[:3]:
+                lines.append(f"  why: {reason}")
+    elif report.clusters:
+        pass  # only minor clusters — summarized below
+    elif report.holders_examined and not report.unknown_origins:
+        lines.append("")
+        lines.append("No funding links found among the top holders — they look "
+                     "independently funded.")
+
+    if minor:
+        lines.append("")
+        lines.append(f"{len(minor)} smaller cluster(s) under "
+                     f"{settings.min_cluster_percent_to_flag:.0f}% (noise-level)")
+
+    lines.append("")
+    lines.append(f"independent: {report.independent_holders} | "
+                 f"long-history: {report.established_holders} | "
+                 f"unreadable: {report.unknown_origins}")
+    if report.unknown_origins:
+        lines.append("Unreadable origins are NOT counted as independent — the "
+                     "picture above may understate clustering.")
+    if report.established_holders:
+        lines.append("Long-history wallets are busy traders, not fresh bundle "
+                     "wallets — but a very active bot fleet can hide here.")
+    for note in report.notes:
+        lines.append(f"note: {note}")
+    lines.append("Info only — this does not change any alert or score.")
+    return "\n".join(lines)
 
 
 # Security facts (analyzers.security_monitor.FACT_FIELDS) worth surfacing
@@ -225,6 +284,9 @@ class TelegramCommandListener(BaseCollector):
         # /winners walks recent resolved records off the event loop; cache the
         # rendered card so repeated taps don't re-walk the store (Rule 11).
         self._winners_lock = asyncio.Lock()
+        # /bundle: same protections as /check - one at a time, short cache.
+        self._bundle_lock = asyncio.Lock()
+        self._bundle_cache: "OrderedDict[str, tuple[float, str]]" = OrderedDict()
         self._winners_cache: tuple[float, str] | None = None
         self._handlers: dict[str, Callable[[list[str]], Awaitable[str | None]]] = {
             "/help": self._cmd_help,
@@ -241,6 +303,7 @@ class TelegramCommandListener(BaseCollector):
             "/mind": self._cmd_mind,
             "/winners": self._cmd_winners,
             "/dev": self._cmd_dev,
+            "/bundle": self._cmd_bundle,
             "/mute": self._cmd_mute,
             "/unmute": self._cmd_unmute,
             "/buy": self._cmd_buy,
@@ -983,6 +1046,46 @@ class TelegramCommandListener(BaseCollector):
             lines.append("latest coins:")
             lines.extend(recent)
         return "\n".join(lines)
+
+
+    async def _cmd_bundle(self, args: list[str]) -> str:
+        """Wallet funding-cluster check (operator request 2026-07-30, after he
+        read a Bubblemap): are this coin's top holders really one actor wearing
+        many wallets? Read-only — feeds no score, no gate, no veto. Runs a
+        bounded RPC sweep (top holders -> each wallet's first transaction ->
+        who paid for it), so like /check it takes tens of seconds and is
+        serialized behind a lock with a short result cache."""
+        address, error = self._validated_address(args, "/bundle <address>")
+        if error:
+            return error
+        if classify_address(address) != "solana":
+            return "Funding clusters are Solana-only for now. Nothing was done."
+        service = self._ctx.bundle_service
+        if service is None:
+            return ("Bundle check is unavailable — it needs MEMEINTEL_HELIUS_API_KEY "
+                    "(the holder census is disabled on public RPC).")
+
+        from meme_intelligence.analyzers.wallet_clusters import cluster_holders
+
+        async with self._bundle_lock:
+            cached = self._bundle_cache.get(address)
+            if cached is not None and self._time() - cached[0] < _CHECK_CACHE_TTL_SECONDS:
+                return cached[1]
+            try:
+                stakes, origins, notes = await service.gather(address)
+            except CollectorError as exc:
+                self._logger.warning("bundle check failed for %s: %s", address, exc)
+                return ("Could not read that coin's holders right now (provider "
+                        "error). Nothing was spent beyond the failed lookups — "
+                        "try again in a minute.")
+            report = cluster_holders(stakes, origins,
+                                     self._ctx.settings.wallet_clusters)
+            text = _render_bundle(address, report, notes,
+                                  self._ctx.settings.wallet_clusters)
+            self._bundle_cache[address] = (self._time(), text)
+            while len(self._bundle_cache) > _CHECK_CACHE_MAX_ENTRIES:
+                self._bundle_cache.popitem(last=False)
+        return text
 
     async def _cmd_mute(self, args: list[str]) -> str:
         address, error = self._validated_address(args, "/mute <address>")

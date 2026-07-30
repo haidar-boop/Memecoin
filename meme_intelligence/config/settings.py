@@ -466,6 +466,65 @@ class PumpFunSettings:
 
 
 @dataclass(frozen=True)
+class WalletClusterSettings:
+    """Wallet funding-cluster check — the /bundle command (operator request,
+    2026-07-30, after reading a Bubblemap).
+
+    A bundled launch spreads one actor's supply across many fresh wallets so the
+    coin *looks* distributed: every per-wallet concentration check reads thirty
+    small independent holders and passes. Live investigation the same day found
+    exactly this — three coins where the deployer kept 50% and sent 12.5% to
+    each of four fresh wallets, and one coin where six wallets took 79% of
+    supply in a single slot. The tell is not who HOLDS, it is who FUNDED: fresh
+    sybil wallets share a funder, or were created in the same transaction.
+
+    Deliberately READ-ONLY and on-demand: this feeds no score, no gate, and no
+    veto. The previous holder-concentration layer was wired toward alerts and
+    was scrapped for it; this one answers the operator's question when he asks
+    and changes nothing when he doesn't. Wiring it into alerting is a separate,
+    explicit decision measured against real data first.
+    """
+
+    # Wallets examined per coin (getTokenLargestAccounts caps the census at 20).
+    top_holders_limit: int = 20
+    # How many 1000-signature pages to walk back before giving up on finding a
+    # wallet's true first transaction. THIS IS LOAD-BEARING: live verification
+    # 2026-07-30 showed a real 79%-supply sniper bundle whose six wallets each
+    # already had 2,400+ signatures at snipe time. A single page (the naive
+    # "1000 sigs = established" rule) files them as ordinary traders and misses
+    # the bundle entirely; 3 pages recovered all six as one cluster. 5 pages
+    # (5,000 sigs) covers that with margin; a wallet still not exhausted past it
+    # is genuinely high-activity and is reported as such, not clustered.
+    max_signature_pages: int = 5
+    # RPC pacing. Origin lookups are 1-2 calls per wallet plus 1 per distinct
+    # funder — bounded, but the operator watches his Helius spend (Rule 11).
+    timeout_seconds: float = 8.0
+    requests_per_minute: float = 120.0
+    # Clusters below this combined share of supply are still listed, just not
+    # headlined — 2 wallets sharing a funder at 0.3% is noise, not a bundle.
+    min_cluster_percent_to_flag: float = 10.0
+
+    def __post_init__(self) -> None:
+        if not (0 < self.top_holders_limit <= 20):
+            raise ConfigurationError(
+                "wallet_clusters top_holders_limit must be within (0, 20] — "
+                f"getTokenLargestAccounts returns at most 20, got {self.top_holders_limit}")
+        if not (1 <= self.max_signature_pages <= 20):
+            raise ConfigurationError(
+                "wallet_clusters max_signature_pages must be within [1, 20], "
+                f"got {self.max_signature_pages}")
+        if not math.isfinite(self.timeout_seconds) or self.timeout_seconds <= 0:
+            raise ConfigurationError(
+                f"wallet_clusters timeout_seconds must be positive, got {self.timeout_seconds}")
+        if not math.isfinite(self.requests_per_minute) or self.requests_per_minute <= 0:
+            raise ConfigurationError(
+                "wallet_clusters requests_per_minute must be positive, "
+                f"got {self.requests_per_minute}")
+        _check_range("wallet_clusters min_cluster_percent_to_flag",
+                     self.min_cluster_percent_to_flag, 0.0, 100.0)
+
+
+@dataclass(frozen=True)
 class BoostWatcherSettings:
     """DexScreener boost radar (Project 5): DM the operator the first time any
     token crosses ``threshold`` boosts on DexScreener.
@@ -1547,6 +1606,7 @@ class Settings:
     discovery: DiscoverySettings = field(default_factory=DiscoverySettings)
     pumpfun: PumpFunSettings = field(default_factory=PumpFunSettings)
     boost_watcher: BoostWatcherSettings = field(default_factory=BoostWatcherSettings)
+    wallet_clusters: WalletClusterSettings = field(default_factory=WalletClusterSettings)
     security: SecurityThresholds = field(default_factory=SecurityThresholds)
     community: CommunityThresholds = field(default_factory=CommunityThresholds)
     onchain: OnChainThresholds = field(default_factory=OnChainThresholds)
@@ -1627,6 +1687,7 @@ class Settings:
             discovery=_load_group(DiscoverySettings, "DISCOVERY", env),
             pumpfun=_load_group(PumpFunSettings, "PUMPFUN", env),
             boost_watcher=_load_group(BoostWatcherSettings, "BOOST_WATCHER", env),
+            wallet_clusters=_load_group(WalletClusterSettings, "WALLET_CLUSTERS", env),
             security=_load_group(SecurityThresholds, "SECURITY", env),
             community=_load_group(CommunityThresholds, "COMMUNITY", env),
             onchain=_load_group(OnChainThresholds, "ONCHAIN", env),
