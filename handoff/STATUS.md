@@ -1,6 +1,6 @@
 # Build Status — Parts 1 through 33 (built or verified-satisfied)
 
-**1182 tests passing** (as of 2026-07-30; 1082 pass in a bare sandbox — the
+**1184 tests passing** (as of 2026-07-30; 1084 pass in a bare sandbox — the
 other 100 need faiss/lightgbm/hdbscan/solders/anthropic, which are installed on
 the droplet). The 2026-07-30 addition is the on-chain holder-concentration + LP
 burn collector, shipped OFF — see DECISIONS_LOG 2026-07-30 and run

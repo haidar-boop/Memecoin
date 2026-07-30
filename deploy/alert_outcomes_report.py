@@ -86,6 +86,8 @@ def main() -> int:
     parser.add_argument("--db", default=None)
     parser.add_argument("--top", type=int, default=15,
                         help="how many best-performing alerts to list")
+    parser.add_argument("--min-liquidity", type=float, default=1000.0,
+                        help="USD pool depth required to call a gain realizable")
     args = parser.parse_args()
 
     db = args.db or next((c for c in CANDIDATES if os.path.exists(c)), CANDIDATES[0])
@@ -141,42 +143,78 @@ def main() -> int:
         print("     database. Fix measurement before touching detection.")
 
     # ---- 2. The best results ever --------------------------------------
+    #
+    # Two filters, and BOTH are load-bearing. Without them this section reported
+    # "+702,288,997.5% — it HAS found a 7,022,891x" off the operator's real
+    # database, which is nonsense and read as good news.
+    #
+    #   * PLAUSIBILITY. The backtester rejects a return above
+    #     `backtest.max_measurable_return_percent` because a bad base price makes
+    #     the ratio explode. That guard was only added 2026-07-29, so every row
+    #     recorded before it keeps its fabricated value forever. Reporting those
+    #     as achievements is the same Rule 8 failure the guard exists to stop.
+    #   * REALIZABILITY. A gain you cannot sell into is not a gain. Almost every
+    #     one of those fantasy returns sits on `liquidity_usd = 0` — there was no
+    #     pool to exit through at any price.
+    ceiling = settings.backtest.max_measurable_return_percent
     print("\n" + "=" * 72)
     print("\n2. THE BEST RESULTS EVER RECORDED — the direct answer\n")
+    bogus = q(con, f"""
+        SELECT COUNT(*) c FROM outcomes o
+        WHERE o.price_change_percent IS NOT NULL AND ? > 0
+          AND ABS(o.price_change_percent) > ?
+          AND EXISTS (SELECT 1 FROM alerts a WHERE a.token_id = o.token_id
+                      AND a.alert_type IN ({marks}))""", (ceiling, ceiling, *BUY))
+    n_bogus = bogus[0]["c"] if bogus else 0
+    if n_bogus:
+        print(f"  !! {n_bogus} outcome row(s) exceed the plausibility ceiling of "
+              f"{ceiling:,.0f}% and are EXCLUDED below.")
+        print("     These predate the guard added 2026-07-29 and are measurement")
+        print("     artifacts, not wins — a bad base price makes the ratio explode.")
+        print("     They are still in the mind layer's training data.\n")
+
     best = q(con, f"""
         SELECT t.symbol, t.address, o.window_hours, o.price_change_percent pct,
                o.liquidity_usd liq, o.measured_at, o.source
         FROM outcomes o JOIN tokens t ON t.id = o.token_id
         WHERE o.price_change_percent IS NOT NULL
+          AND (? <= 0 OR ABS(o.price_change_percent) <= ?)
           AND EXISTS (SELECT 1 FROM alerts a WHERE a.token_id = t.id
                       AND a.alert_type IN ({marks}))
-        ORDER BY o.price_change_percent DESC LIMIT ?""", (*BUY, args.top))
+        ORDER BY o.price_change_percent DESC LIMIT ?""",
+             (ceiling, ceiling, *BUY, args.top))
     if not best:
-        print("  NOTHING. No buy-side-alerted coin has a measured return at all.")
+        print("  NOTHING. No buy-side-alerted coin has a plausible measured return.")
     else:
+        print(f"  {'symbol':<12} {'mint':<15} {'win':>6} {'return':>12} "
+              f"{'liq at measure':>16}  exit?")
         for row in best:
-            print(f"  {(row['symbol'] or '?')[:12]:<12} {row['address'][:14]}…  "
-                  f"{row['window_hours']:>6.0f}h  {row['pct']:>+10.1f}%  "
-                  f"liq ${(row['liq'] or 0):>12,.0f}  {row['source']}")
-        top_pct = best[0]["pct"]
-        print(f"\n  Best ever: {top_pct:+.1f}%", end="")
-        if top_pct >= 1000:
-            print(f" — that is a {1 + top_pct / 100:.0f}x. It HAS found one, so the")
-            print("  question is not detection: it is why you never heard about it")
-            print("  as a winner. Check that coin's alert history with /why.")
-        elif top_pct >= 200:
-            print(f" ({1 + top_pct / 100:.1f}x). Real, but short of a 1000x story.")
+            liq = row["liq"] or 0.0
+            exitable = "SELLABLE" if liq >= args.min_liquidity else "no pool — unrealizable"
+            print(f"  {(row['symbol'] or '?')[:12]:<12} {row['address'][:14]}… "
+                  f"{row['window_hours']:>5.0f}h {row['pct']:>+11.1f}% "
+                  f"${liq:>15,.0f}  {exitable}")
+        real = [r for r in best if (r["liq"] or 0.0) >= args.min_liquidity]
+        print(f"\n  Best plausible return: {best[0]['pct']:+.1f}%")
+        if real:
+            print(f"  Best return you could ACTUALLY have sold into: "
+                  f"{real[0]['pct']:+.1f}% "
+                  f"({1 + real[0]['pct'] / 100:.1f}x, "
+                  f"${real[0]['liq']:,.0f} liquidity)")
         else:
-            print(" — nothing it has pitched has ever multiplied meaningfully.")
+            print(f"  >> NONE of the top returns had ${args.min_liquidity:,.0f} of")
+            print("     liquidity to sell into. On paper wins you could not exit.")
 
     # ---- 3. Distribution ------------------------------------------------
     print("\n" + "=" * 72)
     print("\n3. DISTRIBUTION of every measured buy-side outcome\n")
     rows = q(con, f"""
-        SELECT o.window_hours, o.price_change_percent pct FROM outcomes o
+        SELECT o.window_hours, o.price_change_percent pct, o.liquidity_usd liq
+        FROM outcomes o
         WHERE o.price_change_percent IS NOT NULL
+          AND (? <= 0 OR ABS(o.price_change_percent) <= ?)
           AND EXISTS (SELECT 1 FROM alerts a WHERE a.token_id = o.token_id
-                      AND a.alert_type IN ({marks}))""", BUY)
+                      AND a.alert_type IN ({marks}))""", (ceiling, ceiling, *BUY))
     if rows:
         for lo, hi, label in BANDS:
             n = sum(1 for r in rows if lo <= r["pct"] < hi)
@@ -185,6 +223,16 @@ def main() -> int:
         wins = sum(1 for r in rows if r["pct"] > 0)
         print(f"\n  measured outcomes {len(rows)}, of which above water: {wins} "
               f"({100.0 * wins / len(rows):.1f}%)")
+        # The only win that pays is one you can sell. A +300% print against an
+        # empty pool is a screenshot, not money.
+        sellable = [r for r in rows
+                    if r["pct"] > 0 and (r["liq"] or 0.0) >= args.min_liquidity]
+        print(f"  ...and of which above water AND sellable "
+              f"(>= ${args.min_liquidity:,.0f} pool): {len(sellable)} "
+              f"({100.0 * len(sellable) / len(rows):.1f}%)")
+        big_sellable = [r for r in sellable if r["pct"] >= 200.0]
+        print(f"  ...sellable gains of +200% or better: {len(big_sellable)} "
+              f"({100.0 * len(big_sellable) / len(rows):.2f}%)")
         print("  NOTE: one coin can appear several times (one row per horizon).")
         by_window = {}
         for r in rows:

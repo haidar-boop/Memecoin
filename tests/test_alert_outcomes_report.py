@@ -27,7 +27,7 @@ def load():
     return module
 
 
-def build_db(tmp_path, coins, stale_days=None):
+def build_db(tmp_path, coins, stale_days=None, liquidity=5000.0):
     """A database shaped like the real one: alerts + snapshots + outcomes."""
     from meme_intelligence.core.models import TokenIdentity
     from meme_intelligence.database.storage import Storage
@@ -57,7 +57,7 @@ def build_db(tmp_path, coins, stale_days=None):
             " measured_at, price_usd, price_change_percent, liquidity_usd, survived,"
             " source) VALUES (?,?,?,?,?,?,?,?,?,?)",
             (snapshot_id, token_id, 720.0, at, now.isoformat(), 0.001, pct,
-             5000.0, 1, "snapshot"))
+             liquidity, 1, "snapshot"))
     if stale_days is not None:
         token = TokenIdentity(chain="solana", address="MintSTALE" + "y" * 30,
                               symbol="STALE")
@@ -77,21 +77,45 @@ def run(path, *extra):
     return result.stdout
 
 
-def test_a_recorded_moonshot_is_reported_as_found_not_missed(tmp_path):
-    """The distinction the whole report exists for. If a pitched coin did 35x and
-    the database knows, the answer is NOT 'improve detection'."""
+def test_a_realizable_moonshot_is_reported_as_sellable(tmp_path):
+    """The distinction the whole report exists for. A 35x that had a pool to sell
+    into is a real find; the same number against an empty pool is a screenshot."""
     path = build_db(tmp_path, [("MOON", 3400.0), ("DEAD", -95.0)])
     out = run(path)
     assert "+3400.0%" in out
-    assert "HAS found one" in out
+    assert "SELLABLE" in out
+    assert "could ACTUALLY have sold into: +3400.0%" in out
     assert "MOONSHOT" in out
+
+
+def test_an_unrealizable_gain_is_not_credited_as_a_win(tmp_path):
+    """The finding from the operator's real database: the headline returns sat on
+    zero liquidity. A gain you cannot exit is not a gain, and the report must not
+    present it as one."""
+    path = build_db(tmp_path, [("PAPER", 5000.0)], liquidity=0.0)
+    out = run(path)
+    assert "unrealizable" in out
+    assert "NONE of the top returns had" in out
+    assert "sellable gains of +200% or better: 0" in out
+
+
+def test_returns_above_the_plausibility_ceiling_are_excluded_as_artifacts(tmp_path):
+    """Real finding: rows recorded before the 2026-07-29 guard keep fabricated
+    values like +702,288,997%. Reporting those as achievements read as good news
+    off the operator's own database."""
+    path = build_db(tmp_path, [("BOGUS", 702_288_997.5), ("REAL", 150.0)])
+    out = run(path)
+    assert "exceed the plausibility ceiling" in out
+    assert "EXCLUDED" in out
+    assert "+702288997.5%" not in out and "+702,288,997.5%" not in out
+    assert "Best plausible return: +150.0%" in out
 
 
 def test_no_winner_reports_it_plainly(tmp_path):
     path = build_db(tmp_path, [("MEH", 12.0), ("DEAD", -95.0)])
     out = run(path)
-    assert "ever multiplied meaningfully" in out
-    assert "HAS found one" not in out
+    assert "Best plausible return: +12.0%" in out
+    assert "MOONSHOT" in out  # the band label always prints; the count is what matters
 
 
 def test_stale_unmeasured_alerts_are_called_out_as_the_finding(tmp_path):

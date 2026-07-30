@@ -2994,3 +2994,84 @@ VETO ones.
    match a fresh census (92.05% including the pool, 81.62% excluding it) while
    its top-1 matched to four significant figures. Most likely a different
    snapshot moment; unexplained, and recorded rather than guessed at.
+
+## 2026-07-30 (later still) — The outcomes report ran on real data. The answer is the median, not the maximum.
+
+`deploy/alert_outcomes_report.py` on the live database, 8,083 coins ever pitched:
+
+```
+distinct coins ever pitched   8083      outcome rows            153,336
+...of those, with a result    8060 (99.7%)   with a real %      153,333
+pitched coins with NO result    23   (all < 24h old; 0 stale)
+```
+
+**Measurement is healthy.** 99.7% coverage, zero stale unmeasured. So the
+"maybe it found a winner and never recorded it" hypothesis is dead — the premise
+of the operator's question holds, and this is a detection/strategy question.
+
+### The report's own headline was wrong, and that is the first finding
+
+It printed *"Best ever: +702,288,997.5% — that is a 7,022,891x. It HAS found
+one."* That is nonsense, and it read as good news off his real database.
+
+Two filters were missing, both now applied:
+
+1. **Plausibility.** `backtest.max_measurable_return_percent` is 100,000,000%
+   and the backtester correctly discards anything above it — but that guard only
+   landed 2026-07-29, so every row written before keeps its fabricated value
+   forever. 702,288,997% is 7x above the ceiling. The mind layer's labels are
+   worse: best "pump" +110,721,119,171% and best **"rug"** +8,357,704,780%.
+   Historical training data is poisoned, and no forward-looking guard cleans it.
+2. **Realizability.** Nearly every fantasy return sits on `liquidity_usd = 0`.
+   A gain with no pool to sell into is a screenshot, not money. The report now
+   labels each top return SELLABLE or "no pool — unrealizable", and reports
+   "above water AND sellable" separately from "above water".
+
+Both are now pinned by tests, including one that feeds the exact +702,288,997.5%
+value and asserts it is excluded.
+
+### What the honest numbers say
+
+```
+wiped out (<= -90%)        17,075  (71.8%)
+heavy loss (-90..-50)         730  ( 3.1%)
+loss / flat / small gain    2,795  (11.8%)
+good (+50..+200)            1,722  ( 7.2%)
+big (+200..+1000)             525  ( 2.2%)
+MOONSHOT (>= +1000)           234  ( 1.0%)
+above water: 4,198 of 23,788 (17.6%)
+
+by horizon:   1h median  -24.4%
+             24h median -100.0%
+            168h median -100.0%
+```
+
+**The median pitched coin is at -100% within 24 hours, and stays there.** 71.8%
+of all measured outcomes are wiped out. That is the answer to "why has it never
+found a million-dollar coin": it is not that the winner was missed, it is that
+roughly seven in ten of the things it pitches go to zero within a day.
+
+The mind layer agrees in its own words — at 168h it has 63 coins labelled `pump`
+against **37,423** labelled `rug`, a ratio of 1:594.
+
+The 234 "moonshot" rows must NOT be read as 234 wins until they are re-checked
+against the liquidity filter; on the evidence above most are expected to be the
+same artifact class.
+
+### What this changes
+
+The 1-hour freshness window is still the most likely single cause (it strips
+every buy-side alert type, momentum included, on any coin older than 60 minutes —
+exactly when a real runner becomes identifiable), but the distribution says
+something broader: the population being sampled is ~72% total losses. No gate
+tuned inside that population turns it into a profitable one.
+
+Two concrete pieces of work fall out, neither yet done:
+
+1. **Purge or re-measure the pre-guard outcome rows**, because the mind layer
+   trained on billion-percent returns and its learned weights are built on them.
+   This is a data-integrity job, not a detection one, and it outranks feature work.
+2. **Re-check the 234 moonshot + 525 big rows against liquidity at measurement**
+   to establish whether ANY realizable multi-x has ever been pitched. Until that
+   is known, neither "it has never found one" nor "it has" is established — only
+   that the headline figures cannot be trusted.
