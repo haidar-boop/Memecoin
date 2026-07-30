@@ -609,6 +609,7 @@ class TelegramCommandListener(BaseCollector):
             f"layers: wallet intel {onoff('wallet_intel')} | AI {onoff('ai')} | "
             f"learning {onoff('learning')} | mind veto {onoff('learning_veto')} | "
             f"pump.fun {onoff('pumpfun')} | jupiter probe {onoff('jupiter_probe')} | "
+            f"holder facts {onoff('onchain_security')} | "
             f"trading {trading}")
         db = snap.get("db") or {}
         lines.append(

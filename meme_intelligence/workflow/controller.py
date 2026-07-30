@@ -223,6 +223,7 @@ class ContinuousScanner:
         pumpportal_client=None,  # PumpPortalClient-compatible launch stream (Part 32.5)
         pumpfun_client=None,     # PumpFunFrontendClient-compatible traction rechecks
         wallet_service=None,     # WalletDataService (Part 17); metered credits
+        onchain_security_collector=None,  # OnChainSecurityCollector; bounded RPC per coin
         social_client=None,      # LunarCrushClient (Roadmap item 5); metered credits
         ai_service=None,         # AIJudgmentService (Part 23); costs API tokens
         learning_service=None,   # LearningService (mind layer, Section 10); off by default
@@ -338,12 +339,15 @@ class ContinuousScanner:
             "learning_veto": learning_service is not None and settings.learning.veto_enabled,
             "pumpfun": self._launch_monitor is not None,
             "jupiter_probe": jupiter_client is not None and settings.liquidity_probe.enabled,
+            "onchain_security": (onchain_security_collector is not None
+                                 and settings.onchain_security.enabled),
             "buy_button": settings.execution.buy_button_enabled,
             "trading_live": settings.execution.live_enabled,
         }
         self._pipeline = ResearchPipeline(settings, goplus_client,
                                           community_client=community_client,
                                           wallet_service=wallet_service,
+                                          onchain_security_collector=onchain_security_collector,
                                           social_client=social_client,
                                           ai_service=ai_service,
                                           jupiter_client=jupiter_client,
