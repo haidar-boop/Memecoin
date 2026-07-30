@@ -130,6 +130,23 @@ Needs `MEMEINTEL_HELIUS_API_KEY` for the concentration column —
 `getTokenLargestAccounts` is disabled on public RPC, so without a key the probe
 honestly reports "unknown" instead of a number.
 
+```bash
+cd ~/meme-intelligence
+source .venv/bin/activate
+python3 deploy/alert_outcomes_report.py
+```
+What the bot's alerts have actually DONE — coverage, the best returns ever
+recorded, the win/loss distribution, and whether unmeasured alerts are simply too
+recent or were never measured at all. Costs nothing, makes no network calls.
+
+Read it this way: **low coverage plus many stale unmeasured alerts** means the
+hit-rate question is a measurement problem, and no detection work can answer it.
+**A modest best-ever return plus few unmeasured** means it really has not found a
+big winner, and the 1-hour freshness window
+(`MEMEINTEL_ALERTS_OPPORTUNITY_MAX_AGE_HOURS`) is the first thing to question — it
+suppresses every buy-side alert on a coin older than 60 minutes, which is exactly
+when a real runner becomes identifiable.
+
 ## Sizing / cost check
 
 - Droplet: $6 USD/mo (~$8 CAD) — well under your $50 CAD budget, leaves
