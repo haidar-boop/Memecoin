@@ -57,6 +57,7 @@ from meme_intelligence.core.enums import MarketRegime, ResearchMode
 from meme_intelligence.core.errors import CollectorError, InsufficientDataError
 from meme_intelligence.core.logging_setup import get_logger
 from meme_intelligence.core.models import CommunityProfile, DexPair, SecurityProfile
+from meme_intelligence.learning.rug_engine import RugEngine
 
 
 @dataclass(frozen=True)
@@ -155,6 +156,12 @@ class ResearchPipeline:
         self._risk = RiskAnalyzer(settings.risk_weights)
         self._scoring = ScoringEngine(settings.weights, settings.bands, now_func=now_func)
         self._opportunity = OpportunityRanker(settings.opportunity_weights)
+        # Read-only rug verdict, used only to decide whether a metered wallet
+        # lookup is worth spending (operator 2026-07-30). Constructed the same
+        # way as everywhere else (controller/learning service) so the gate sees
+        # the identical verdict the alert path will. It never mutates rug state.
+        self._rug_engine = RugEngine(settings.rug_signal_weights, settings.rug_thresholds)
+        self._ai_settings = settings.ai
 
     async def analyze_pair(
         self,
@@ -289,7 +296,9 @@ class ResearchPipeline:
         wallet = None
         onchain_profile = derive_onchain_profile(pair, profile)
         if (self._wallet_service is not None and pair.chain in ("solana", "sol")
-                and (force_wallet_check or self._gate_allows(pair, security))):
+                and (force_wallet_check
+                     or (self._gate_allows(pair, security)
+                         and not self._rug_would_veto(profile)))):
             self._note_wallet_lookup(pair, forced=force_wallet_check)
             try:
                 data = await self._wallet_service.gather(pair.base_token)
@@ -573,6 +582,29 @@ class ResearchPipeline:
         if not forced:
             self._roll_wallet_budget_day()
             self._wallet_lookups_today += 1
+
+    def _rug_would_veto(self, profile) -> bool:
+        """Would the rug engine flag this coin on the facts we already have?
+
+        Operator request 2026-07-30: don't spend a metered wallet lookup on a
+        coin the rug engine has already condemned. This reads the SAME rug
+        verdict the scanner's buy-side veto uses (contract facts + the on-chain
+        holder-concentration / LP data merged into ``profile`` above), so a coin
+        that will lose all its buy-side alerts to the rug veto never gets a
+        wallet lookup spent on it either (Rule 11).
+
+        Zero-API-cost: the rug engine is pure computation over ``profile``. This
+        READS the rug verdict, it does not change how the rug engine thinks
+        (operator's no-touch zone). ``force_wallet_check`` bypasses it entirely,
+        so /check and holdings always still spend the lookup.
+        """
+        if profile is None:
+            return False
+        try:
+            rug = self._rug_engine.assess(security=profile)
+        except Exception:  # noqa: BLE001 — a spend gate must never break analysis
+            return False
+        return rug.score >= self._ai_settings.verify_skip_rug_score
 
     def _worth_wallet_lookup(self, pair: DexPair, security) -> bool:
         """Is this candidate worth spending metered wallet credits on?

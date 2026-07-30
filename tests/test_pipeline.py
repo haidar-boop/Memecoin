@@ -177,6 +177,39 @@ async def test_wallet_lookup_skipped_when_destructive():
     assert wallet.calls == []
 
 
+async def test_wallet_lookup_skipped_when_rug_engine_would_veto():
+    """Operator 2026-07-30: a metered wallet lookup is not spent on a coin the
+    rug engine has already condemned. This profile is small, fresh, tradeable,
+    and scores well above the 50 security floor (so the credit gate opens) —
+    but its single holder holds 40% (> the 30% concentration threshold), so the
+    rug engine flags it and the buy-side alert would be vetoed anyway. No spend."""
+    condemned = make_profile(top_holder_percent=40.0)
+    pipeline, wallet = gate_pipeline(profile=condemned)
+    result = await pipeline.analyze_pair(DexPair(**GOOD_PAIR_KWARGS))
+    assert result is not None                        # analysis still completes
+    assert result.security.overall_score >= 50.0     # gate would have opened
+    assert not result.security.is_destructive        # not an abort — a rug veto
+    assert wallet.calls == []                         # but no credits spent
+
+
+async def test_wallet_lookup_runs_when_rug_engine_clears_the_coin():
+    """The mirror of the veto test: a clean coin the rug engine does NOT flag
+    still gets its wallet lookup, so the rug gate only ever subtracts spends on
+    already-condemned coins and never starves a legitimate candidate."""
+    pipeline, wallet = gate_pipeline(profile=make_profile())  # top holder 3%
+    await pipeline.analyze_pair(DexPair(**GOOD_PAIR_KWARGS))
+    assert wallet.calls == [TOKEN.address]           # rug clean -> spend allowed
+
+
+async def test_force_wallet_check_bypasses_the_rug_gate():
+    """Manual /check and operator holdings still spend the lookup even on a
+    rug-flagged coin — the operator asked to see those wallets on purpose."""
+    condemned = make_profile(top_holder_percent=40.0)
+    pipeline, wallet = gate_pipeline(profile=condemned)
+    await pipeline.analyze_pair(DexPair(**GOOD_PAIR_KWARGS), force_wallet_check=True)
+    assert wallet.calls == [TOKEN.address]
+
+
 async def test_force_wallet_check_bypasses_the_gate():
     """Operator holdings and manual /check lookups always get wallet data —
     the deliberate, rare spend the gate must not block."""
@@ -274,7 +307,7 @@ def test_spend_bound_settings_validated():
     from meme_intelligence.config.settings import WalletIntelSettings
     from meme_intelligence.core.errors import ConfigurationError
 
-    assert WalletIntelSettings().credit_gate_max_lookups_per_day == 200
+    assert WalletIntelSettings().credit_gate_max_lookups_per_day == 300
     assert WalletIntelSettings().credit_gate_cooldown_minutes == 60.0
     with pytest.raises(ConfigurationError, match="max_lookups_per_day"):
         WalletIntelSettings(credit_gate_max_lookups_per_day=-1)

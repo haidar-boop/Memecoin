@@ -2009,3 +2009,41 @@ LearningStore methods (creator_of, coins_by_creator, blacklist_entry);
 nothing in the scan/alert/learning path changed. A coin the bot never
 watched reports "no deployer on record" rather than guessing (Rule 8).
 Suite: **954 passing** (950 + 4).
+
+## 2026-07-30 — Wallet lookups capped at 300/day AND rug-gated (operator request)
+
+Operator: "Capp it at 300 lookups a day but only coins that actually pass
+the rug pull thing." Two aligned changes to the metered wallet-intelligence
+spend, both plumbing — the rug engine's own thinking is untouched (operator's
+no-touch zone; this only READS its verdict).
+
+1. **The cap.** `WalletIntelSettings.credit_gate_max_lookups_per_day`
+   default 200 -> **300**. Still overridable per environment with
+   `MEMEINTEL_WALLET_CREDIT_GATE_MAX_LOOKUPS_PER_DAY`. The social gate's
+   own 200 default is a separate class and was left alone.
+
+2. **The rug gate.** New `ResearchPipeline._rug_would_veto(profile)`: before
+   spending a wallet lookup on a scanner candidate, the pipeline asks the
+   rug engine whether it would condemn the coin on the facts already in hand
+   (contract + on-chain holder-concentration / LP data merged into the
+   security profile). If `rug.score >= ai.verify_skip_rug_score` (10) — the
+   same line the scanner's deterministic buy-side veto uses — the lookup is
+   skipped, because that coin's buy-side alerts would be vetoed anyway so its
+   wallets are money spent for nothing (Rule 11). The engine is constructed
+   exactly as in controller/learning service (`settings.rug_signal_weights`,
+   `settings.rug_thresholds`), so the gate sees the identical verdict the
+   alert path will. Zero API cost — pure computation over the profile.
+
+   `force_wallet_check` (operator holdings, /check, plan/report) bypasses the
+   rug gate entirely, same as it bypasses the credit gate: deliberate spend is
+   never starved. Exceptions in the rug read fail OPEN (a spend gate must never
+   break analysis).
+
+The two together mean at most 300 wallet lookups/day, spent only on coins the
+rug engine did not condemn. Net effect for the operator: fewer wasted Helius
+credits, none of them on coins the bot was about to reject anyway. Continuous
+scanner wallet spend still requires `MEMEINTEL_WALLET_ENABLE_IN_MONITOR=true`
+(unchanged; off by default). Three new pipeline tests (rug-veto skips the
+lookup, rug-clean still spends, force bypasses); the 200->300 default assertion
+updated. Suite: full local run shows no new failures (pre-existing failures are
+all missing optional deps — faiss/anthropic/solders — absent in this sandbox).

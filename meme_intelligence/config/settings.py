@@ -907,7 +907,14 @@ class WalletIntelSettings:
     # plan/report) bypass both — operator safety is never starved by a
     # budget — but still stamp the cooldown so a gated lookup right after a
     # forced one is not re-spent.
-    credit_gate_max_lookups_per_day: int = 200
+    #
+    # 300/day (operator, 2026-07-30). Paired with the pipeline's rug gate: a
+    # lookup is now spent only on a coin that survives the rug engine's verdict
+    # (see ResearchPipeline._rug_would_veto), so the cap and the rug screen
+    # together mean at most 300 lookups/day AND only on coins the rug engine
+    # did not condemn. Override per environment with
+    # MEMEINTEL_WALLET_CREDIT_GATE_MAX_LOOKUPS_PER_DAY.
+    credit_gate_max_lookups_per_day: int = 300
     credit_gate_cooldown_minutes: float = 60.0
 
     def __post_init__(self) -> None:
