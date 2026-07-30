@@ -221,6 +221,18 @@ def build_onchain_security(settings: Settings):
     # override it rather than relying on a setdefault that can never fire.
     collector_kwargs = _shared_collector_kwargs(settings)
     collector_kwargs["timeout_seconds"] = settings.onchain_security.timeout_seconds
+    # Say so, at INFO, on the way up. Without this the only way to tell the
+    # layer was live was to wait for a coin to trip it: `systemctl is-active`
+    # says the process is up, and a journal grep for "onchain" matches the
+    # unrelated OnChainAnalyzer ("meme_intelligence.analyzers.onchain"), which
+    # reads as confirmation and is not (found in the field, 2026-07-30).
+    logger.info(
+        "on-chain security facts ENABLED: holder concentration %s, LP burn "
+        "Raydium-v4-only, budget %d/day, cooldown %.0fm, custody limit %.0f%%",
+        "via Helius" if settings.helius_api_key else "UNAVAILABLE (no Helius key)",
+        settings.onchain_security.max_lookups_per_day,
+        settings.onchain_security.cooldown_minutes,
+        settings.onchain_security.max_custody_share_for_concentration)
     return OnChainSecurityCollector(
         settings.onchain_security,
         api_key=settings.helius_api_key,

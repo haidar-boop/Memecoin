@@ -643,6 +643,7 @@ class TelegramCommandListener(BaseCollector):
             f"layers: wallet intel {onoff('wallet_intel')} | AI {onoff('ai')} | "
             f"learning {onoff('learning')} | mind veto {onoff('learning_veto')} | "
             f"pump.fun {pumpfun} | jupiter probe {onoff('jupiter_probe')} | "
+            f"holder facts {onoff('onchain_security')} | "
             f"trading {trading}")
         # "The process is up" and "alerts are reaching me" are different
         # questions, and only the second one matters to the operator.

@@ -339,3 +339,51 @@ async def test_a_known_bad_coin_is_blocked_and_a_known_good_one_still_passes():
     assert bad.security.overall_score < gate, "the damning coin must be blocked"
     assert good.security.overall_score >= gate, "the healthy coin must still pass"
     assert good.security.overall_score - bad.security.overall_score > 20.0
+
+
+# --------------------------------------------------------------------------
+# Being able to TELL whether it is on (Rule 13)
+# --------------------------------------------------------------------------
+
+def test_status_reports_the_layer_so_the_operator_can_verify_it():
+    """Field failure 2026-07-30: after enabling it, there was no way to confirm
+    from the phone or the journal. `systemctl is-active` only says the process is
+    up, and a journal grep for "onchain" matches the unrelated OnChainAnalyzer
+    logger (meme_intelligence.analyzers.onchain), which reads as confirmation and
+    is not. /status must name this layer like every other one."""
+    import inspect
+
+    from meme_intelligence.alerts import telegram_commands
+
+    source = inspect.getsource(telegram_commands)
+    assert "onchain_security" in source, "/status must render the layer's state"
+    assert "holder facts" in source
+
+
+def test_the_controller_publishes_the_layer_state_status_renders():
+    """The key /status reads must exist in the scanner's layer dict, or the line
+    silently renders 'off' forever."""
+    import inspect
+
+    from meme_intelligence.workflow import controller
+
+    source = inspect.getsource(controller)
+    assert '"onchain_security"' in source
+
+
+def test_enabling_the_layer_logs_it_on_the_way_up(caplog):
+    """A layer that changes which coins reach the phone must announce itself."""
+    import logging
+
+    from meme_intelligence.__main__ import build_onchain_security
+
+    settings = dc.replace(
+        Settings(), onchain_security=OnChainSecuritySettings(enabled=True))
+    with caplog.at_level(logging.INFO):
+        collector = build_onchain_security(settings)
+    assert collector is not None
+    assert any("on-chain security facts ENABLED" in r.message for r in caplog.records)
+    # No Helius key in this environment, so it must SAY concentration is off
+    # rather than implying the whole layer works.
+    assert any("UNAVAILABLE (no Helius key)" in (r.getMessage() or "")
+               for r in caplog.records)
