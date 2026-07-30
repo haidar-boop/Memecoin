@@ -48,7 +48,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from meme_intelligence.__main__ import build_dexscreener
 from meme_intelligence.analyzers.security_analyzer import SecurityAnalyzer
 from meme_intelligence.collectors.onchain_security import OnChainSecurityCollector
-from meme_intelligence.config.settings import Settings
+from meme_intelligence.config.settings import Settings, get_settings
 from meme_intelligence.core.cache import TTLCache
 from meme_intelligence.core.errors import MemeIntelError
 from meme_intelligence.core.models import SecurityProfile, TokenIdentity
@@ -156,7 +156,15 @@ async def main() -> int:
         print(f"No database found at {db}. Run from the repo root, or pass --db.")
         return 1
 
-    settings = Settings.from_env()
+    # get_settings(), NOT Settings.from_env(): only the former calls
+    # load_dotenv() first. Using from_env() made the probe blind to the
+    # operator's .env, so it reported "no MEMEINTEL_HELIUS_API_KEY set" on a
+    # droplet where the key was configured, and printed "facts filled in 0"
+    # across 25 real coins — a measurement that read as "this layer adds
+    # nothing" when it had simply never authenticated (found in the field,
+    # 2026-07-30). .env is resolved relative to the working directory, so this
+    # must be run from the repo root.
+    settings = get_settings()
     gate = settings.alerts.security
     analyzer = SecurityAnalyzer(settings.security, settings.security_weights)
 

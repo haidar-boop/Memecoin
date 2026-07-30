@@ -2856,3 +2856,36 @@ by an executed reproduction and were confirmed by reading the code. Suite 1085 -
 
 **Standing conclusion: do not enable this layer yet.** The measurement is the
 next step, not the switch, and the veto question needs the operator's answer.
+
+### Field failure, same day: the probe measured nothing and said so convincingly
+
+The operator ran `deploy/onchain_facts_probe.py --limit 25` on the droplet. It
+printed `!! no MEMEINTEL_HELIUS_API_KEY set`, then `facts filled in 0`,
+`concentration unknown 25`, `LP status unknown 25`, and closed with "the layer is
+not adding anything and enabling it would be pointless."
+
+**All of that was wrong, and his key was configured the whole time.** The probe
+called `Settings.from_env()`, which reads `os.environ` only. `load_dotenv()` is
+called by `get_settings()` — and *only* by `get_settings()`. So the probe ran
+unauthenticated, every census refused up front by design (the public endpoint
+disables `getTokenLargestAccounts`), and the refusal was then summarised as
+evidence about the data.
+
+This is the `security_cap_impact.py` trap wearing different clothes: a
+measurement tool that reports a confident conclusion about a mechanism it never
+actually exercised. That one printed "0% blocked" after its setting was deleted;
+this one printed "adds nothing" after failing to authenticate. Both read as
+clearance — one to ship, one to abandon.
+
+Fixed to use `get_settings()`, and `tests/test_onchain_facts_probe.py` now pins
+it: the probe must not contain `Settings.from_env()`. The same file also guards
+the read-only database access, the pool-address wiring, and hostile stored JSON.
+
+Two things his run DID establish, on 25 real alerted coins: the security scores
+were 82.2 / 93.3 / 100.0 with nothing below the 80 gate — the "security is a
+constant that passes everything" diagnosis, confirmed on live data — and the
+probe's own plumbing works end to end against the live database.
+
+Note for anyone writing the next deploy script: `Settings.from_env()` does not
+load `.env`. Use `get_settings()`, and run from the repo root, since the `.env`
+path is resolved relative to the working directory.
