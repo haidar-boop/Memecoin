@@ -211,3 +211,69 @@ def test_thresholds_are_configurable_from_the_environment():
     assert assess_rug_in_progress(
         readings(50_000.0, 9_000.0, 8_000.0, 7_000.0, route=True),
         strict).action == EXIT
+
+
+# ---- 2026-07-31 adversarial-review fixes ----
+
+
+def test_one_glitched_high_tick_cannot_poison_the_peak():
+    """CONFIRMED review finding: [50k, 200k(glitch), 50k, 50k] used to EXIT —
+    the two 'confirmations' were ordinary healthy readings measured against a
+    peak set by ONE bogus tick. An uncorroborated peak must not count."""
+    verdict = assess_rug_in_progress(
+        readings(50_000.0, 200_000.0, 50_000.0, 50_000.0, route=True), SETTINGS)
+    assert verdict.action == HOLD
+    assert verdict.peak_liquidity_usd == 50_000.0   # the glitch never became peak
+
+
+def test_a_genuine_pump_then_drain_still_exits():
+    """The corroboration rule must not blind the engine to a real rise: two
+    readings near the top corroborate each other, so the drop is measured
+    from the height the coin actually reached."""
+    verdict = assess_rug_in_progress(
+        readings(50_000.0, 200_000.0, 195_000.0, 8_000.0, 8_000.0, route=True),
+        SETTINGS)
+    assert verdict.action == EXIT
+    assert verdict.peak_liquidity_usd == 200_000.0
+
+
+def test_a_flash_spike_then_real_drain_still_exits_from_the_true_base():
+    """A spike nobody corroborates is ignored, but a genuine drain from the
+    REAL base still clears the threshold on its own."""
+    verdict = assess_rug_in_progress(
+        readings(50_000.0, 200_000.0, 50_000.0, 8_000.0, 8_000.0, route=True),
+        SETTINGS)
+    assert verdict.action == EXIT
+    assert verdict.peak_liquidity_usd == 50_000.0
+
+
+def test_stale_route_gone_evidence_decays_to_unknown():
+    """CONFIRMED review finding: one transient route-False reading used to
+    block every future auto-sell for the entire window. Older than
+    route_evidence_max_age_seconds it must decay to unknown, so a confirmed
+    drain exits again."""
+    old_false = [LiquidityReading(at=T0, liquidity_usd=50_000.0,
+                                  sell_route_ok=False)]
+    fresh = readings(50_000.0, 9_000.0, 8_000.0,
+                     start=T0 + timedelta(seconds=600), step_seconds=30)
+    verdict = assess_rug_in_progress(old_false + fresh, SETTINGS)
+    assert verdict.action == EXIT                    # stale False no longer vetoes
+    assert verdict.sell_route_ok is None
+
+
+def test_fresh_route_gone_still_blocks_the_exit():
+    """The decay must not weaken the live asymmetry: a RECENT route-False
+    still turns a confirmed drain into a warning, never a futile sell."""
+    trail = readings(50_000.0, 9_000.0, 8_000.0, step_seconds=30)
+    trail[-1] = LiquidityReading(at=trail[-1].at, liquidity_usd=8_000.0,
+                                 sell_route_ok=False)
+    verdict = assess_rug_in_progress(trail, SETTINGS)
+    assert verdict.action == WARN
+    assert verdict.sell_route_ok is False
+
+
+def test_route_evidence_age_is_configurable_and_validated():
+    assert RugWatchSettings().route_evidence_max_age_seconds == 120.0
+    assert RugWatchSettings().poll_seconds == 30.0   # raised from the old 15
+    with pytest.raises(ConfigurationError, match="route_evidence_max_age_seconds"):
+        RugWatchSettings(route_evidence_max_age_seconds=0.0)

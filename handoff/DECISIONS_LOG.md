@@ -2217,3 +2217,44 @@ branch's fix is cheap to port next.
 
 Suite: 66 pre-existing sandbox failures (faiss/anthropic) unchanged; ~50 new
 tests all green.
+
+## 2026-07-31 — Rug guard: 4 CONFIRMED review criticals fixed before enabling
+
+The operator-requested adversarial review (2 lenses + refute-by-default
+verifiers, every finding reproduced against the real code) confirmed four
+criticals in the ported guard — all latent in the "proven" original:
+
+1. **Cache aliasing halved the confirmation rule.** poll_seconds default 15
+   < the 30s HTTP cache TTL, so two consecutive "readings" could be one
+   cached response — one glitched payload liquidated a healthy position.
+   Fixed: default 30 AND the guard clamps its live cadence to
+   http.cache_ttl_seconds at runtime (config cannot re-open the hole).
+2. **Peak poisoning.** peak=max(all known readings): one bogus HIGH tick
+   ([50k, 200k-glitch, 50k, 50k]) made ordinary readings read as a 75%
+   confirmed collapse → EXIT. Fixed: interior-spike discard — a reading
+   above 2x everything BOTH before and after it never becomes the peak.
+   A high FIRST reading is kept (the one-healthy-reading-then-drain rug
+   still exits); a genuine pump survives via its second high reading.
+3. **Pool-identity instability.** max(pairs, key=liquidity or 0) fabricated
+   collapses when the main pool's liquidity field was null for one tick
+   (side-pool $2k became a MEASURED reading) or when provider failover
+   switched to a venue without the deepest pool. Fixed: the guard locks
+   onto one pool address per mint and measures THAT pool; a response
+   without it (or with it unreadable) is unknown, never a number. The
+   confirmed-empty measured-zero path is unchanged.
+4. **Stale route evidence + false promise.** One transient route-gone
+   probe blocked every future auto-sell for the whole 240-reading window
+   while the armed WARN kept promising "will auto-sell". Fixed:
+   route_evidence_max_age_seconds (default 120) decays old False to
+   unknown; and a CONFIRMED drain blocked by route-gone now escalates to
+   the CRITICAL rug_watch_exit alert ("automated exit blocked — /dump NOW
+   anyway") instead of a HIGH warning, without marking the coin exited so
+   a returning route still auto-sells.
+
+Also from the review (minor): the executor is now built only when the
+guard or Telegram commands actually need it (an unconditional build armed
+a live RPC session + "LIVE TRADING ARMED" banner in a process where
+nothing could trade); .env.example gained the MIN_READINGS and
+ROUTE_EVIDENCE_MAX_AGE lines. 11 new tests pin all of it (glitch-tick,
+pump-vs-spike, pool-vanish, failover, clamp, route-decay/escalation).
+Suite: baseline 66 sandbox failures unchanged, everything else green.

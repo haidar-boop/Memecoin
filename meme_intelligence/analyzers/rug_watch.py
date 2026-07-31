@@ -38,9 +38,21 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from meme_intelligence.config.settings import RugWatchSettings
+
+# An INTERIOR reading more than this factor above everything both before AND
+# after it is a spike — one glitched HIGH tick (a mis-scaled provider figure),
+# not a level the pool ever held. Left in, it poisons the peak so that
+# perfectly ordinary readings look like a confirmed collapse — the exact
+# single-tick liquidation this engine promises cannot happen (2026-07-31
+# adversarial review finding, reproduced). Only interior values can be
+# spikes: a high FIRST reading is the honest baseline (the classic
+# one-healthy-reading-then-drain rug must still exit), and a high LAST
+# reading is the current level (drop from it is zero anyway). A genuine pump
+# survives because its other high readings sit before or after each of them.
+_PEAK_SPIKE_FACTOR = 2.0
 
 # Verdict actions, in ascending order of urgency.
 HOLD = "hold"
@@ -106,14 +118,28 @@ def assess_rug_in_progress(
 ) -> RugWatchVerdict:
     """Decide whether a held coin is rugging right now.
 
-    ``readings`` are ordered oldest-first. The peak is taken over every
-    *known* reading, so a coin that grew before draining is measured against
-    the size it actually reached, not its entry size.
+    ``readings`` are ordered oldest-first. The peak is taken over the *known*
+    readings minus interior spikes (see ``_PEAK_SPIKE_FACTOR``): a coin that
+    genuinely grew before draining is measured against the size it actually
+    reached, while a single glitched high tick between ordinary readings
+    cannot poison the baseline. A high first reading is kept — the classic
+    one-healthy-reading-then-drain rug must still exit.
+
+    Sell-route evidence expires: a ``False`` probe older than
+    ``route_evidence_max_age_seconds`` (measured against the newest reading)
+    decays to unknown. Without that, one transient "no route" reading anywhere
+    in the window silently blocked every future auto-sell while the armed
+    warning kept promising one (2026-07-31 adversarial review finding).
     """
     known = [r for r in readings if r.liquidity_known]
-    latest_route = next(
-        (r.sell_route_ok for r in reversed(readings) if r.sell_route_ok is not None),
-        None)
+    latest_route = None
+    if readings:
+        route_cutoff = readings[-1].at - timedelta(
+            seconds=settings.route_evidence_max_age_seconds)
+        latest_route = next(
+            (r.sell_route_ok for r in reversed(readings)
+             if r.sell_route_ok is not None and r.at >= route_cutoff),
+            None)
 
     # Not enough measured history to say anything. A verdict built on one
     # reading has no baseline to fall from, and guessing here sells positions.
@@ -127,7 +153,26 @@ def assess_rug_in_progress(
                                latest_liquidity_usd=(known[-1].liquidity_usd
                                                      if known else None))
 
-    peak = max(r.liquidity_usd for r in known)
+    values = [r.liquidity_usd for r in known]
+    # Peak over the values that are NOT interior spikes (see
+    # _PEAK_SPIKE_FACTOR). First and last values are never spikes, so the
+    # kept list is never empty.
+    prefix_max: list[float | None] = []
+    running: float | None = None
+    for v in values:
+        prefix_max.append(running)
+        running = v if running is None or v > running else running
+    suffix_max: list[float | None] = [None] * len(values)
+    running = None
+    for i in range(len(values) - 1, -1, -1):
+        suffix_max[i] = running
+        v = values[i]
+        running = v if running is None or v > running else running
+    peak = max(
+        v for i, v in enumerate(values)
+        if not (prefix_max[i] is not None and suffix_max[i] is not None
+                and prefix_max[i] < v / _PEAK_SPIKE_FACTOR
+                and suffix_max[i] < v / _PEAK_SPIKE_FACTOR))
     latest = known[-1].liquidity_usd
     drop = _drop_percent(peak, latest)
 

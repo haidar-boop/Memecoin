@@ -79,7 +79,30 @@ class HoldingsGuard:
         self._now = now_func
         self._sleep = sleep_func
         self._logger = get_logger("workflow.holdings_guard")
+        # Polling faster than the HTTP cache TTL re-reads the SAME cached
+        # answer, and two identical cached reads would count as two
+        # "consecutive confirmations" of one measurement — the single-glitch
+        # liquidation the confirmation rule exists to prevent (2026-07-31
+        # review, confirmed with a reproduction). Clamp, don't trust config.
+        self._poll_seconds = max(self._s.poll_seconds,
+                                 settings.http.cache_ttl_seconds)
+        if self._poll_seconds > self._s.poll_seconds:
+            self._logger.warning(
+                "rug_watch poll_seconds %.0fs is below the HTTP cache TTL "
+                "%.0fs — polling at %.0fs so consecutive readings stay "
+                "independent measurements",
+                self._s.poll_seconds, settings.http.cache_ttl_seconds,
+                self._poll_seconds)
         self._readings: dict[str, list[LiquidityReading]] = {}
+        # The pool each mint is measured against. Reading whichever pool
+        # happens to be deepest in each response fabricates a collapse when
+        # the main pool's liquidity field is missing for one tick (max() then
+        # picks a $2k side pool as a MEASURED value) or when provider failover
+        # switches to a source that does not carry the deepest pool
+        # (2026-07-31 review, confirmed with reproductions). Locking onto one
+        # pool address keeps every reading a measurement of the SAME thing;
+        # a response without that pool degrades to unknown, never to a number.
+        self._tracked_pool: dict[str, str] = {}
         # Addresses already acted on. Recorded BEFORE the sell is attempted so
         # a crash or a restart mid-trade cannot produce a second sale.
         self._exited: set[str] = set()
@@ -98,7 +121,7 @@ class HoldingsGuard:
             self._logger.info(
                 "holdings rug guard started (poll %.0fs, exit at -%.0f%% liquidity "
                 "confirmed %dx, auto-sell %s)",
-                self._s.poll_seconds, self._s.exit_drop_percent,
+                self._poll_seconds, self._s.exit_drop_percent,
                 self._s.min_confirmations, "ARMED" if self._s.auto_sell else "off")
 
     async def stop(self) -> None:
@@ -145,7 +168,7 @@ class HoldingsGuard:
                 raise
             except Exception as exc:  # noqa: BLE001 — the guard must outlive any error
                 self._logger.error("holdings guard cycle failed: %s", exc)
-            await self._sleep_unless_stopping(self._s.poll_seconds)
+            await self._sleep_unless_stopping(self._poll_seconds)
 
     async def _sleep_unless_stopping(self, seconds: float) -> None:
         if self._stop.is_set():
@@ -212,8 +235,7 @@ class HoldingsGuard:
             pairs = await self._market.get_token_pairs_confirmed(
                 token.address, chain=token.chain)
             if pairs:
-                best = max(pairs, key=lambda p: p.liquidity_usd or 0.0)
-                liquidity = best.liquidity_usd
+                liquidity = self._same_pool_liquidity(token.address, pairs)
             else:
                 # Every provider agrees there is no tradable pair left. That IS
                 # a measured zero, not a failed read.
@@ -243,9 +265,62 @@ class HoldingsGuard:
         return LiquidityReading(at=self._now(), liquidity_usd=liquidity,
                                 sell_route_ok=sell_route)
 
+    def _same_pool_liquidity(self, mint: str, pairs) -> float | None:
+        """Liquidity of the ONE pool this mint is measured against.
+
+        Locks onto the deepest pool with a KNOWN liquidity on first sight and
+        measures that same pool ever after. A response missing the tracked
+        pool (provider failover, delisting glitch) or carrying it without a
+        readable liquidity figure is UNKNOWN, never a substitute number — the
+        drop the engine measures must mean "this pool drained", not "a
+        different/smaller pool was measured this tick" (2026-07-31 review).
+        A genuinely drained-to-nothing pool still reads as a measured zero
+        via the confirmed-empty branch in ``_read``.
+        """
+        import math as _math
+
+        def known(value) -> bool:
+            return (value is not None and _math.isfinite(value)
+                    and value >= 0.0)
+
+        tracked = self._tracked_pool.get(mint)
+        if tracked is not None:
+            match = next((p for p in pairs if p.pair_address == tracked), None)
+            if match is None:
+                self._logger.info(
+                    "tracked pool %s for %s absent from this response "
+                    "(provider/pool-set change) — reading unknown", tracked, mint)
+                return None
+            return match.liquidity_usd if known(match.liquidity_usd) else None
+
+        candidates = [p for p in pairs if known(p.liquidity_usd)]
+        if not candidates:
+            return None  # pools exist but none has a readable figure
+        best = max(candidates, key=lambda p: p.liquidity_usd)
+        self._tracked_pool[mint] = best.pair_address
+        return best.liquidity_usd
+
     # ---- actions ----
 
     async def _on_warn(self, token: TokenIdentity, verdict) -> None:
+        # A CONFIRMED collapse that stayed a WARN only because the sell route
+        # read as gone is not a "watching" situation — it is the worst case:
+        # the drain is real and the automated exit is blocked. Telling the
+        # operator "will auto-sell if confirmed" here was a false promise
+        # (2026-07-31 review). Escalate to the CRITICAL exit type instead;
+        # NOT marked exited, so if the route comes back while the drain still
+        # confirms, the real auto-sell still fires. The notifier's cooldown
+        # (keyed type+priority) keeps this from spamming every poll.
+        if (verdict.sell_route_ok is False
+                and verdict.confirmations >= self._s.min_confirmations):
+            await self._alert(
+                token, AlertPriority.CRITICAL, "rug_watch_exit",
+                f"RUG IN PROGRESS: {token.symbol or token.address[:8]} "
+                f"— sell route gone",
+                verdict.reasons + (
+                    "Confirmed drain but NO sell route found — the automated "
+                    "exit is blocked. Try /dump NOW anyway.",))
+            return
         await self._alert(
             token, AlertPriority.HIGH, "rug_watch_warning",
             f"Position warning: {token.symbol or token.address[:8]}",

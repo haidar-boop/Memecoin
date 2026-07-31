@@ -1753,7 +1753,20 @@ class RugWatchSettings:
 
     enabled: bool = False          # run the watch loop at all
     auto_sell: bool = False        # let it SELL without asking (needs enabled too)
-    poll_seconds: float = 15.0     # how often each held coin is re-read
+    # 30, not the original 15 (2026-07-31 adversarial review, CONFIRMED with a
+    # reproduction): market reads are served from a 30s HTTP cache, so polling
+    # faster re-reads the SAME cached answer — and two identical cached reads
+    # counted as two "consecutive confirmations" of ONE measurement, letting a
+    # single glitched response liquidate a healthy position. The guard also
+    # clamps its live cadence to http.cache_ttl_seconds at runtime, so even a
+    # hand-lowered value cannot re-open the hole.
+    poll_seconds: float = 30.0     # how often each held coin is re-read
+    # A "sell route gone" probe result this much older than the newest reading
+    # decays to unknown instead of blocking auto-sells forever (2026-07-31
+    # review: one transient no-route reading otherwise silently disabled the
+    # armed guard for the rest of the window while its warnings promised it
+    # would sell).
+    route_evidence_max_age_seconds: float = 120.0
     exit_drop_percent: float = 55.0   # fall from peak liquidity that triggers exit
     warn_drop_percent: float = 30.0   # fall that is worth telling the operator about
     min_confirmations: int = 2     # consecutive readings that must agree before selling
@@ -1775,6 +1788,11 @@ class RugWatchSettings:
         if not math.isfinite(self.poll_seconds) or self.poll_seconds <= 0:
             raise ConfigurationError(
                 f"rug_watch poll_seconds must be positive, got {self.poll_seconds}")
+        if (not math.isfinite(self.route_evidence_max_age_seconds)
+                or self.route_evidence_max_age_seconds <= 0):
+            raise ConfigurationError(
+                "rug_watch route_evidence_max_age_seconds must be positive, "
+                f"got {self.route_evidence_max_age_seconds}")
         for name in ("min_confirmations", "min_readings", "max_positions"):
             value = getattr(self, name)
             if value <= 0:

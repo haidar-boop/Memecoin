@@ -1179,13 +1179,21 @@ async def _cmd_monitor(args, settings) -> int:
             market_service = build_market_service(settings, dex, gecko)
             # Built once and shared: the Telegram listener needs it for
             # /buy//dump, and the holdings rug guard needs it to auto-exit a
-            # draining position. Without a trading key this is the DryRun
-            # executor, so building it unconditionally costs nothing.
-            executor, exec_rpc = build_executor(
-                settings, storage, jupiter_client,
-                helius_rate_limiter=helius_rate_limiter)
-            if exec_rpc is not None:
-                stack.push_async_callback(exec_rpc.close)
+            # draining position. Built ONLY when one of those consumers is
+            # actually on — an unconditional build armed a live RPC session
+            # and printed the "LIVE TRADING ARMED" banner in a process where
+            # nothing could ever trade (2026-07-31 review finding).
+            executor = exec_rpc = None
+            needs_executor = (
+                settings.rug_watch.enabled
+                or (settings.telegram_commands.enabled
+                    and settings.telegram_bot_token and settings.telegram_chat_id))
+            if needs_executor:
+                executor, exec_rpc = build_executor(
+                    settings, storage, jupiter_client,
+                    helius_rate_limiter=helius_rate_limiter)
+                if exec_rpc is not None:
+                    stack.push_async_callback(exec_rpc.close)
             holdings_guard = None
             scanner = ContinuousScanner(
                 settings, storage, notifier,
