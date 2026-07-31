@@ -247,8 +247,12 @@ async def test_no_holdings_is_a_quiet_no_op():
 async def test_more_positions_than_the_cap_are_reported_not_silently_dropped(caplog):
     import logging
 
+    # Derived from the setting, so raising max_positions never silently
+    # un-pins this test (it did when the cap went 20 -> 30 on the 2 vCPU
+    # upsize: 25 holdings stopped exceeding the cap and the warning vanished).
+    over = make_settings().rug_watch.max_positions + 5
     holdings = [{"address": f"Mint{i}", "chain": "solana", "symbol": f"M{i}"}
-                for i in range(25)]
+                for i in range(over)]
     guard = make_guard([50_000.0], holdings=holdings)
     with caplog.at_level(logging.WARNING,
                          logger="meme_intelligence.workflow.holdings_guard"):

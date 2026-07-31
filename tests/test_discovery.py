@@ -167,7 +167,7 @@ async def test_empty_page_stops_pagination():
 
 
 def test_discovery_pages_setting_defaults_and_validates():
-    assert WorkflowSettings().discovery_pages == 3
+    assert WorkflowSettings().discovery_pages == 4
     s = Settings.from_env(env={"MEMEINTEL_WORKFLOW_DISCOVERY_PAGES": "1"})
     assert s.workflow.discovery_pages == 1
     with pytest.raises(ConfigurationError, match="discovery_pages"):

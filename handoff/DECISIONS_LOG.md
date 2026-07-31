@@ -2418,3 +2418,32 @@ by the reviewer against the real modules):
 3 new tests (provenance recorded so no self-confirmation; a 404 still allows
 archiving; a real outage still blocks it). Suite: 66 pre-existing sandbox
 failures unchanged.
+
+## 2026-07-31 — Throughput raised for the 2 vCPU / 2 GB droplet
+
+`nproc` on the box confirmed 2 CPUs (the hostname still reads
+`1vcpu-1gb` — DigitalOcean does not rename a droplet on resize, so the
+hostname is not evidence either way; RAM and nproc are). With the memory cap
+already raised, the settings tuned down for the old 1 vCPU box were lifted:
+
+| setting | was | now | why |
+|---|---|---|---|
+| `workflow.top_candidates` | 8 | 12 | per-cycle analysis budget; since the slot-starvation fix it is spent only on NOT-already-analyzed coins, so this directly widens how many genuinely new coins get screened |
+| `workflow.discovery_pages` | 3 | 4 | ~80 newest pools/network/cycle; +1 free GeckoTerminal call per network per cycle (25/min budget) |
+| `workflow.watchlist_review_limit` | 10 | 15 | the whole watchlist rotates faster, and protective alerts ride on those rechecks |
+| `rug_watch.max_positions` | 20 | 30 | per-poll work bound, was explicitly "1 vCPU" |
+
+No change to metered spend: the wallet-intelligence cap stays 300 lookups/day
+and rug-gated; the added calls are all free-tier market data.
+
+Two tests were pinned to the OLD constants and would have passed vacuously
+after the raise — both now derive from the settings instead:
+`test_already_seen_candidates_do_not_consume_the_analysis_budget` (built
+exactly 10 pools against a budget of 8) and
+`test_more_positions_than_the_cap_are_reported_not_silently_dropped` (25
+holdings stopped exceeding the cap once it hit 30, so the warning it asserts
+simply stopped firing). Recorded because it is the second time this session a
+test passed for the wrong reason — derive bounds from config, never restate
+them.
+
+Suite: 66 pre-existing sandbox failures unchanged.

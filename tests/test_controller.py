@@ -1851,11 +1851,13 @@ async def test_credit_gate_skips_wallet_lookup_on_stale_candidate():
 
 
 async def test_already_seen_candidates_do_not_consume_the_analysis_budget():
-    """Ten discoverable pools, a budget of 8. Cycle 1 analyzes 8; cycle 2 must
-    analyze the remaining 2 rather than re-skipping the same top-ranked 8 and
-    analyzing nothing."""
+    """Two more discoverable pools than the per-cycle budget. Cycle 1 spends
+    the budget; cycle 2 must analyze the remaining 2 rather than re-skipping
+    the same top-ranked ones and analyzing nothing. Reads the budget from
+    settings so raising it never silently un-pins this regression."""
     pools, profiles = [], {}
-    for i in range(10):
+    budget = SETTINGS.workflow.top_candidates
+    for i in range(budget + 2):
         address = f"TokenBudget{i:02d}"
         # Descending liquidity keeps discovery's ranking deterministic, so the
         # same 8 win the ranking every cycle — the exact starvation shape.
@@ -1868,9 +1870,9 @@ async def test_already_seen_candidates_do_not_consume_the_analysis_budget():
         scanner, _ = make_scanner(storage, pools, profiles)
         history = await scanner.run(max_cycles=2)
 
-    assert history[0].analyzed == 8          # budget spent on 8 unseen coins
+    assert history[0].analyzed == budget     # budget spent on unseen coins
     assert history[1].analyzed == 2          # the rest — not 0
-    assert history[0].analyzed + history[1].analyzed == 10   # all pools reached
+    assert history[0].analyzed + history[1].analyzed == budget + 2
 
 
 async def test_scanner_recheck_does_not_archive_on_one_providers_silence():

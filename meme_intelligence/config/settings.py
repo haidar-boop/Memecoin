@@ -822,7 +822,12 @@ class WorkflowSettings:
     # after "Never analyzed" on a coin that went big): 60 pools competing for
     # 5 slots would sharpen selection without widening coverage, and coverage
     # was the complaint. Worst case is 3 extra full analyses per cycle.
-    top_candidates: int = 8           # discovery candidates to deep-analyze per run
+    # 12 since the 2026-07-31 upsize to 2 vCPU / 2 GB (was 8, and 5 before
+    # that on the 1 vCPU box). This is the per-cycle analysis budget, and
+    # since the slot-starvation fix it is spent only on coins NOT already
+    # analyzed — so raising it directly widens how many genuinely new coins
+    # get screened each cycle, which is where the operator's misses were.
+    top_candidates: int = 12          # discovery candidates to deep-analyze per run
     # Pages of the newest-pools feed fetched per network per cycle. One page
     # (~20 pools) was a keyhole: on busy launch hours pools scrolled past it
     # between 45s cycles and were never seen at all — the operator's
@@ -830,8 +835,15 @@ class WorkflowSettings:
     # calls per cycle (Rule 11 — bounded, well inside the free tier's rate
     # limit). Discovery filters/ranking are unchanged: this widens what is
     # SEEN, not what qualifies.
-    discovery_pages: int = 3
-    watchlist_review_limit: int = 10  # existing entries re-checked per run
+    # 4 pages ≈ 80 newest pools per network per cycle (was 3 ≈ 60, 1 before
+    # the 2026-07-31 widening). Each page is one extra free GeckoTerminal
+    # call per network per cycle — well inside the 25/min budget.
+    discovery_pages: int = 4
+    # 15 since the upsize (was 10): held coins and tracked candidates are
+    # re-screened on a rotation, so a bigger per-pass budget means the whole
+    # watchlist comes around faster — and protective alerts (rug/security
+    # changes) ride on those rechecks.
+    watchlist_review_limit: int = 15  # existing entries re-checked per run
     risk_on_btc_change_percent: float = 2.0   # BTC 24h gain above this = risk-on
     risk_off_btc_drop_percent: float = 3.0    # BTC 24h drop beyond this = risk-off
     monitor_interval_seconds: float = 45.0    # continuous-scanner cycle cadence (fast layer)
@@ -1771,7 +1783,8 @@ class RugWatchSettings:
     warn_drop_percent: float = 30.0   # fall that is worth telling the operator about
     min_confirmations: int = 2     # consecutive readings that must agree before selling
     min_readings: int = 2          # measured observations needed before any verdict
-    max_positions: int = 20        # bound the per-poll work on a 1 vCPU droplet
+    max_positions: int = 30        # per-poll work bound (raised with the
+                                   # 2026-07-31 2 vCPU upsize; was 20)
     probe_sell_route: bool = True  # ask Jupiter whether an exit still exists
 
     def __post_init__(self) -> None:
