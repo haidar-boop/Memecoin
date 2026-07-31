@@ -448,8 +448,120 @@ async def test_confirmed_drain_with_route_gone_escalates_to_critical():
     guard._jupiter = NoRouteJupiter()
     await run_polls(guard, 4)
     assert executor.sells == []                       # nothing to execute
+    # A DISTINCT alert type from the real sale on purpose: the cooldown key is
+    # (chain, address, alert_type, priority), so sharing it let this warning
+    # swallow the CRITICAL "AUTO-SOLD" confirmation (2026-07-31 bug hunt).
     criticals = [e for e in notifier.events
-                 if e.alert_type == "rug_watch_exit"]
+                 if e.alert_type == "rug_watch_blocked"]
     assert criticals and any("route" in r for e in criticals for r in e.reasons)
     assert not any("will auto-sell" in r for e in criticals for r in e.reasons)
-    assert MINT not in guard._exited                  # route back => can still sell
+    assert not guard._exited                          # route back => can still sell
+
+
+# ---- 2026-07-31 bug hunt: the guard must never claim a sale that did not
+# happen, and a re-bought position must start clean. ----
+
+
+class OutcomeExecutor:
+    """Executor exposing the structured API the guard should prefer."""
+
+    live = True
+
+    def __init__(self, outcomes):
+        from meme_intelligence.trading.execution import TradeOutcome
+        self._outcomes = list(outcomes)
+        self._TradeOutcome = TradeOutcome
+        self.sells = []
+
+    async def sell_all_outcome(self, mint, chain="solana"):
+        self.sells.append((mint, chain))
+        sold, retry_safe, msg = self._outcomes[min(len(self.sells) - 1,
+                                                   len(self._outcomes) - 1)]
+        return self._TradeOutcome(msg, sold=sold, retry_safe=retry_safe)
+
+    async def execute_sell_all(self, mint, chain="solana"):
+        return (await self.sell_all_outcome(mint, chain)).message
+
+
+async def test_a_sell_that_sold_nothing_is_never_reported_as_auto_sold():
+    """CONFIRMED bug: the executor RETURNS 'no route ... Nothing was sold' as
+    prose, and the guard headlined it 'AUTO-SOLD' — the operator believed he
+    was out while the position drained."""
+    executor = OutcomeExecutor([
+        (False, True, "No route to sell this token right now (Jupiter found no "
+                      "swap path). Nothing was sold — try again shortly."),
+    ])
+    notifier = FakeNotifier()
+    guard = make_guard([50_000.0, 48_000.0, 9_000.0, 8_000.0],
+                       settings=make_settings(MEMEINTEL_RUG_WATCH_AUTO_SELL="true"),
+                       executor=executor, notifier=notifier)
+    await run_polls(guard, 4)
+    titles = [e.title for e in notifier.events]
+    assert not any("AUTO-SOLD" in t for t in titles), titles
+    assert any("AUTO-SELL FAILED" in t for t in titles), titles
+    assert any("/dump NOW" in r for e in notifier.events for r in e.reasons)
+
+
+async def test_a_provably_unsent_sell_is_retried_then_bounded():
+    """Nothing reached the network, so retrying is the same exit re-quoted —
+    but bounded, so a permanently broken exit cannot hammer the RPC."""
+    from meme_intelligence.workflow.holdings_guard import _MAX_EXIT_ATTEMPTS
+
+    executor = OutcomeExecutor([
+        (False, True, "DUMP failed — nothing was sold. The network rejected it."),
+    ])
+    guard = make_guard([50_000.0, 48_000.0] + [8_000.0] * 8,
+                       settings=make_settings(MEMEINTEL_RUG_WATCH_AUTO_SELL="true"),
+                       executor=executor)
+    await run_polls(guard, 10)
+    assert len(executor.sells) == _MAX_EXIT_ATTEMPTS      # retried, not once, not forever
+
+
+async def test_an_unconfirmed_broadcast_is_never_retried():
+    """A sell that may have reached the network must NOT be re-sent — that
+    would be a second real trade."""
+    executor = OutcomeExecutor([
+        (None, False, "DUMP submitted — confirmation still pending."),
+    ])
+    notifier = FakeNotifier()
+    guard = make_guard([50_000.0, 48_000.0] + [8_000.0] * 6,
+                       settings=make_settings(MEMEINTEL_RUG_WATCH_AUTO_SELL="true"),
+                       executor=executor, notifier=notifier)
+    await run_polls(guard, 8)
+    assert len(executor.sells) == 1
+    assert any("SUBMITTED" in e.title for e in notifier.events)
+    assert not any("AUTO-SOLD" in e.title for e in notifier.events)
+
+
+async def test_a_confirmed_sale_is_reported_as_auto_sold():
+    executor = OutcomeExecutor([(True, False, "DUMP confirmed.\nhttps://solscan.io/tx/x")])
+    notifier = FakeNotifier()
+    guard = make_guard([50_000.0, 48_000.0, 9_000.0, 8_000.0],
+                       settings=make_settings(MEMEINTEL_RUG_WATCH_AUTO_SELL="true"),
+                       executor=executor, notifier=notifier)
+    await run_polls(guard, 4)
+    assert any("AUTO-SOLD" in e.title for e in notifier.events)
+
+
+async def test_a_rebought_position_is_not_judged_against_the_old_peak():
+    """CONFIRMED bug: readings keyed by mint survived the sale, so buying the
+    same coin back at a lower (healthy, stable) price read as a 76% collapse
+    and the armed guard liquidated the fresh position."""
+    executor = FakeExecutor()
+    holdings = [{"address": MINT, "chain": "solana", "symbol": "MEME",
+                 "acquired_at": "2026-07-29T10:00:00+00:00"}]
+    settings = make_settings(MEMEINTEL_RUG_WATCH_AUTO_SELL="true")
+    guard = HoldingsGuard(settings, FakeStorage(holdings), FakeNotifier(),
+                          FakeMarket([50_000.0, 50_000.0, 12_000.0, 12_000.0]),
+                          executor=executor, now_func=lambda: NOW)
+    await guard.poll_once()          # position 1 at $50k
+    await guard.poll_once()
+    # He sells; the holding is released.
+    holdings.clear()
+    await guard.poll_once()
+    # He re-buys later at a stable $12k pool: a NEW position (new acquired_at).
+    holdings.append({"address": MINT, "chain": "solana", "symbol": "MEME",
+                     "acquired_at": "2026-07-29T18:00:00+00:00"})
+    await guard.poll_once()
+    await guard.poll_once()
+    assert executor.sells == []       # $12k is this position's baseline, not a drain

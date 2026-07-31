@@ -209,3 +209,30 @@ async def test_confirmation_sweep_only_runs_when_the_answer_is_empty():
     service = MarketDataService([primary, backup])
     await service.get_token_pairs_confirmed("TokenAddr1", chain="solana")
     assert primary.calls == 1 and backup.calls == 0
+
+
+# ---- Cross-check must compare the SAME pool (2026-07-31 bug hunt) ----
+
+
+async def test_cross_check_never_verifies_against_a_different_pool():
+    """A verifier that does not carry this pair cannot verify it. Comparing
+    its deepest OTHER pool produced false 'sources disagree' downgrades and
+    false 'liquidity confirmed' stamps."""
+    tracked = make_pair(pair_address="MainPool", liquidity=80_000.0)
+    side = make_pair(pair_address="SidePool", liquidity=5_000.0)
+    service = MarketDataService([FakeProvider("dexscreener", [tracked]),
+                                 FakeProvider("geckoterminal", [side])])
+    await service.get_token_pairs(tracked.base_token.address)   # record provenance
+    verdict, note = await service.cross_check_liquidity(tracked)
+    assert verdict is None                       # unknown, not a disagreement
+    assert "could not verify" in note
+
+
+async def test_cross_check_still_confirms_when_the_same_pool_is_carried():
+    tracked = make_pair(pair_address="MainPool", liquidity=80_000.0)
+    same = make_pair(pair_address="MainPool", liquidity=76_000.0)
+    service = MarketDataService([FakeProvider("dexscreener", [tracked]),
+                                 FakeProvider("geckoterminal", [same])])
+    await service.get_token_pairs(tracked.base_token.address)
+    verdict, note = await service.cross_check_liquidity(tracked)
+    assert verdict is True and "confirmed" in note

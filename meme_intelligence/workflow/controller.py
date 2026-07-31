@@ -801,6 +801,22 @@ class ContinuousScanner:
                         "%s fell to Avoid but is a held position — kept on the "
                         "watchlist for continued protective monitoring",
                         token.address)
+                    # Refresh the entry at its CURRENT tier so updated_at moves.
+                    # _recheck_watchlist visits least-recently-updated first;
+                    # a kept coin whose timestamp never moved stayed permanently
+                    # at the head of that queue, so a handful of held Avoid coins
+                    # consumed every recheck slot forever and the rest of the
+                    # watchlist was never re-screened again (2026-07-31 bug
+                    # hunt). Score/classification are recorded as measured.
+                    kept_tier = next(
+                        (e.tier for e in self._storage.get_watchlist()
+                         if e.token.address.lower() == token.address.lower()), None)
+                    if kept_tier is not None:
+                        self._storage.update_watchlist(
+                            token, kept_tier,
+                            score=result.master.final_score,
+                            classification=result.master.classification,
+                            thesis=thesis)
                 else:
                     reason = (
                         f"liquidity collapsed to ${liquidity:,.0f}: token appears dead"

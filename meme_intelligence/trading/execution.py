@@ -51,6 +51,30 @@ class TradeError(MemeIntelError):
 
 
 @dataclass(frozen=True)
+class TradeOutcome:
+    """What a trade actually did, for callers that must ACT on the result.
+
+    ``execute_buy``/``execute_sell_all`` return prose written for the
+    operator's phone, and every failure is returned rather than raised — so a
+    programmatic caller (the auto-sell rug guard) could not distinguish "sold"
+    from "nothing was sold" and reported a failed exit as AUTO-SOLD while
+    never retrying it (2026-07-31 bug hunt). This carries the same message
+    plus the two facts a machine needs:
+
+    * ``sold`` — True: confirmed on-chain. False: definitively nothing moved.
+      None: UNKNOWN (broadcast but unconfirmed, or an ambiguous submission
+      error). Never guess here; None is the honest answer (Rule 8).
+    * ``retry_safe`` — True only when nothing reached the network (or the tx
+      provably reverted), so re-attempting is the same intent re-quoted, not
+      a second trade. False whenever a retry could double-spend.
+    """
+
+    message: str
+    sold: bool | None
+    retry_safe: bool
+
+
+@dataclass(frozen=True)
 class TradeIntent:
     """One operator-initiated buy intent (never an order)."""
 
@@ -86,9 +110,16 @@ class DryRunExecutor:
         return message
 
     async def execute_sell_all(self, mint: str, chain: str = "solana") -> str:
+        return (await self.sell_all_outcome(mint, chain)).message
+
+    async def sell_all_outcome(self, mint: str, chain: str = "solana") -> TradeOutcome:
+        """Same interface as the live executor, honest about selling nothing:
+        a dry run never moves funds, and retrying cannot change that."""
         self._journal(mint, chain, "trade_intent", f"dry-run dump intent for {mint}")
-        return (f"DRY RUN — no real trade executed. Would dump the full {mint} "
-                "position. Live execution is off.")
+        return TradeOutcome(
+            f"DRY RUN — no real trade executed. Would dump the full {mint} "
+            "position. Live execution is off.",
+            sold=False, retry_safe=False)
 
     async def get_spendable_balance_sol(self) -> float | None:
         """No real wallet exists in dry-run — an honest unknown, never a
@@ -194,25 +225,45 @@ class LiveExecutor:
                 return (f"Refused: wallet holds {balance / _LAMPORTS_PER_SOL:.4f} SOL, "
                         f"not enough for {intent.sol_amount:g} SOL + fees. Fund the "
                         "trading wallet or lower the amount.")
-            return await self._quote_and_swap(
+            outcome = await self._quote_and_swap(
                 input_mint=SOL_MINT, output_mint=intent.token_address,
                 amount=lamports, mint=intent.token_address, kind="trade_buy",
                 action="BUY", detail=f"{intent.sol_amount:g} SOL via {intent.source}",
                 no_route_msg=("No route to buy this token right now (Jupiter found "
                               "no swap path). Nothing was spent."),
                 spent_noun="spent")
+            return outcome.message
 
     async def execute_sell_all(self, mint: str, chain: str = "solana") -> str:
+        """Operator-facing dump. Returns the message only — unchanged API."""
+        return (await self.sell_all_outcome(mint, chain)).message
+
+    async def sell_all_outcome(self, mint: str, chain: str = "solana") -> TradeOutcome:
+        """Dump the full position, reporting WHAT HAPPENED as well as prose.
+
+        Used by the auto-sell rug guard, which must not claim a sale that did
+        not happen and must be able to retry one that provably never left the
+        machine (2026-07-31 bug hunt). ``execute_sell_all`` delegates here, so
+        both callers always see the identical trade.
+        """
         if chain not in ("solana", "sol"):
-            return "Live trading is Solana-only."
+            return TradeOutcome("Live trading is Solana-only.",
+                                sold=False, retry_safe=False)
         async with self._lock:
             try:
                 raw = await self._rpc.get_token_balance_raw(self._pubkey, mint)
             except CollectorError as exc:
-                return ("Dump aborted — could not read the token balance "
-                        f"({self._safe(str(exc))}). Nothing was sold.")
+                return TradeOutcome(
+                    "Dump aborted — could not read the token balance "
+                    f"({self._safe(str(exc))}). Nothing was sold.",
+                    sold=False, retry_safe=True)
             if raw <= 0:
-                return "Nothing to dump — the trading wallet holds none of this token."
+                # Nothing to sell is not a failure to retry: this wallet does
+                # not hold the coin (commonly a /holding the operator keeps in
+                # his main wallet), and polling it again cannot change that.
+                return TradeOutcome(
+                    "Nothing to dump — the trading wallet holds none of this token.",
+                    sold=False, retry_safe=False)
             return await self._quote_and_swap(
                 input_mint=mint, output_mint=SOL_MINT, amount=raw, mint=mint,
                 kind="trade_sell", action="DUMP", detail="100% of position",
@@ -225,7 +276,7 @@ class LiveExecutor:
     async def _quote_and_swap(self, *, input_mint: str, output_mint: str,
                               amount: int, mint: str, kind: str, action: str,
                               detail: str, no_route_msg: str,
-                              spent_noun: str) -> str:
+                              spent_noun: str) -> TradeOutcome:
         """Quote fresh, then swap — retrying with a NEW quote when the network
         definitively rejects the transaction pre-broadcast.
 
@@ -248,10 +299,12 @@ class LiveExecutor:
                     input_mint, output_mint, amount, self._slippage_bps,
                     use_cache=False)
             except CollectorError as exc:
-                return (f"{action} aborted — could not get a fresh quote "
-                        f"({self._safe(str(exc))}). Nothing was {spent_noun}.")
+                return TradeOutcome(
+                    f"{action} aborted — could not get a fresh quote "
+                    f"({self._safe(str(exc))}). Nothing was {spent_noun}.",
+                    sold=False, retry_safe=True)
             if quote is None:
-                return no_route_msg
+                return TradeOutcome(no_route_msg, sold=False, retry_safe=True)
             try:
                 return await self._execute_swap(
                     quote, mint=mint, kind=kind, action=action, detail=detail)
@@ -260,14 +313,16 @@ class LiveExecutor:
                 self._logger.warning(
                     "%s attempt %d/%d rejected pre-broadcast for %s: %s",
                     action, attempt, attempts, mint, reason)
-        return (f"{action} failed — nothing was {spent_noun}. The network rejected "
-                f"it before sending, {attempts} times with fresh quotes: {reason}. "
-                f"The coin is likely moving faster than your "
-                f"{self._slippage_bps / 100:g}% slippage allowance — try again, or "
-                "raise MEMEINTEL_EXECUTION_SLIPPAGE_BPS in .env.")
+        return TradeOutcome(
+            f"{action} failed — nothing was {spent_noun}. The network rejected "
+            f"it before sending, {attempts} times with fresh quotes: {reason}. "
+            f"The coin is likely moving faster than your "
+            f"{self._slippage_bps / 100:g}% slippage allowance — try again, or "
+            "raise MEMEINTEL_EXECUTION_SLIPPAGE_BPS in .env.",
+            sold=False, retry_safe=True)
 
     async def _execute_swap(self, quote: dict, *, mint: str, kind: str,
-                            action: str, detail: str) -> str:
+                            action: str, detail: str) -> TradeOutcome:
         """Build -> sign -> send -> confirm with money-safe staged reporting.
 
         The single rule: once a transaction has been BROADCAST (send returned a
@@ -289,7 +344,9 @@ class LiveExecutor:
             # guard below (bug-hunt finding, 2026-07-12).
             expected_sig = self._signature_of(signed)
         except (CollectorError, TradeError) as exc:
-            return f"{action} failed before sending — nothing was spent: {self._safe(str(exc))}"
+            return TradeOutcome(
+                f"{action} failed before sending — nothing was spent: {self._safe(str(exc))}",
+                sold=False, retry_safe=True)
 
         # Submission. If this raises we cannot be certain the tx did NOT reach
         # the network, so we must NOT invite a blind retry.
@@ -320,8 +377,10 @@ class LiveExecutor:
         except CollectorError as exc:
             self._logger.error("%s submission error for %s: %s", action, mint,
                                self._safe(str(exc)))
-            return (f"{action} may not have gone through (submission error). Do NOT retry "
-                    f"blindly — check your wallet / Solscan first: {self._safe(str(exc))}")
+            return TradeOutcome(
+                f"{action} may not have gone through (submission error). Do NOT retry "
+                f"blindly — check your wallet / Solscan first: {self._safe(str(exc))}",
+                sold=None, retry_safe=False)
 
         # Broadcast: the signature is now the source of truth. Journal it
         # immediately so a confirmation hiccup can never lose the record.
@@ -345,20 +404,26 @@ class LiveExecutor:
         except TradeError as exc:
             # Confirmed on-chain FAILURE: the tx reverted, so no funds moved
             # beyond the network fee — safe to retry.
-            return (f"{action} did NOT go through on-chain — only the network fee was spent, "
-                    f"safe to retry. ({self._safe(str(exc))})\n{link}")
+            return TradeOutcome(
+                f"{action} did NOT go through on-chain — only the network fee was spent, "
+                f"safe to retry. ({self._safe(str(exc))})\n{link}",
+                sold=False, retry_safe=True)
         except CollectorError as exc:
             # The RPC could not tell us the outcome. UNKNOWN — do not retry.
             self._logger.warning("%s confirmation unknown for %s: %s", action, mint,
                                  self._safe(str(exc)))
-            return (f"{action} was submitted but could not be confirmed (RPC error). Do NOT "
-                    f"retry — check Solscan first.\n{link}")
+            return TradeOutcome(
+                f"{action} was submitted but could not be confirmed (RPC error). Do NOT "
+                f"retry — check Solscan first.\n{link}",
+                sold=None, retry_safe=False)
         if landed:
             if kind == "trade_sell":
                 self._mark_dumped(mint)  # confirmed 100% exit: stop guarding it
-            return f"{action} confirmed.\n{link}"
-        return (f"{action} submitted — confirmation still pending. Do NOT retry; "
-                f"check Solscan.\n{link}")
+            return TradeOutcome(f"{action} confirmed.\n{link}", sold=True, retry_safe=False)
+        return TradeOutcome(
+            f"{action} submitted — confirmation still pending. Do NOT retry; "
+            f"check Solscan.\n{link}",
+            sold=None, retry_safe=False)
 
     def _sign(self, swap_tx_base64: str) -> str:
         """Sign the Jupiter VersionedTransaction with the trading key."""

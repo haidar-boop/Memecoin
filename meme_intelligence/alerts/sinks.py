@@ -55,6 +55,11 @@ ALERT_CHANNELS = {
     # "reports" channel.
     "rug_watch_warning": "security",
     "rug_watch_exit": "security",
+    # Distinct type from rug_watch_exit ON PURPOSE: the cooldown key is
+    # (chain, address, alert_type, priority), so sharing it let a route-gone
+    # warning swallow the CRITICAL confirmation that the position was
+    # actually sold (2026-07-31 bug hunt).
+    "rug_watch_blocked": "security",
     "momentum": "momentum",
     "score_drop_review": "reports",
     "boost": "boosts",

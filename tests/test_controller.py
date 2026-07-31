@@ -1906,3 +1906,30 @@ async def test_scanner_recheck_does_not_archive_on_one_providers_silence():
         entries = {e.token.address: e.tier for e in storage.get_watchlist()}
         assert "TokenLive" in entries, "live coin was archived on one provider's silence"
         assert entries["TokenLive"] is not WatchlistTier.ARCHIVED
+
+
+async def test_a_held_avoid_coin_does_not_pin_the_recheck_queue():
+    """CONFIRMED bug: a held coin that fell to Avoid was kept on the watchlist
+    (correct) but its updated_at never moved, so it sat permanently at the
+    head of the least-recently-updated recheck order and consumed a slot on
+    every pass — starving the rest of the watchlist forever."""
+    held = TokenIdentity(chain="solana", address="TokenHeld", symbol="HELD")
+    # A pool that is alive but weak enough to re-assess as Avoid.
+    weak_pair = _dc.replace(make_pair(address="TokenHeld", symbol="HELD"),
+                            liquidity_usd=3_000.0, volume_24h=200.0,
+                            volume_1h=5.0, buys_24h=3, sells_24h=40,
+                            price_change_24h=-92.0, price_change_1h=-40.0)
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        storage.update_watchlist(held, WatchlistTier.TIER_1_HIGH_PRIORITY, score=80.0)
+        storage.set_holding(held)
+        before = {e.token.address: e.updated_at for e in storage.get_watchlist()}
+
+        market = FakeMarketService({"TokenHeld": weak_pair})
+        scanner = make_scanner_with_market(
+            storage, [], {"TokenHeld": clean_profile(held)},
+            market, settings=fast_recheck_settings())
+        await scanner.run(max_cycles=1)
+
+        entries = {e.token.address: e for e in storage.get_watchlist()}
+        assert "TokenHeld" in entries          # still tracked (it is held)
+        assert entries["TokenHeld"].updated_at >= before["TokenHeld"]  # rotation advances

@@ -2312,3 +2312,66 @@ AUTO-SOLD confirmation can be swallowed; cross_check_liquidity can
 watchlist recheck slots. Three further candidates were left unverified when
 the hunt hit a spend limit (trade_planner thin-evidence guard, backtesting
 outcome-window timing, rug-engine grading).
+
+## 2026-07-31 — Bug hunt round 2: the remaining five confirmed bugs fixed
+
+Closes every confirmed finding from the 2026-07-31 hunt. Three were in the
+auto-sell rug guard (money path, all latent since the original build), two
+elsewhere.
+
+**1. "AUTO-SOLD" was reported for sales that never happened** (holdings_guard
+_on_exit). `LiveExecutor.execute_sell_all` RETURNS failures as prose — "no
+route ... Nothing was sold", "Nothing to dump — the trading wallet holds none
+of this token", "DUMP failed — nothing was sold" — and only raises on
+unexpected errors. The guard read none of it: the title was hardcoded
+AUTO-SOLD, and because the mint was already in `_exited` the position was
+never retried or mentioned again. The operator would believe he was out while
+the position drained to zero. Fixed by giving the executors a structured
+sibling API: new `TradeOutcome(message, sold, retry_safe)` and
+`sell_all_outcome()` on BOTH executors, with `execute_sell_all` delegating to
+it so the operator-facing strings are byte-identical (Rule 18). `sold` is
+tri-state — True (confirmed), False (definitively nothing moved), None
+(broadcast but unconfirmed / ambiguous submission: honest unknown, Rule 8) —
+and `retry_safe` is True only when nothing reached the network. The guard now
+titles the alert by what actually happened, appends "/dump NOW" when nothing
+sold, and RETRIES a provably-unsent exit (un-marking `_exited`) up to
+`_MAX_EXIT_ATTEMPTS`=3. An unconfirmed broadcast is never retried — that
+would be a second real trade. The mark-before-trade crash guard is kept.
+
+**2. A re-bought position was judged against the previous position's peak**
+(holdings_guard). `_readings`/`_tracked_pool`/`_exited` were keyed by MINT and
+never cleared, so: sell at a $100k pool, re-buy later at $40k, and the armed
+guard measured a 60% "collapse" against the dead position's peak and
+liquidated the fresh buy within two polls. Fixed by keying all per-coin state
+by POSITION (`address@acquired_at`, which changes on every re-buy) and pruning
+state for positions no longer held — computed from the FULL holdings list, not
+the `max_positions` slice, so a position merely queued behind the cap is not
+mistaken for a closed one.
+
+**3. The AUTO-SOLD confirmation could be swallowed by its own warning**
+(holdings_guard + sinks). The route-gone escalation reused alert_type
+`rug_watch_exit`, and the cooldown key is (chain, address, alert_type,
+priority) — so a route-gone CRITICAL at t=60s suppressed the CRITICAL
+"AUTO-SOLD" at t=90s: the position was liquidated and the phone stayed
+silent. Fixed with a distinct `rug_watch_blocked` type (+ ALERT_CHANNELS
+entry routing it to "security").
+
+**4. cross_check_liquidity verified a pool against a DIFFERENT pool**
+(market_service). When the second provider did not carry the tracked pair it
+fell back to that provider's deepest OTHER pool, producing either a false
+"sources disagree" (silently downgrading a HIGH alert nobody disputed) or a
+false "liquidity confirmed by X" on a number never independently checked.
+Fixed: same `pair_address` or no verdict (Rule 8).
+
+**5. Held Avoid coins pinned the recheck queue forever** (controller). A held
+coin that fell to Avoid is deliberately kept on the watchlist, but its
+`updated_at` was never bumped — and `_recheck_watchlist` visits
+least-recently-updated first, so a handful of held corpses consumed every
+recheck slot on every pass and the rest of the watchlist was never
+re-screened again (no score updates, no security-change diffs, no protective
+alerts). Fixed by refreshing the entry at its current tier when it is kept.
+
+11 new tests (failed-sell not reported as sold, bounded retry, unconfirmed
+broadcast never retried, confirmed sale still reported, re-buy starts clean,
+cross-check same-pool-only + still-confirms, recheck rotation advances).
+Suite: 66 pre-existing sandbox failures (faiss/anthropic) unchanged.

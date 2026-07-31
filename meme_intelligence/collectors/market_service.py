@@ -175,11 +175,22 @@ class MarketDataService:
             except Exception as exc:  # provider-specific failure: try the next one
                 self._logger.debug("verifier %s unavailable: %s", name, exc)
                 continue
-            other = next((p for p in pairs if p.pair_address.lower() == pair.pair_address.lower()),
-                         None)
-            if other is None and pairs:
-                other = max(pairs, key=lambda p: p.liquidity_usd or 0.0)
-            if other is None or other.liquidity_usd is None:
+            # ONLY the same pool verifies the same pool. Falling back to the
+            # verifier's deepest pool compared two different markets: a coin
+            # whose deep pool one source carries and whose small side pool the
+            # other carries was either reported as "sources disagree"
+            # (silently downgrading a HIGH alert nobody actually disputed) or
+            # stamped "liquidity confirmed" on a number that was never
+            # independently checked (2026-07-31 bug hunt). A verifier that
+            # does not carry this pair simply cannot verify it (Rule 8).
+            other = next((p for p in pairs
+                          if p.pair_address.lower() == pair.pair_address.lower()), None)
+            if other is None:
+                self._logger.debug(
+                    "verifier %s does not carry pair %s — cannot verify",
+                    name, pair.pair_address)
+                continue
+            if other.liquidity_usd is None:
                 continue
 
             low, high = sorted((pair.liquidity_usd, other.liquidity_usd))
