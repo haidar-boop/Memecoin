@@ -932,10 +932,24 @@ class ContinuousScanner:
                     return events
                 self._bundle_checks_today += 1
             try:
-                stakes, origins, notes = await self._bundle.gather(token.address)
+                # HARD wall-clock bound (code-review finding 2026-07-31): the
+                # walk is up to ~140 serial Helius calls sharing the 120/min
+                # limiter — a ~70s floor, minutes if Helius is degraded — and
+                # it is awaited inside the serial discovery loop, so without
+                # this every OTHER coin's opportunity alert waits behind it. On
+                # timeout the screen fails open like any other unreadable path;
+                # no verdict is cached, so a later, calmer pass can retry.
+                stakes, origins, notes = await asyncio.wait_for(
+                    self._bundle.gather(token.address),
+                    timeout=ws.alert_check_timeout_seconds)
                 report = cluster_holders(stakes, origins, ws)
             except asyncio.CancelledError:
                 raise
+            except asyncio.TimeoutError:
+                self._logger.warning(
+                    "bundle screen timed out for %s after %.0fs — pitch goes out "
+                    "unchanged", token.address, ws.alert_check_timeout_seconds)
+                return events
             except Exception as exc:  # noqa: BLE001 — unknown never blocks a pitch
                 self._logger.warning("bundle screen unreadable for %s (pitch "
                                      "unchanged): %s", token.address, exc)

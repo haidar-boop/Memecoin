@@ -543,6 +543,13 @@ class WalletClusterSettings:
     # (Rule 8 — the pitch already carries measured holder facts).
     alert_check_enabled: bool = True
     alert_check_max_per_day: int = 40
+    # Hard wall-clock bound on ONE screen (code-review finding 2026-07-31): the
+    # funding walk is up to ~140 serial Helius calls paced at the shared
+    # 120/min limit — a ~70s floor, minutes if Helius is degraded — and it runs
+    # inside the discovery loop, so an unbounded screen delays every other
+    # coin's opportunity alert. On timeout the screen fails open (pitch goes
+    # out unchanged), same as any unreadable path.
+    alert_check_timeout_seconds: float = 25.0
     # A MULTI-WALLET single-actor cluster controlling at least this % of the
     # visible supply suppresses the pitch outright — "100 holders" that are
     # one person is a bundled launch, the strongest fresh-coin rug tell the
@@ -554,6 +561,11 @@ class WalletClusterSettings:
             raise ConfigurationError(
                 "wallet_clusters alert_check_max_per_day must be >= 0 "
                 f"(0 = unlimited), got {self.alert_check_max_per_day}")
+        if (not math.isfinite(self.alert_check_timeout_seconds)
+                or self.alert_check_timeout_seconds <= 0):
+            raise ConfigurationError(
+                "wallet_clusters alert_check_timeout_seconds must be positive, "
+                f"got {self.alert_check_timeout_seconds}")
         _check_range("wallet_clusters alert_suppress_cluster_percent",
                      self.alert_suppress_cluster_percent, 0.0, 100.0)
         if not (0 < self.top_holders_limit <= 20):

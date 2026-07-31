@@ -12,7 +12,7 @@ from meme_intelligence.analyzers.foundation_analyzer import FoundationInputs
 from meme_intelligence.analyzers.narrative_analyzer import NarrativeInputs
 from meme_intelligence.config.settings import AlertEngineSettings, Settings
 from meme_intelligence.core.enums import AlertPriority, ResearchMode, WatchlistTier
-from meme_intelligence.core.errors import TransientCollectorError
+from meme_intelligence.core.errors import ConfigurationError, TransientCollectorError
 from meme_intelligence.core.models import (
     CommunityProfile,
     DexPair,
@@ -2068,3 +2068,44 @@ async def test_disabled_screen_spends_nothing():
         await scanner.run(max_cycles=1)
     assert bundle.calls == 0
     assert any(e.alert_type in _BUY_SIDE_ALERT_TYPES for e in sink.sent)
+
+
+async def test_a_slow_bundle_screen_times_out_and_the_pitch_still_goes_out():
+    """Code-review finding: the funding walk is up to ~140 serial rate-limited
+    Helius calls inside the discovery loop. A hard timeout must bound it so a
+    slow/degraded Helius cannot stall every other coin's alert — and on timeout
+    the screen fails open (pitch unchanged), spending no verdict cache."""
+    import asyncio as _asyncio
+
+    class SlowBundle:
+        def __init__(self):
+            self.calls = 0
+
+        async def gather(self, mint):
+            self.calls += 1
+            await _asyncio.sleep(60)          # longer than the timeout
+            return [], {}, []
+
+    pair = make_pair()
+    bundle = SlowBundle()
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner, sink = scanner_with_bundle(
+            storage, [pair], {pair.base_token.address: clean_profile(pair.base_token)},
+            bundle, env={"MEMEINTEL_WALLET_CLUSTERS_ALERT_CHECK_TIMEOUT_SECONDS": "0.05"})
+        await scanner.run(max_cycles=1)
+    assert bundle.calls == 1
+    pitches = [e for e in sink.sent if e.alert_type in _BUY_SIDE_ALERT_TYPES]
+    assert pitches                                     # not blocked, not suppressed
+    assert not any("funding clusters" in r for e in pitches for r in e.reasons)
+
+
+def test_the_bundle_alert_timeout_is_validated():
+    from meme_intelligence.config.settings import WalletClusterSettings
+
+    assert WalletClusterSettings().alert_check_timeout_seconds == 25.0
+    s = Settings.from_env(
+        env={"MEMEINTEL_WALLET_CLUSTERS_ALERT_CHECK_TIMEOUT_SECONDS": "10"})
+    assert s.wallet_clusters.alert_check_timeout_seconds == 10.0
+    import pytest
+    with pytest.raises(ConfigurationError, match="alert_check_timeout_seconds"):
+        WalletClusterSettings(alert_check_timeout_seconds=0.0)

@@ -2566,3 +2566,37 @@ touches the alert path every component shares. Not started.
 
 4 new tests. Suite: 66 pre-existing sandbox failures (faiss/anthropic)
 unchanged.
+
+## 2026-07-31 — Bundle screen: code-review fixes (timeout + docs)
+
+The 3-agent code review of the auto funding-cluster screen confirmed two
+findings; both fixed.
+
+**MAJOR — no wall-clock bound on the screen inside the scan loop.**
+`_bundle_screen` awaited `BundleService.gather()` with no timeout, and gather
+is up to ~140 SERIAL Helius calls sharing the 120/min limiter — a ~70s floor,
+minutes if Helius is degraded (4x8s retries per wallet). Because it is awaited
+inside the serial discovery loop, an unbounded screen delayed every OTHER
+coin's opportunity-alert delivery that cycle. (The review correctly downgraded
+this from critical: gather awaits network I/O so the loop yields, and the
+emergency real-money paths — /dump, /buy, the rug-watch auto-exit, the Telegram
+poller — run as separate asyncio tasks and are NOT blocked; only same-cycle
+discovery/opportunity alerts are delayed, with no correctness or money loss.)
+Fixed with `alert_check_timeout_seconds` (default 25) wrapping the gather in
+`asyncio.wait_for`; on timeout the screen fails open (pitch unchanged) and
+caches no verdict, so a calmer later pass can retry.
+
+**MINOR — the three (now four) new settings were undocumented in
+.env.example** (Rule 15), breaking that group's 1:1 field/key convention. Added
+a documented block covering enable/off, annotate-only (suppress %=0), the
+daily budget, and the timeout. (The review noted the off-switch already loaded
+via the standard env convention and /status already surfaces the state, so
+this was documentation-only.)
+
+REFUTED by the review's own verifier (recorded so it is not re-raised): the
+process-lifetime verdict cache has "no TTL" is not a live-coin risk — only
+POSITIVE-evidence verdicts are cached, an unreadable census returns early and
+caches nothing, and a suppressed coin staying suppressed is the safe direction.
+
+3 new tests (timeout fails open, timeout validated, + the existing five).
+Suite: 66 pre-existing sandbox failures unchanged.
