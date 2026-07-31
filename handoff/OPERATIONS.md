@@ -11,7 +11,7 @@
 
 | Thing | Value |
 |---|---|
-| Host | DigitalOcean droplet, 1 GB RAM ($6/mo), Ubuntu |
+| Host | DigitalOcean droplet, **2 vCPU / 2 GB RAM** (upsized 2026-07-31; was 1 vCPU / 1 GB), 3 GB swap, Ubuntu 24.04 |
 | Repo path | `~/meme-intelligence` |
 | Virtualenv | `~/meme-intelligence/.venv` |
 | Service | systemd unit `meme-intelligence` (from `deploy/meme-intelligence.service`, `Restart=always`) |
@@ -19,7 +19,7 @@
 | Main DB | `data/meme_intelligence.sqlite3` (WAL mode — shared by daemon + cron) |
 | Learning state | `learning_state/` (`learning.db` + model artifacts; gitignored) |
 | Logs | `journalctl -u meme-intelligence` and `logs/meme_intelligence.log` (rotating) |
-| Steady-state memory | ~440 MiB of 1 GB (verified 2026-07-09) — all caches bounded |
+| Steady-state memory | ~540 MiB of 2 GB total system (verified 2026-07-31) — all caches bounded |
 
 ## The standard update procedure (give this to the operator verbatim)
 
@@ -131,15 +131,26 @@ after arming:
    zero errors, answering nothing. **Do not set MemoryHigh** on a no-swap
    droplet for this anon-heavy Python workload.
 
-Current setup: `MemoryMax=880M` (OOM backstop only — in
-`deploy/meme-intelligence.service`, overridable via
-`/etc/systemd/system/meme-intelligence.service.d/memory.conf`) **plus a 1G
-swapfile** (`/swapfile`, in `/etc/fstab`) so spikes degrade gracefully.
+Current setup (since the 2026-07-31 upsize): `MemoryMax=1400M` (OOM backstop
+only — in `deploy/meme-intelligence.service`, overridable per host via
+`/etc/systemd/system/meme-intelligence.service.d/memory.conf`) **plus 3 GB of
+swap** so spikes degrade gracefully instead of OOM-killing.
+
+Sizing rule: ~70% of RAM. The remainder is for the OS **and for the cron
+jobs** (daily routine, `backtest --refresh`, DB backup), which are separate
+Python processes that run while the monitor is live. The old `880M` was sized
+for the 1 GB box and had become a live crash risk — the DB now holds ~57k
+tokens and the learning layer grows with resolved coins, so it was heading
+for the same OOM crash-loop seen on 2026-07-11.
 
 Watch it occasionally: `systemctl show meme-intelligence -p MemoryCurrent`.
-When steady-state usage approaches ~800M, the honest options are bounding
-the learning memory (cap/prune the analog index) or the $12/mo 2GB droplet
-— raising the cap further on a 1GB box just starves the OS.
+When steady-state usage approaches ~1.2 G, the honest options are bounding
+the learning memory (cap/prune the analog index) or more RAM.
+
+**The 2 vCPU upsize also retired a constraint:** the cron cluster was moved to
+Beirut mornings on 2026-07-24 because on 1 vCPU it starved the live monitor.
+With a second core the monitor keeps running while cron works, so the
+schedule is now a preference (a quiet market window), not a requirement.
 
 ## Reading the system
 

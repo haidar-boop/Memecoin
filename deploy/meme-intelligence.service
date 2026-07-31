@@ -19,9 +19,20 @@ StartLimitIntervalSec=0
 # resolved coin (~740M at 6,362 coins, 2026-07-11). The old 512M cap caused
 # an OOM crash-loop once memory grew past it, and an intermediate
 # MemoryHigh=700M soft limit stalled the whole process in kernel reclaim
-# (avoid MemoryHigh here: no-swap droplets + anon-heavy Python = livelock).
-# Pair with a 1G swapfile on 1GB droplets — see handoff/OPERATIONS.md.
-MemoryMax=880M
+# (avoid MemoryHigh here: anon-heavy Python + reclaim pressure = livelock).
+#
+# 1400M since the 2026-07-31 upsize to a 2 GB / 2 vCPU droplet (verified:
+# `free -h` = 1.9Gi total, 3.0Gi swap). Sizing rule: ~70% of RAM, leaving
+# headroom for the OS and for the cron jobs (daily routine, backtest
+# --refresh, DB backup), which are SEPARATE Python processes that run while
+# the monitor is live. The old 880M was sized for a 1 GB box and had become
+# a real crash risk: the database now holds ~57k tokens and the learning
+# layer's footprint grows with resolved coins, so it was heading for the
+# same OOM crash-loop that hit on 2026-07-11.
+#
+# Override per-host without editing this file (survives git pull):
+#   /etc/systemd/system/meme-intelligence.service.d/memory.conf
+MemoryMax=1400M
 
 [Install]
 WantedBy=multi-user.target

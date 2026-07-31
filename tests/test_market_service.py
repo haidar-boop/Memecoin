@@ -3,7 +3,11 @@
 import pytest
 
 from meme_intelligence.collectors.market_service import MarketDataService
-from meme_intelligence.core.errors import AllProvidersFailedError, TransientCollectorError
+from meme_intelligence.core.errors import (
+    AllProvidersFailedError,
+    CollectorError,
+    TransientCollectorError,
+)
 from meme_intelligence.core.models import DexPair, TokenIdentity
 
 TOKEN = TokenIdentity(chain="solana", address="TokenAddr1", symbol="MEME")
@@ -21,10 +25,12 @@ class FakeProvider:
         self.fail = fail
         self.calls = 0
 
+    error = None   # optional explicit exception (else a transient outage)
+
     async def get_token_pairs(self, token_address, chain=None):
         self.calls += 1
         if self.fail:
-            raise TransientCollectorError(f"{self.name} is down")
+            raise self.error or TransientCollectorError(f"{self.name} is down")
         return self.pairs
 
 
@@ -236,3 +242,45 @@ async def test_cross_check_still_confirms_when_the_same_pool_is_carried():
     await service.get_token_pairs(tracked.base_token.address)
     verdict, note = await service.cross_check_liquidity(tracked)
     assert verdict is True and "confirmed" in note
+
+
+# ---- Confirmation-sweep review findings (2026-07-31) ----
+
+
+async def test_the_sweep_records_provenance_so_the_source_cannot_self_confirm():
+    """A pool only the SECOND provider carries used to come back without
+    provenance, so cross_check_liquidity fell back to asking everyone and let
+    that same provider 'confirm' its own number — presenting one source to the
+    operator as two."""
+    only = make_pair(pair_address="GeckoPool", liquidity=42_000.0)
+    service = MarketDataService([FakeProvider("dexscreener", []),
+                                 FakeProvider("geckoterminal", [only])])
+    pairs = await service.get_token_pairs_confirmed(only.base_token.address)
+    assert [p.pair_address for p in pairs] == ["GeckoPool"]
+
+    verdict, note = await service.cross_check_liquidity(only)
+    assert verdict is None                       # honest unknown, not self-confirmed
+    assert "geckoterminal" not in note.lower() or "could not verify" in note
+
+
+async def test_a_permanent_not_indexed_error_does_not_block_archiving_forever():
+    """A 404 is that provider's ANSWER ('no market here'), not an outage. Read
+    as an outage, a genuinely dead coin could never be archived and its entry
+    re-burned provider calls on every recheck."""
+    dead = FakeProvider("dexscreener", [])
+    missing = FakeProvider("geckoterminal", [])
+    missing.fail = True
+    missing.error = CollectorError("404 not indexed")
+    service = MarketDataService([dead, missing])
+    pairs = await service.get_token_pairs_confirmed(TOKEN.address)
+    assert pairs == []                           # confirmed empty -> archivable
+
+
+async def test_a_transient_outage_still_leaves_emptiness_unconfirmed():
+    """The other half: real provider trouble must still raise, so an outage is
+    never mistaken for death (Rule 8)."""
+    dead = FakeProvider("dexscreener", [])
+    down = FakeProvider("geckoterminal", [], fail=True)
+    service = MarketDataService([dead, down])
+    with pytest.raises(AllProvidersFailedError):
+        await service.get_token_pairs_confirmed(TOKEN.address)

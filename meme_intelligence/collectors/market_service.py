@@ -19,7 +19,11 @@ from __future__ import annotations
 from collections import OrderedDict
 from typing import Sequence
 
-from meme_intelligence.core.errors import AllProvidersFailedError
+from meme_intelligence.core.errors import (
+    AllProvidersFailedError,
+    CollectorError,
+    TransientCollectorError,
+)
 from meme_intelligence.core.logging_setup import get_logger
 from meme_intelligence.core.models import DexPair
 from meme_intelligence.core.provider_pool import ProviderPool
@@ -62,13 +66,18 @@ class MarketDataService:
         """Pairs for a token from the first healthy provider (automatic failover)."""
         pairs, provider_name = await self._pool.call_with_provider(
             "get_token_pairs", token_address, chain=chain)
+        self._remember_provider(pairs, provider_name)
+        return pairs
+
+    def _remember_provider(self, pairs, provider_name: str) -> None:
+        """Record WHICH provider supplied each pair, so cross_check_liquidity
+        can exclude the true source instead of letting it confirm itself."""
         for pair in pairs:
             key = pair.pair_address.lower()
             self._last_provider_by_pair[key] = provider_name
             self._last_provider_by_pair.move_to_end(key)
         while len(self._last_provider_by_pair) > self._provider_cache_cap:
             self._last_provider_by_pair.popitem(last=False)
-        return pairs
 
     async def get_best_pair(self, token_address: str, chain: str | None = None) -> DexPair | None:
         """The deepest-liquidity pair, or ``None`` when no provider knows the token."""
@@ -112,14 +121,37 @@ class MarketDataService:
             name = getattr(provider, "name", type(provider).__name__)
             try:
                 other = await provider.get_token_pairs(token_address, chain=chain)
-            except Exception as exc:  # noqa: BLE001 — one provider must never
-                # end the confirmation sweep (Rule 9); an unanswered provider
-                # means emptiness stays unconfirmed, handled below.
+            except TransientCollectorError as exc:
+                # Provider-level trouble (5xx/timeout/network/429). This
+                # provider did not answer, so emptiness stays UNCONFIRMED —
+                # handled below (Rule 9).
                 causes[name] = exc
                 self._logger.debug("empty-confirmation provider %s unavailable: %s",
                                    name, exc)
                 continue
+            except CollectorError as exc:
+                # Permanent, item-specific: a 404 for a token this provider
+                # simply has not indexed. That IS an answer — "no market here"
+                # — and the SAME distinction ProviderPool draws for health
+                # tracking. Counting it as an outage made death unprovable
+                # forever: a genuinely rugged coin whose second provider 404s
+                # could never be archived, and its entry re-burned provider
+                # calls on every recheck pass (2026-07-31 review finding).
+                self._logger.debug(
+                    "empty-confirmation provider %s has no data for %s: %s",
+                    name, token_address, exc)
+                continue
+            except Exception as exc:  # noqa: BLE001 — unknown failure: stay honest
+                causes[name] = exc
+                self._logger.debug("empty-confirmation provider %s failed: %s",
+                                   name, exc)
+                continue
             if other:
+                # Record provenance, or cross_check_liquidity later finds no
+                # source for these pairs, falls back to asking everyone, and
+                # lets this very provider "confirm" its own number
+                # (2026-07-31 review finding).
+                self._remember_provider(other, name)
                 self._logger.info(
                     "%s reports %d pair(s) for %s that the pool's first responder "
                     "did not — not an empty market", name, len(other), token_address)

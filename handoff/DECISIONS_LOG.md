@@ -2375,3 +2375,46 @@ alerts). Fixed by refreshing the entry at its current tier when it is kept.
 broadcast never retried, confirmed sale still reported, re-buy starts clean,
 cross-check same-pool-only + still-confirms, recheck rotation advances).
 Suite: 66 pre-existing sandbox failures (faiss/anthropic) unchanged.
+
+## 2026-07-31 — Droplet upsized to 2 vCPU / 2 GB; memory cap raised; 2 review findings fixed
+
+**Upsize.** The operator moved to a 2 vCPU / 2 GB droplet (verified on the
+box: `free -h` = 1.9Gi total, 3.0Gi swap, ~540 MiB in use). The systemd unit
+still carried `MemoryMax=880M`, sized for the old 1 GB host — a live crash
+risk, not just a stale number: the DB now holds ~57k tokens and the learning
+layer's footprint grows with every resolved coin (~740M at 6,362 coins), so
+it was heading for the same OOM crash-loop that hit on 2026-07-11 under the
+old 512M cap. Raised to `MemoryMax=1400M` (~70% of RAM, leaving headroom for
+the OS AND for the cron jobs, which are separate Python processes running
+while the monitor is live). Applied on the droplet via the documented drop-in
+`/etc/systemd/system/meme-intelligence.service.d/memory.conf` so it survives
+`git pull`. Noted in OPERATIONS.md that the second core also retires the
+reason the cron cluster was moved to Beirut mornings (1 vCPU contention);
+that schedule is now a preference, not a requirement.
+
+**Two confirmed findings from the review of the archive fix** (both reproduced
+by the reviewer against the real modules):
+
+1. MAJOR — the confirmation sweep in `get_token_pairs_confirmed` returned
+   pairs WITHOUT recording which provider supplied them, so
+   `cross_check_liquidity` found no provenance, fell back to asking every
+   provider, and let the sole source confirm its own number: buy-side alerts
+   on a GeckoTerminal-only pool carried "liquidity confirmed by geckoterminal
+   ($42,000 vs $42,000)" — one source presented to the operator as two, and a
+   direct violation of the module's own stated rule ("second source
+   unavailable -> None, never silently treated as confirmed"). The archive fix
+   is what made this reachable (before it, such a coin was archived and never
+   analyzed). Fixed by extracting `_remember_provider` and calling it on the
+   sweep's return path too.
+2. MINOR — the sweep caught bare `Exception`, so a permanent item-specific
+   error (GeckoTerminal 404s a token it has not indexed) was treated as an
+   outage. Emptiness could then never be confirmed, so a genuinely rugged coin
+   could never be archived, and its entry re-burned provider calls on every
+   recheck pass. Fixed by reusing the taxonomy `ProviderPool` already draws:
+   `TransientCollectorError` = provider trouble (emptiness unconfirmed);
+   plain `CollectorError` = that provider's ANSWER ("no market here");
+   anything else stays unconfirmed.
+
+3 new tests (provenance recorded so no self-confirmation; a 404 still allows
+archiving; a real outage still blocks it). Suite: 66 pre-existing sandbox
+failures unchanged.
