@@ -260,6 +260,22 @@ class AlertThresholds:
     # NOTHING until he enables it, so the README enable steps set this to
     # 50 together with the monitor flag (keeping the two floors aligned).
     momentum_min_security_score: float = 0.0
+    # Holder-evidence gate for BUY-SIDE alerts (operator request 2026-07-31,
+    # "it either sends me clear rug pulls or dumb coins"). Root cause,
+    # measured: a fresh coin whose holder facts could NOT be read (GoPlus
+    # empty, on-chain census failed/rate-limited) scores a PERFECT security
+    # 100 — the score renormalizes over the only known facts, "authorities
+    # revoked + sellable", which every pump.fun scam also has by
+    # construction — and the rug engine rightly fires nothing on unknowns
+    # (Rule 8), so the invisible coin sails through every gate. The SAME
+    # coin with its facts read (top holder 99%) is vetoed. This gate flips
+    # the burden of proof for PITCHING only: a buy-side alert requires that
+    # holder concentration was actually measured (top-1 OR top-10 known,
+    # from GoPlus or the on-chain census — the census works on any SPL mint,
+    # so a legit readable coin is not punished). Unknown stays non-guilty
+    # everywhere else: protective alerts, scoring, and the rug engine are
+    # untouched. False = old behavior (pitch blind coins).
+    buy_alerts_require_holder_facts: bool = True
     # /check card DUMPED banner (operator request 2026-07-20): a coin whose
     # price collapsed this many percent in 24h shows "STATUS: DUMPED" on the
     # /check card even while its pool still holds liquidity — the operator's

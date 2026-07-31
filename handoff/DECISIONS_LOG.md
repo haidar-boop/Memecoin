@@ -2099,3 +2099,41 @@ CRITICAL/ack + held-not-archived + unheld-still-archived + 5 execution
 auto-holding tests incl. failure-isolation), 4 updated. Full suite: zero
 regressions (remaining sandbox failures are pre-existing faiss/anthropic
 gaps; solders was installed to verify the entire trading suite green).
+
+## 2026-07-31 — Holder-evidence gate: no measured holder facts, no pitch
+
+Operator: "it either sends me clear rug pulls or dumb coins. Can u find out
+what's wrong with it or make it stricter or something." Diagnosed, measured,
+and closed the actual hole rather than blanket-raising thresholds.
+
+**Root cause (reproduced in-session):** a fresh Solana coin whose holder
+facts could NOT be read (GoPlus empty, on-chain census failed or
+rate-limited) scores a PERFECT security 100 — the security score
+renormalizes over the only known facts, "authorities revoked + currently
+sellable", which every pump.fun scam also has by construction — and the rug
+engine correctly fires nothing on unknowns (Rule 8: unknown is not guilt).
+So the coins the bot knows LEAST about passed its gates MOST easily; the
+measured demo showed the identical coin vetoed (rug 15) the moment its top
+holder (99%) became visible. The "clear rug pulls" reaching the phone were
+overwhelmingly these invisible coins.
+
+**Fix:** `AlertThresholds.buy_alerts_require_holder_facts` (default ON;
+`MEMEINTEL_ALERTS_BUY_ALERTS_REQUIRE_HOLDER_FACTS=false` restores the old
+behavior) + `AutomationRules._holders_unmeasured`, a new clause in the
+existing buy-side suppression chain (alongside rug veto / untradeable /
+hard floor / freshness): a buy-side alert now requires that holder
+concentration was actually MEASURED — top-1 OR top-10 known, from GoPlus or
+the on-chain census (which works on any SPL mint, so a legit readable coin
+is not punished). One measured figure is evidence enough; NaN counts as
+unmeasured. Rule 8 is not weakened — unknown stays non-guilty for scoring,
+the rug engine, and protective alerts (a blind honeypot still fires its
+emergency alert; only the PITCH is withheld). Burden of proof flips for
+pitching only: accusing requires evidence of guilt, pitching now requires
+evidence of visibility.
+
+Zero API cost (reads the already-collected profile), zero change to how the
+rug engine or scoring thinks (operator's no-touch zone). Four new tests
+(legacy-would-pitch/default-suppresses proves the hole and the fix on the
+same result; one-figure-is-enough; blind honeypot still warns; default +
+env load). Suite: no new failures (remaining sandbox failures are the known
+missing optional deps: faiss/anthropic/solders).

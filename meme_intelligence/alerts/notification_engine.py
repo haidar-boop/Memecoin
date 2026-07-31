@@ -298,6 +298,14 @@ class AutomationRules:
         #    "only send me coins less than 1 hour old"). A pool older than
         #    ``opportunity_max_age_hours`` is past the entry window, so its
         #    buy-side alert is suppressed. ON by default at 1h. See ``_too_old``.
+        # 3c) NOBODY COULD SEE INSIDE — holder concentration was never measured
+        #    (operator 2026-07-31: "clear rug pulls or dumb coins"). A coin with
+        #    unknown holder facts scores a perfect security 100 on launchpad
+        #    table stakes and fires no rug signal (unknown is not guilt,
+        #    Rule 8) — the exact hole obvious rugs walk through. Pitching is
+        #    different from accusing: a PITCH requires measured evidence, so
+        #    with no top-1/top-10 reading the buy-side alert is suppressed.
+        #    Protective alerts untouched. See ``_holders_unmeasured``.
         #
         # A fourth condition suppresses only the WEAK/provisional tiers
         # (``_DECLINE_SUPPRESSED_TYPES``):
@@ -326,7 +334,8 @@ class AutomationRules:
         # warning.
         if (deterministic_risk_veto is not None
                 or self._untradeable(result) or self._oversized(result)
-                or self._below_hard_floor(result) or self._too_old(result)):
+                or self._below_hard_floor(result) or self._too_old(result)
+                or self._holders_unmeasured(result)):
             events = [e for e in events if e.alert_type not in _BUY_SIDE_ALERT_TYPES]
         else:
             if self._score_declining(result, previous_score):
@@ -381,6 +390,29 @@ class AutomationRules:
                 and math.isfinite(mcap) and mcap < t.hard_min_market_cap_usd):
             return True
         return False
+
+    def _holders_unmeasured(self, result: PipelineResult) -> bool:
+        """True when holder concentration was never actually measured — no
+        top-1 AND no top-10 figure from any source (GoPlus or the on-chain
+        census) — and the operator's evidence gate is on.
+
+        Root cause this closes (operator 2026-07-31, "clear rug pulls or dumb
+        coins"; measured in-session): an unreadable coin renormalizes to a
+        perfect security score on launchpad table stakes and fires zero rug
+        signals, so the coins the bot knows LEAST about pass its gates most
+        easily. For buy-side pitching the burden of proof flips: no measured
+        holder facts, no pitch. Protective alerts are untouched, and this
+        reads only the profile already collected — zero extra API cost. NaN
+        counts as unmeasured (a corrupt reading is not evidence)."""
+        if not self._t.buy_alerts_require_holder_facts:
+            return False
+        profile = result.security_profile
+        if profile is None:
+            return True  # no security profile at all: nothing was measured
+        top1, top10 = profile.top_holder_percent, profile.top10_holder_percent
+        measured = ((top1 is not None and math.isfinite(top1))
+                    or (top10 is not None and math.isfinite(top10)))
+        return not measured
 
     def _oversized(self, result: PipelineResult) -> bool:
         """True when the coin has already grown past the operator's buy-side

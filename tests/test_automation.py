@@ -998,3 +998,50 @@ def test_hard_floor_validates_and_loads_from_env():
         AlertThresholds(hard_min_liquidity_usd=-1.0)
     s = Settings.from_env(env={"MEMEINTEL_ALERTS_HARD_MIN_LIQUIDITY_USD": "15000"})
     assert s.alerts.hard_min_liquidity_usd == 15000.0
+
+
+# ---- Holder-evidence gate (operator 2026-07-31: "clear rug pulls or dumb
+# coins") — a coin whose holder concentration was never measured scores a
+# perfect security 100 on launchpad table stakes and fires zero rug signals,
+# so the coins the bot knows LEAST about passed its gates most easily. ----
+
+
+async def test_unmeasured_holder_facts_suppress_buy_side():
+    """The measured root cause end-to-end: a coin with NO top-1 and NO top-10
+    reading would pitch under the legacy rules (proving the hole) and is
+    suppressed under the default gate (proving the fix)."""
+    blind = make_profile(top_holder_percent=None, top10_holder_percent=None)
+    result = await pipeline_result(profile=blind)
+
+    legacy = AutomationRules(AlertThresholds(buy_alerts_require_holder_facts=False),
+                             AlertEngineSettings(), now_func=lambda: NOW)
+    assert {e.alert_type for e in legacy.evaluate(result)} & _BUY_SIDE_ALERT_TYPES
+
+    assert not ({e.alert_type for e in make_rules().evaluate(result)}
+                & _BUY_SIDE_ALERT_TYPES)
+
+
+async def test_one_measured_concentration_figure_is_evidence_enough():
+    """A coin with only the top-10 figure (top-1 unknown) WAS measured — the
+    gate demands evidence, it does not demand every field (Rule 8)."""
+    seen = make_profile(top_holder_percent=None)  # top10 still known (22%)
+    result = await pipeline_result(profile=seen)
+    assert {e.alert_type for e in make_rules().evaluate(result)} & _BUY_SIDE_ALERT_TYPES
+
+
+async def test_blind_coin_protective_alerts_still_fire():
+    """The gate suppresses PITCHES only: a blind coin that is also a confirmed
+    honeypot still produces its protective emergency alert."""
+    blind_honeypot = make_profile(honeypot=True, top_holder_percent=None,
+                                  top10_holder_percent=None)
+    result = await pipeline_result(profile=blind_honeypot)
+    types = {e.alert_type for e in make_rules().evaluate(result)}
+    assert "emergency_review" in types
+    assert not (types & _BUY_SIDE_ALERT_TYPES)
+
+
+def test_holder_evidence_gate_defaults_on_and_loads_from_env():
+    assert AlertThresholds().buy_alerts_require_holder_facts is True
+    s = Settings.from_env(
+        env={"MEMEINTEL_ALERTS_BUY_ALERTS_REQUIRE_HOLDER_FACTS": "false"})
+    assert s.alerts.buy_alerts_require_holder_facts is False
