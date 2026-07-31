@@ -1045,3 +1045,35 @@ def test_holder_evidence_gate_defaults_on_and_loads_from_env():
     s = Settings.from_env(
         env={"MEMEINTEL_ALERTS_BUY_ALERTS_REQUIRE_HOLDER_FACTS": "false"})
     assert s.alerts.buy_alerts_require_holder_facts is False
+
+
+# ---- Size-at-alert line (operator 2026-07-31: "show the mc too at time
+# of it being sent") ----
+
+
+async def test_buy_side_alert_leads_with_market_cap_at_send_time():
+    result = await pipeline_result(pair=make_pair(market_cap=400_000.0,
+                                                  liquidity_usd=90_000.0))
+    events = make_rules().evaluate(result)
+    pitch = next(e for e in events if e.alert_type in _BUY_SIDE_ALERT_TYPES)
+    assert pitch.reasons[0] == ("market cap $400,000 | liquidity $90,000 "
+                                "— at alert time")
+
+
+async def test_size_line_names_fdv_when_that_is_the_source():
+    result = await pipeline_result(pair=make_pair(market_cap=None, fdv=420_000.0))
+    events = make_rules().evaluate(result)
+    pitch = next(e for e in events if e.alert_type in _BUY_SIDE_ALERT_TYPES)
+    assert "(from FDV)" in pitch.reasons[0]        # provenance never hidden
+
+
+async def test_size_line_only_on_buy_side_alerts():
+    """A protective alert (blind honeypot emergency) carries no size line —
+    the operator asked for it on coin pitches, and protective reasons must
+    stay about the danger."""
+    blind_honeypot = make_profile(honeypot=True, top_holder_percent=None,
+                                  top10_holder_percent=None)
+    result = await pipeline_result(profile=blind_honeypot)
+    events = make_rules().evaluate(result)
+    emergency = next(e for e in events if e.alert_type == "emergency_review")
+    assert not any("at alert time" in r for r in emergency.reasons)

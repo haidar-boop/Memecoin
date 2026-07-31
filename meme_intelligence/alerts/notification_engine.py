@@ -352,6 +352,14 @@ class AutomationRules:
                 events = [dataclasses.replace(e, checklist=checklist)
                           if e.alert_type in _BUY_SIDE_ALERT_TYPES else e
                           for e in events]
+            # Operator request 2026-07-31: every coin pitch leads with the
+            # market cap (and pool depth) AT SEND TIME, so the phone shows
+            # the coin's size the moment it arrives — no app-switch needed
+            # to judge "how early is this."
+            size_line = self._size_at_alert_line(result)
+            events = [dataclasses.replace(e, reasons=(size_line,) + tuple(e.reasons))
+                      if e.alert_type in _BUY_SIDE_ALERT_TYPES else e
+                      for e in events]
         return gate_events_by_interest(
             events, operator_interest=operator_interest,
             enabled=self._s.risk_alerts_require_interest)
@@ -390,6 +398,27 @@ class AutomationRules:
                 and math.isfinite(mcap) and mcap < t.hard_min_market_cap_usd):
             return True
         return False
+
+    def _size_at_alert_line(self, result: PipelineResult) -> str:
+        """One reason line naming the coin's size at send time (operator
+        2026-07-31: "show the mc too at time of it being sent").
+
+        Provenance is never hidden (Rule 8, same convention as
+        ``_market_cap_check``): an FDV-derived figure says so, an unknown
+        says "unknown" rather than guessing. ``_untradeable`` already
+        suppresses unknown-mcap buy alerts, so "unknown" here is rare —
+        but the line must stay honest if that path ever changes."""
+        mcap = result.pair.effective_market_cap
+        if mcap is None or not math.isfinite(mcap):
+            cap = "market cap unknown"
+        elif result.pair.market_cap is not None:
+            cap = f"market cap ${mcap:,.0f}"
+        else:
+            cap = f"market cap ${mcap:,.0f} (from FDV)"
+        liq = result.pair.liquidity_usd
+        if liq is not None and math.isfinite(liq):
+            return f"{cap} | liquidity ${liq:,.0f} — at alert time"
+        return f"{cap} — at alert time"
 
     def _holders_unmeasured(self, result: PipelineResult) -> bool:
         """True when holder concentration was never actually measured — no
