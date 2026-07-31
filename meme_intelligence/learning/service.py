@@ -76,6 +76,32 @@ def _argmax_label(distribution: dict[str, float] | None) -> str | None:
     return max(distribution, key=distribution.get)
 
 
+def _rug_source_label(distribution: dict[str, float] | None) -> str | None:
+    """The label the RUG source should be graded on — or None to abstain.
+
+    ``rug_score_to_distribution`` puts P(rug) = score/100 and spreads the rest
+    UNIFORMLY over pump/flat/dump precisely because the rug engine has no
+    opinion there. Taking a plain argmax therefore recorded "the rug engine
+    predicted PUMP" for every coin it did not flag (a 3-way tie at 0.333 broken
+    by dict insertion order). Since most memecoins resolve DUMP or RUG, that
+    graded the rug source wrong almost every time, and the adaptive ensemble —
+    which weights sources by rolling accuracy — drove its weight toward zero,
+    silently removing the rug signal from the blend (2026-07-31 bug hunt).
+
+    The engine speaks to rug-vs-not-rug only, so it is graded only when it
+    actually points at RUG; otherwise it abstains, and ``record_outcome``
+    skips abstentions rather than counting them as wrong. Its accuracy then
+    means "of the coins I called rugs, how many rugged" — the right question
+    for a veto source.
+    """
+    if not distribution:
+        return None
+    rug_label = OutcomeBucket.RUG.value
+    rug_p = distribution.get(rug_label, 0.0)
+    others = [v for k, v in distribution.items() if k != rug_label]
+    return rug_label if others and rug_p > max(others) else None
+
+
 class LearningService:
     """Orchestrates the analog + model + rug + ensemble mind layer."""
 
@@ -430,7 +456,7 @@ class LearningService:
             "source_labels": {
                 SOURCE_ANALOG: _argmax_label(analog_dist),
                 SOURCE_LIGHTGBM: _argmax_label(model_dist),
-                SOURCE_RUG: _argmax_label(rug_dist),
+                SOURCE_RUG: _rug_source_label(rug_dist),
             },
             "archetype": archetype,
             "novelty_flagged": novelty_flagged,

@@ -2,6 +2,7 @@
 
 import pytest
 
+from meme_intelligence.learning.models import OutcomeBucket
 from meme_intelligence.learning.ensemble import (
     SOURCE_ANALOG,
     SOURCE_LIGHTGBM,
@@ -151,3 +152,37 @@ def test_save_load_roundtrip(tmp_path):
     assert reloaded.raw_accuracy(SOURCE_LIGHTGBM) == 1.0
     assert reloaded.weights((SOURCE_ANALOG, SOURCE_LIGHTGBM)) == ens.weights(
         (SOURCE_ANALOG, SOURCE_LIGHTGBM))
+
+
+# ---- The rug source must abstain outside its competence (2026-07-31) ----
+
+
+def test_the_rug_source_abstains_instead_of_predicting_pump():
+    """CONFIRMED bug: rug_score_to_distribution spreads the non-rug mass
+    UNIFORMLY (the engine has no opinion on pump/flat/dump), so a plain argmax
+    recorded 'the rug engine predicted PUMP' for every unflagged coin — a
+    3-way tie broken by dict order. Most memecoins resolve DUMP/RUG, so the
+    source was graded wrong almost every time and the accuracy-weighted
+    ensemble drove its weight to ~0, removing the rug signal from the blend."""
+    from meme_intelligence.learning.service import _rug_source_label
+
+    assert _rug_source_label(rug_score_to_distribution(0.0)) is None
+    assert _rug_source_label(rug_score_to_distribution(10.0)) is None
+    assert _rug_source_label(rug_score_to_distribution(80.0)) == OutcomeBucket.RUG.value
+
+
+def test_an_abstaining_source_is_not_counted_as_wrong():
+    """The mechanism the fix relies on: record_outcome skips None."""
+    abstaining = AdaptiveEnsemble(window=10)
+    for _ in range(5):
+        abstaining.record_outcome({SOURCE_RUG: None}, OutcomeBucket.DUMP.value)
+
+    # The old behaviour: the same 5 coins, but the source labelled "pump"
+    # every time (the tie-break) while they all resolved DUMP.
+    graded_wrong = AdaptiveEnsemble(window=10)
+    for _ in range(5):
+        graded_wrong.record_outcome({SOURCE_RUG: OutcomeBucket.PUMP.value},
+                                    OutcomeBucket.DUMP.value)
+
+    assert (abstaining.source_accuracy(SOURCE_RUG)
+            > graded_wrong.source_accuracy(SOURCE_RUG))

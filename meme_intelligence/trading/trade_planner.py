@@ -325,7 +325,18 @@ class TradePlanner:
             conviction = ConvictionLevel.SPECULATIVE
 
         # Discovery is not confirmation: thin evidence caps conviction.
-        if coverage < self._s.min_confirmation_coverage:
+        #
+        # ``<=``, not ``<``. Three of the six components are ALWAYS available
+        # (security is required, market_conditions is a regime constant, and
+        # risk_reward is always computed), and their weights sum to exactly
+        # 0.50 — the same value as the default floor. With a strict ``<`` the
+        # minimum achievable coverage could never fall below the floor, so
+        # this cap was unreachable dead code and a coin with NO discovery, NO
+        # community and NO on-chain evidence still earned HIGH conviction and
+        # a 5% position ceiling (2026-07-31 bug hunt). Now baseline-only
+        # evidence caps at SPECULATIVE, and any ONE real confirming source
+        # lifts coverage above the floor.
+        if coverage <= self._s.min_confirmation_coverage:
             conviction = ConvictionLevel.SPECULATIVE if conviction is not ConvictionLevel.NO_TRADE \
                 else conviction
 

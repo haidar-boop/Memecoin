@@ -2519,3 +2519,50 @@ the distribution construction than this pass could afford; and
 accuracy issues in advisory layers, neither moves money.
 
 13 new/corrected tests. Suite: 66 pre-existing sandbox failures unchanged.
+
+## 2026-07-31 — Bug hunt round 4: the two deferred accuracy bugs
+
+Both were left unverified when the hunt hit the usage limit. Verified inline
+(no agent fan-out) and fixed; each has a test that fails with the fix
+reverted.
+
+**1. The rug engine's vote was being silently deleted from the mind layer**
+(`learning/service.py`). `rug_score_to_distribution` sets P(rug)=score/100 and
+spreads the remaining mass UNIFORMLY over pump/flat/dump — deliberately, since
+the engine has no opinion there. But the recorded source label was
+`_argmax_label(rug_dist)`, and a uniform 3-way tie at 0.333 resolves by dict
+insertion order to **"pump"**. So every coin the rug engine did NOT flag was
+recorded as "the rug source predicted PUMP". Most memecoins resolve DUMP or
+RUG, so the source was graded wrong nearly every time, and the accuracy-
+weighted `AdaptiveEnsemble` drove its weight toward zero — quietly removing
+the rug signal from the blended P(rug) the mind-layer veto depends on. Fixed
+with `_rug_source_label`: the source is graded ONLY when it actually points at
+RUG, and abstains otherwise. `record_outcome` already skips `None` sources
+rather than counting them wrong, so no ensemble change was needed. Its
+accuracy now answers the right question for a veto source: "of the coins I
+called rugs, how many rugged".
+
+**2. The trade-plan thin-evidence cap was unreachable in production**
+(`trading/trade_planner.py`). "Discovery is not confirmation" caps conviction
+at SPECULATIVE when `coverage < min_confirmation_coverage` (0.50). But three
+components are always present once a regime is known — security (0.20),
+risk_reward (0.15), market_conditions (0.15) — summing to exactly 0.50, and
+`0.50 < 0.50` is False. **Correction to the original finding:** the cap is not
+dead everywhere — with `MarketRegime.UNKNOWN` market_conditions is None,
+coverage is 0.35, and it fires (an existing test covers that). It is dead
+precisely where it matters: the live scanner and daily routine always
+determine a regime, so a coin with NO discovery, NO community and NO on-chain
+evidence earned full HIGH conviction and a 5% position ceiling in every real
+plan. Fixed by comparing `<=`, so baseline-only evidence caps at SPECULATIVE
+while any ONE real confirming source still clears it. Advisory only — the
+system never executes from a plan — but it is sizing guidance the operator
+could act on.
+
+**Still deferred:** `holdings_guard` alert delivery is fire-and-forget — a
+Telegram outage at the moment of a rug exit loses that alert permanently
+(dispatch failure is logged, not queued). A correct fix is a persistent
+delivery retry queue, which is a design change rather than a patch, and it
+touches the alert path every component shares. Not started.
+
+4 new tests. Suite: 66 pre-existing sandbox failures (faiss/anthropic)
+unchanged.

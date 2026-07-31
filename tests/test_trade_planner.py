@@ -187,3 +187,30 @@ def test_render_produces_readable_plan():
     assert "research only" in text
     assert "Invalidation conditions" in text
     assert "Would I buy this if the price was not moving?" in text
+
+
+def test_thin_evidence_caps_conviction_even_once_the_regime_is_known():
+    """CONFIRMED bug: the cap was unreachable in PRODUCTION. Security (0.20),
+    risk_reward (0.15) and market_conditions (0.15) are all always present once
+    a regime is determined — and the live scanner always determines one — so
+    coverage bottomed out at exactly the 0.50 floor while the test used `<`.
+    A coin with NO discovery, NO community and NO on-chain evidence therefore
+    earned full conviction and a 5% position ceiling."""
+    strong = clean_security_profile(holder_count=5000, top_holder_percent=1.0,
+                                    top10_holder_percent=12.0, lp_locked_percent=99.0)
+    security = SecurityAnalyzer(SecurityThresholds(), SecuritySubWeights()).assess(strong)
+    plan = make_planner().build_plan(make_pair(), security,
+                                     regime=MarketRegime.BULL)  # regime KNOWN
+    assert plan.score_coverage == 0.5          # the exact boundary
+    assert plan.conviction is ConvictionLevel.SPECULATIVE
+    assert plan.max_position_percent == TradingSettings().speculative_max_position_percent
+
+
+def test_one_confirming_source_lifts_the_cap():
+    """The cap must not swallow genuinely-evidenced coins: any single real
+    confirming source puts coverage above the floor."""
+    pair, security, onchain, token = full_inputs()
+    plan = make_planner().build_plan(pair, security, onchain=onchain, token=token,
+                                     regime=MarketRegime.BULL)
+    assert plan.score_coverage > 0.5
+    assert plan.conviction is not ConvictionLevel.SPECULATIVE
