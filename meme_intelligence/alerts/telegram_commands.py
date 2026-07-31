@@ -615,6 +615,7 @@ class TelegramCommandListener(BaseCollector):
             f"learning {onoff('learning')} | mind veto {onoff('learning_veto')} | "
             f"pump.fun {onoff('pumpfun')} | jupiter probe {onoff('jupiter_probe')} | "
             f"holder facts {onoff('onchain_security')} | "
+            f"bundle screen {onoff('bundle_check')} | "
             f"trading {trading}")
         rug_watch = snap.get("rug_watch")
         if rug_watch:

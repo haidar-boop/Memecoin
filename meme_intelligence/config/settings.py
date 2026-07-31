@@ -506,11 +506,13 @@ class WalletClusterSettings:
     supply in a single slot. The tell is not who HOLDS, it is who FUNDED: fresh
     sybil wallets share a funder, or were created in the same transaction.
 
-    Deliberately READ-ONLY and on-demand: this feeds no score, no gate, and no
-    veto. The previous holder-concentration layer was wired toward alerts and
-    was scrapped for it; this one answers the operator's question when he asks
-    and changes nothing when he doesn't. Wiring it into alerting is a separate,
-    explicit decision measured against real data first.
+    Originally READ-ONLY and on-demand (/bundle only). On 2026-07-31 the
+    operator made the explicit decision this docstring reserved: the check now
+    also runs automatically on outgoing coin pitches (``alert_check_*`` fields
+    below) — annotating every pitch with what the funding graph shows, and
+    suppressing the pitch when one actor's cluster controls a damning share.
+    It still feeds no SCORE: the rug engine and the master score are untouched;
+    only alert delivery consults it.
     """
 
     # Wallets examined per coin (getTokenLargestAccounts caps the census at 20).
@@ -531,8 +533,29 @@ class WalletClusterSettings:
     # Clusters below this combined share of supply are still listed, just not
     # headlined — 2 wallets sharing a funder at 0.3% is noise, not a bundle.
     min_cluster_percent_to_flag: float = 10.0
+    # ---- Automatic check on outgoing coin pitches (operator decision
+    # 2026-07-31: "Yes build 1", upgrading /bundle from display-only). The
+    # check runs ONLY on a buy-side alert that already survived every other
+    # gate — the rare, expensive spend happens last (Rule 11), bounded by the
+    # daily budget below and once per token per process. Every failure path
+    # ANNOTATES NOTHING AND SUPPRESSES NOTHING: an unreadable funding graph is
+    # unknown, and unknown never blocks an alert the other gates passed
+    # (Rule 8 — the pitch already carries measured holder facts).
+    alert_check_enabled: bool = True
+    alert_check_max_per_day: int = 40
+    # A MULTI-WALLET single-actor cluster controlling at least this % of the
+    # visible supply suppresses the pitch outright — "100 holders" that are
+    # one person is a bundled launch, the strongest fresh-coin rug tell the
+    # operator asked to catch. 0 = annotate only, never suppress.
+    alert_suppress_cluster_percent: float = 40.0
 
     def __post_init__(self) -> None:
+        if self.alert_check_max_per_day < 0:
+            raise ConfigurationError(
+                "wallet_clusters alert_check_max_per_day must be >= 0 "
+                f"(0 = unlimited), got {self.alert_check_max_per_day}")
+        _check_range("wallet_clusters alert_suppress_cluster_percent",
+                     self.alert_suppress_cluster_percent, 0.0, 100.0)
         if not (0 < self.top_holders_limit <= 20):
             raise ConfigurationError(
                 "wallet_clusters top_holders_limit must be within (0, 20] — "

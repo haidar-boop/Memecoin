@@ -38,6 +38,7 @@ from meme_intelligence.alerts.notification_engine import (
     events_from_security_changes,
     gate_events_by_interest,
 )
+from meme_intelligence.analyzers.wallet_clusters import cluster_holders
 from meme_intelligence.analyzers.security_monitor import (
     detect_security_changes,
     extract_facts,
@@ -226,6 +227,7 @@ class ContinuousScanner:
         wallet_service=None,     # WalletDataService (Part 17); metered credits
         onchain_security_collector=None,  # OnChainSecurityCollector; bounded RPC per coin
         social_client=None,      # LunarCrushClient (Roadmap item 5); metered credits
+        bundle_service=None,     # BundleService (/bundle engine); metered Helius RPC
         ai_service=None,         # AIJudgmentService (Part 23); costs API tokens
         learning_service=None,   # LearningService (mind layer, Section 10); off by default
         regime: MarketRegime = MarketRegime.UNKNOWN,
@@ -342,9 +344,21 @@ class ContinuousScanner:
             "jupiter_probe": jupiter_client is not None and settings.liquidity_probe.enabled,
             "onchain_security": (onchain_security_collector is not None
                                  and settings.onchain_security.enabled),
+            "bundle_check": (bundle_service is not None
+                             and settings.wallet_clusters.alert_check_enabled),
             "buy_button": settings.execution.buy_button_enabled,
             "trading_live": settings.execution.live_enabled,
         }
+        # Automatic funding-cluster screen on outgoing pitches (operator
+        # decision 2026-07-31). Spend bookkeeping mirrors the wallet credit
+        # gate: a daily budget rolled on UTC days plus once-per-token dedupe
+        # (a re-pitch hours later reuses the recorded verdict rather than
+        # re-spending the RPC walk).
+        self._bundle = bundle_service
+        self._bundle_checks_today = 0
+        self._bundle_check_day: str | None = None
+        self._bundle_verdicts: "OrderedDict[str, tuple[str, bool]]" = OrderedDict()
+        self._bundle_verdict_cap = 4096
         self._pipeline = ResearchPipeline(settings, goplus_client,
                                           community_client=community_client,
                                           wallet_service=wallet_service,
@@ -864,6 +878,12 @@ class ContinuousScanner:
                 self._logger.info("suppressing %d alert(s) for muted token %s",
                                   len(events), token.address)
                 events = []
+        # Funding-cluster screen, LAST and only on a pitch that survived every
+        # other gate (Rule 11 — the expensive metered walk guards the rare
+        # spend). Annotates what the funding graph shows; suppresses outright
+        # when one actor's multi-wallet cluster controls a damning share.
+        if events and any(e.alert_type in _BUY_SIDE_ALERT_TYPES for e in events):
+            events = await self._bundle_screen(token, events)
         delivered = await self._notifier.dispatch(events)
         stats.alerts.extend(delivered)
         for event in delivered:
@@ -875,6 +895,80 @@ class ContinuousScanner:
             )
 
         self._feed_learning(result, stats, creator=creator)
+
+    async def _bundle_screen(self, token, events: list[AlertEvent]) -> list[AlertEvent]:
+        """Annotate (or suppress) a surviving pitch with funding-cluster facts.
+
+        Operator decision 2026-07-31 ("Yes build 1"): the /bundle engine now
+        runs automatically on outgoing buy-side alerts — a bundled launch
+        spreads one actor's supply across fresh wallets so every per-wallet
+        concentration check passes, and the tell is who FUNDED, not who holds.
+
+        Failure contract (Rule 8): every unreadable/over-budget/disabled path
+        returns the events UNCHANGED — the pitch already carries measured
+        holder facts, and an unknown funding graph must neither block it nor
+        decorate it with fabricated confidence. Suppression requires POSITIVE
+        evidence: a multi-wallet cluster at/above the configured share.
+        """
+        ws = self._settings.wallet_clusters
+        if (self._bundle is None or not ws.alert_check_enabled
+                or token.chain not in ("solana", "sol")):
+            return events
+
+        cached = self._bundle_verdicts.get(token.address)
+        if cached is not None:
+            line, suppress = cached
+        else:
+            if ws.alert_check_max_per_day > 0:
+                day = self._now().date().isoformat()
+                if day != self._bundle_check_day:
+                    self._bundle_check_day = day
+                    self._bundle_checks_today = 0
+                if self._bundle_checks_today >= ws.alert_check_max_per_day:
+                    self._logger.info(
+                        "bundle-screen daily budget (%d) exhausted — pitch for %s "
+                        "goes out without a funding-cluster line",
+                        ws.alert_check_max_per_day, token.address)
+                    return events
+                self._bundle_checks_today += 1
+            try:
+                stakes, origins, notes = await self._bundle.gather(token.address)
+                report = cluster_holders(stakes, origins, ws)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — unknown never blocks a pitch
+                self._logger.warning("bundle screen unreadable for %s (pitch "
+                                     "unchanged): %s", token.address, exc)
+                return events
+            top = report.clusters[0] if report.clusters else None
+            if top is not None and top.size >= 2:
+                line = (f"funding clusters: {top.size} of the top holders are ONE "
+                        f"actor holding {top.combined_percent:.0f}% "
+                        f"({report.holders_examined} examined)")
+                suppress = (ws.alert_suppress_cluster_percent > 0.0
+                            and top.combined_percent >= ws.alert_suppress_cluster_percent)
+            elif report.holders_examined > 0:
+                line = (f"funding clusters: none found among {report.holders_examined} "
+                        f"top holders ({report.unknown_origins} unreadable)")
+                suppress = False
+            else:
+                return events  # nothing measured: say nothing (Rule 8)
+            self._bundle_verdicts[token.address] = (line, suppress)
+            self._bundle_verdicts.move_to_end(token.address)
+            while len(self._bundle_verdicts) > self._bundle_verdict_cap:
+                self._bundle_verdicts.popitem(last=False)
+            try:
+                self._storage.add_journal(token, "bundle_check", line)
+            except Exception as exc:  # noqa: BLE001 — bookkeeping never blocks alerts
+                self._logger.warning("bundle journal failed for %s: %s",
+                                     token.address, exc)
+
+        if suppress:
+            self._logger.warning("pitch for %s SUPPRESSED — %s", token.address, line)
+            return [e for e in events if e.alert_type not in _BUY_SIDE_ALERT_TYPES]
+        return [dataclasses.replace(e, reasons=tuple(e.reasons) + (line,))
+                if e.alert_type in _BUY_SIDE_ALERT_TYPES else e
+                for e in events]
 
     def _operator_interest(self, token) -> bool:
         """Is a protective alert on this token guarding a real decision?

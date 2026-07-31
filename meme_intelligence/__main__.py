@@ -1195,6 +1195,12 @@ async def _cmd_monitor(args, settings) -> int:
                 if exec_rpc is not None:
                     stack.push_async_callback(exec_rpc.close)
             holdings_guard = None
+            # Funding-cluster screen on outgoing pitches (operator decision
+            # 2026-07-31) — built once, shared with the /bundle command below.
+            bundle_service = build_bundle_service(
+                settings, helius_rate_limiter=helius_rate_limiter)
+            if bundle_service is not None:
+                stack.push_async_callback(bundle_service.close_all)
             scanner = ContinuousScanner(
                 settings, storage, notifier,
                 gecko_client=gecko, goplus_client=goplus,
@@ -1206,6 +1212,7 @@ async def _cmd_monitor(args, settings) -> int:
                 wallet_service=wallet_service,
                 onchain_security_collector=onchain_security,
                 social_client=social_client,
+                bundle_service=bundle_service,
                 ai_service=ai_service,
                 learning_service=learning_service,
                 regime=MarketRegime(args.regime),
@@ -1232,10 +1239,6 @@ async def _cmd_monitor(args, settings) -> int:
             # its command context wraps the scanner's public methods.
             if settings.telegram_commands.enabled:
                 if settings.telegram_bot_token and settings.telegram_chat_id:
-                    bundle_service = build_bundle_service(
-                        settings, helius_rate_limiter=helius_rate_limiter)
-                    if bundle_service is not None:
-                        stack.push_async_callback(bundle_service.close_all)
                     context = CommandContext(
                         storage=storage,
                         settings=settings,

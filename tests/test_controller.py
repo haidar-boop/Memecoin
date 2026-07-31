@@ -1935,3 +1935,136 @@ async def test_a_held_avoid_coin_does_not_pin_the_recheck_queue():
         entries = {e.token.address: e for e in storage.get_watchlist()}
         assert "TokenHeld" in entries          # still tracked (it is held)
         assert entries["TokenHeld"].updated_at >= before["TokenHeld"]  # rotation advances
+
+
+# ---- Automatic funding-cluster screen on outgoing pitches (2026-07-31,
+# operator decision "Yes build 1" — /bundle upgraded from display-only) ----
+
+from meme_intelligence.analyzers.wallet_clusters import (  # noqa: E402
+    FRESH,
+    HolderStake,
+    WalletOrigin,
+)
+
+
+class FakeBundleService:
+    """Serves a scripted (stakes, origins, notes) tuple; can fail instead."""
+
+    def __init__(self, stakes=None, origins=None, fail=False):
+        self.stakes = stakes or []
+        self.origins = origins or {}
+        self.fail = fail
+        self.calls = 0
+
+    async def gather(self, mint):
+        self.calls += 1
+        if self.fail:
+            raise TransientCollectorError("helius down")
+        return self.stakes, self.origins, []
+
+
+def bundled_launch(percent_each=15.0, wallets=4):
+    """A classic bundle: N fresh wallets all funded by the same wallet."""
+    stakes = [HolderStake(wallet=f"W{i}", percent=percent_each)
+              for i in range(wallets)]
+    origins = {f"W{i}": WalletOrigin(wallet=f"W{i}", kind=FRESH, funder="FunderX",
+                                     funder_is_infrastructure=False)
+               for i in range(wallets)}
+    return stakes, origins
+
+
+def scanner_with_bundle(storage, pools, profiles, bundle, env=None):
+    settings = Settings.from_env(env=env or {})
+    notifier = NotificationEngine([RecordingSink()], AlertEngineSettings(),
+                                  time_func=lambda: 0.0)
+    sink = RecordingSink()
+    notifier = NotificationEngine([sink], AlertEngineSettings(), time_func=lambda: 0.0)
+
+    async def fake_sleep(seconds):
+        pass
+
+    scanner = ContinuousScanner(
+        settings, storage, notifier,
+        gecko_client=FakeGecko(pools), goplus_client=FakeGoPlus(profiles),
+        bundle_service=bundle, now_func=lambda: NOW, sleep_func=fake_sleep)
+    return scanner, sink
+
+
+async def test_a_bundled_launch_is_suppressed_before_it_reaches_the_phone():
+    """4 fresh wallets sharing one funder holding 60% >= the 40% suppression
+    threshold: the pitch must not go out."""
+    pair = make_pair()
+    stakes, origins = bundled_launch(percent_each=15.0, wallets=4)
+    bundle = FakeBundleService(stakes, origins)
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner, sink = scanner_with_bundle(
+            storage, [pair], {pair.base_token.address: clean_profile(pair.base_token)},
+            bundle)
+        await scanner.run(max_cycles=1)
+    assert bundle.calls == 1
+    assert not any(e.alert_type in _BUY_SIDE_ALERT_TYPES for e in sink.sent)
+
+
+async def test_a_small_cluster_annotates_the_pitch_instead_of_killing_it():
+    """2 wallets sharing a funder at 6% total: real info, not a rug — the
+    pitch goes out carrying the funding-cluster line."""
+    pair = make_pair()
+    stakes, origins = bundled_launch(percent_each=3.0, wallets=2)
+    bundle = FakeBundleService(stakes, origins)
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner, sink = scanner_with_bundle(
+            storage, [pair], {pair.base_token.address: clean_profile(pair.base_token)},
+            bundle)
+        await scanner.run(max_cycles=1)
+    pitches = [e for e in sink.sent if e.alert_type in _BUY_SIDE_ALERT_TYPES]
+    assert pitches
+    assert any("funding clusters" in r and "ONE actor" in r
+               for e in pitches for r in e.reasons)
+
+
+async def test_an_unreadable_funding_graph_never_blocks_the_pitch():
+    """Rule 8: the pitch survived every measured gate; an unknown funding
+    graph neither blocks nor decorates it."""
+    pair = make_pair()
+    bundle = FakeBundleService(fail=True)
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner, sink = scanner_with_bundle(
+            storage, [pair], {pair.base_token.address: clean_profile(pair.base_token)},
+            bundle)
+        await scanner.run(max_cycles=1)
+    pitches = [e for e in sink.sent if e.alert_type in _BUY_SIDE_ALERT_TYPES]
+    assert pitches                                     # fail OPEN
+    assert not any("funding clusters" in r for e in pitches for r in e.reasons)
+
+
+async def test_the_daily_bundle_budget_is_respected():
+    pairs, profiles = [], {}
+    for i in range(3):
+        p = make_pair(address=f"TokenBnd{i}", symbol=f"BN{i}",
+                      liquidity_usd=90_000.0 - i * 1_000.0)
+        pairs.append(p)
+        profiles[p.base_token.address] = clean_profile(p.base_token)
+    stakes, origins = bundled_launch(percent_each=3.0, wallets=2)
+    bundle = FakeBundleService(stakes, origins)
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner, sink = scanner_with_bundle(
+            storage, pairs, profiles, bundle,
+            env={"MEMEINTEL_WALLET_CLUSTERS_ALERT_CHECK_MAX_PER_DAY": "2"})
+        await scanner.run(max_cycles=1)
+    assert bundle.calls == 2                           # third pitch: no spend
+    # and every coin still got a pitch delivered (budget never blocks delivery)
+    pitched = {e.token.address for e in sink.sent
+               if e.alert_type in _BUY_SIDE_ALERT_TYPES}
+    assert len(pitched) == 3
+
+
+async def test_disabled_screen_spends_nothing():
+    pair = make_pair()
+    bundle = FakeBundleService(*bundled_launch())
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner, sink = scanner_with_bundle(
+            storage, [pair], {pair.base_token.address: clean_profile(pair.base_token)},
+            bundle, env={"MEMEINTEL_WALLET_CLUSTERS_ALERT_CHECK_ENABLED": "false"})
+        await scanner.run(max_cycles=1)
+    assert bundle.calls == 0
+    assert any(e.alert_type in _BUY_SIDE_ALERT_TYPES for e in sink.sent)
