@@ -1,4 +1,4 @@
-# Session Handoff — Current State as of 2026-07-12
+# Session Handoff — Current State as of 2026-07-31
 
 > **What this is:** the "you just woke up in this project — here's where
 > things stand" briefing. The durable knowledge lives in the sibling docs
@@ -10,6 +10,22 @@
 
 ## Status snapshot
 
+- **2026-07-31 — OPERATOR-DECLARED SWEET SPOT, tagged
+  `snapshot-sweet-spot-2026-07-31`** ("I think we found a sweet spot for
+  the bot"). The tagged state = the 2026-07-28 base PLUS, all from the
+  07-30/07-31 sessions (each has a DECISIONS_LOG entry): the on-chain
+  holder/LP facts layer ported and ON; /bundle funding-cluster check;
+  hard liquidity/mcap floors + mcap ceiling + 3h freshness (droplet
+  `.env`); wallet intel ON with the operator's PAID Helius key, capped
+  300 lookups/day and spent only on coins that survive the rug check;
+  protective/status alerts holding-only (auto-hold on live buys,
+  auto-clear on confirmed dumps); the holder-evidence gate (no measured
+  top-1/top-10 = no buy-side pitch — closed the "perfect score on zero
+  data" hole); discovery widened to 3 pages / top 8 per cycle. Restore
+  point: `git checkout snapshot-sweet-spot-2026-07-31` (or the operator's
+  tarball copy).
+- **Branch that matters now: `claude/rug-eyes`** — the droplet pulls it
+  (supersedes `claude/memecoin-onboarding-yrvjbg` below).
 - **Everything in the spec that can be built is built** (Parts 1–33 + the
   Self-Learning Mind Layer), plus four of the follow-on projects:
   **Project 1** (live Jupiter round-trip sell test), **Project 2** (two-way
@@ -29,15 +45,15 @@
   fresh Phantom wallet funded with ~$20 CAD (never his main wallet), small
   per-trade caps in the droplet `.env`. It NEVER auto-trades — every trade
   is a button he taps.
-- **Wallet intelligence (smart-money, Part 17) is OFF in the monitor**
-  (`MEMEINTEL_WALLET_ENABLE_IN_MONITOR=false`): it exhausted the main
-  Helius account's monthly free credits and produced only 429 noise.
-  Deliberate operator decision — see "Money & keys" below and
-  DECISIONS_LOG 2026-07-11. Do not "fix" it back on. **2026-07-20:** the
-  credit-gated build is restored and sitting DORMANT (operator request —
-  he plans a paid Helius plan). Enable ONLY when he says go:
-  `bash deploy/enable-wallet-tracking.sh <paid-key>` (see README
-  "Wallet tracking" section; DECISIONS_LOG 2026-07-20).
+- **Wallet intelligence (smart-money, Part 17) is ON in the monitor as of
+  2026-07-31** — the operator upgraded to a PAID Helius plan and ran
+  `deploy/enable-wallet-tracking.sh` himself; `/status` confirms
+  "wallet intel ON". Spend protection: 300 lookups/day cap + 60-min
+  per-coin cooldown + only coins that survive the rug check
+  (`ResearchPipeline._rug_would_veto`). History: originally killed
+  2026-07-11 after exhausting the free tier (DECISIONS_LOG 2026-07-11);
+  rebuilt dormant behind the credit gate 2026-07-20; enabled for real
+  2026-07-31. Turn off with `bash deploy/enable-wallet-tracking.sh off`.
 - **Anthropic AI layer is ON** — the operator turned it back on overnight
   (2026-07-11) after keeping it off to save credits since 2026-07-10. The
   free deterministic screens still run FIRST (credit gate); watch the spend
