@@ -2447,3 +2447,75 @@ test passed for the wrong reason — derive bounds from config, never restate
 them.
 
 Suite: 66 pre-existing sandbox failures unchanged.
+
+## 2026-07-31 — Bug hunt round 3: the unverified remainder + a regression I introduced
+
+Verified the leftover candidates INLINE (no agent fan-out — the operator's
+usage limit had been hit, and re-reading the codebase from scratch in N
+subagents is what burned it). Five confirmed and fixed, one deferred, and one
+regression caught by the code review of the previous batch.
+
+**REGRESSION I INTRODUCED (caught by the code review of bbf35f8).** The new
+bounded-retry loop emitted every attempt under `rug_watch_exit` + CRITICAL,
+and the notifier's cooldown key is (chain, address, alert_type, priority) over
+900s while retries land ~30s apart. So only the FIRST alert was delivered: a
+sale that failed on attempt 1 and SUCCEEDED on attempt 2 reached the operator
+as "nothing was sold, retrying" and the "AUTO-SOLD" confirmation was
+swallowed — he would manually dump a position he no longer held. Exactly the
+collision the route-gone fix had removed elsewhere, reintroduced by my own
+fix. Fixed: the non-terminal retry notice gets its own type
+`rug_watch_exit_retry` (+ ALERT_CHANNELS entry), so the terminal outcome can
+never share a cooldown key with the retry notice. **My tests could not catch
+this** — they used a FakeNotifier with no cooldown; the new regression test
+drives the REAL NotificationEngine.
+
+**1. Double-buy on the money path** (`solana_rpc.py`). Solana returns RPC code
+-32002 both for a genuine pre-send rejection AND for "This transaction has
+already been processed" — a duplicate submission of a signature the network
+ALREADY ACCEPTED. `_describe_send_rejection` matched on the code, so an
+already-landed trade was classified "nothing was spent, safe to retry", and
+`_quote_and_swap` re-quoted and sent a SECOND real trade. Fixed with an
+already-landed marker list checked first; such errors now fall to the
+ambiguous "do NOT retry blindly — check Solscan" path.
+
+**2. Fabricated token deaths in the backtester** (`backtesting.py:174` — the
+follow-up flagged on 2026-07-31 morning). `get_best_pair` collapses "every
+provider down" into the same None as "no market", and that None was recorded
+as death: permanent -100%, RUG label, deployer blacklisted forever, and
+storage only overwrites a NULL so it could never be corrected. Now uses
+`get_token_pairs_confirmed`: death requires every provider to agree, and an
+outage records nothing.
+
+**3. Outcomes measured days late** (`backtesting.py:108`). When no snapshot
+sat near a window's target, the code fell back to a LIVE price and recorded
+it as that window's outcome — so a prediction whose 1h window was never
+snapshotted got today's price written as its "1h result", permanently, and
+fed to the learning layer. The live fallback is now gated to the same
+`window_tolerance_fraction` a snapshot must satisfy. **The existing test
+asserted the buggy behavior** (`recorded == 2` with the 1h window filled 29h
+late) and was corrected.
+
+**4. Corrupted contract addresses on Polygon** (`market_data.py:379`).
+GeckoTerminal base-token ids are `<network>_<address>`, split on the FIRST
+underscore — so `polygon_pos_0xABC...` became network `polygon`, address
+`pos_0xABC...`. Addresses never contain `_`, so it now splits on the last one.
+Not reachable on the operator's solana/bsc setup today; a landmine for any
+`polygon_*` network.
+
+**5. One .env typo from a total alert blackout** (`settings.py`). The veto
+fires when `rug.score >= ai.verify_skip_rug_score` and rug scores are never
+negative, so `0` vetoes EVERY coin and suppresses 100% of buy-side alerts —
+while the intuitive reading of "0" is "off" (higher is laxer here). Now
+rejected at startup with a message pointing at 100 for "effectively off".
+
+**DEFERRED (honest):** `holdings_guard` alert delivery is fire-and-forget — a
+Telegram outage at the moment of a rug-exit loses that alert permanently
+(dispatch failure is logged, not queued). A real fix is a delivery retry
+queue, which is a design change, not a patch. Also unresolved:
+`learning/service.py:433` (the rug source may be graded as predicting PUMP on
+every no-signal coin, collapsing its ensemble weight) — needs a deeper read of
+the distribution construction than this pass could afford; and
+`trade_planner.py:327` (thin-evidence guard possibly unreachable). Both are
+accuracy issues in advisory layers, neither moves money.
+
+13 new/corrected tests. Suite: 66 pre-existing sandbox failures unchanged.

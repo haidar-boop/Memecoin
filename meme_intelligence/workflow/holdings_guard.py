@@ -414,6 +414,7 @@ class HoldingsGuard:
         # must be read: reporting a refused sell as "AUTO-SOLD" told the
         # operator he was out while the position drained to zero, and the
         # position was never retried (2026-07-31 bug hunt).
+        alert_type = "rug_watch_exit"
         if outcome.sold is True:
             title = f"AUTO-SOLD {label} — rug in progress"
         elif outcome.sold is None:
@@ -426,12 +427,18 @@ class HoldingsGuard:
                 self._exited.discard(pkey)
                 title = (f"AUTO-SELL FAILED: {label} — nothing sold, retrying "
                          f"(attempt {attempts}/{_MAX_EXIT_ATTEMPTS})")
-            else:
-                title = f"AUTO-SELL FAILED: {label} — nothing was sold"
+                # A NON-TERMINAL notice gets its own alert type. The notifier's
+                # cooldown key is (chain, address, alert_type, priority) over a
+                # 900s window, and retries land ~30s apart — so sharing the
+                # terminal type meant the first "retrying" notice suppressed the
+                # REAL outcome: a sale that then succeeded was reported to the
+                # operator as "nothing was sold" (2026-07-31 code review of this
+                # very fix; the same collision fix 4 removed for route-gone).
+                alert_type = "rug_watch_exit_retry"
         reasons = verdict.reasons + (outcome.message,)
         if outcome.sold is False:
             reasons += ("/dump NOW — the automated exit did not sell.",)
-        await self._alert(token, AlertPriority.CRITICAL, "rug_watch_exit",
+        await self._alert(token, AlertPriority.CRITICAL, alert_type,
                           title, reasons)
 
     async def _sell(self, token: TokenIdentity):

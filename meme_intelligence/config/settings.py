@@ -741,6 +741,16 @@ class AISettings:
                 raise ConfigurationError(f"ai setting '{name}' must be positive")
         _check_range("ai min_confidence", self.min_confidence, 0.0, 100.0)
         _check_range("ai verify_skip_rug_score", self.verify_skip_rug_score, 0.0, 100.0)
+        if self.verify_skip_rug_score <= 0.0:
+            # The veto fires when rug.score >= this, and a rug score is never
+            # negative — so 0 vetoes EVERY coin and silently suppresses 100% of
+            # buy-side alerts. The intuitive "0 = off" is exactly backwards
+            # (higher = laxer), so a total alert blackout was one .env typo
+            # away (2026-07-31 bug hunt).
+            raise ConfigurationError(
+                "ai verify_skip_rug_score must be greater than 0 — 0 would veto "
+                "every coin and stop ALL buy-side alerts. Higher is laxer: use "
+                "100 to effectively disable the rug-score veto.")
 
 
 @dataclass(frozen=True)

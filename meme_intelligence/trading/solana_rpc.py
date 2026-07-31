@@ -24,6 +24,15 @@ _TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 # rejection on fresh meme pools (seen live 2026-07-19).
 _SLIPPAGE_PROGRAM_ERROR = "0x1771"
 
+# Substrings that mean the transaction ALREADY REACHED the network, even
+# though the node reports them under the same -32002 code used for genuine
+# pre-send rejections. Treating these as "nothing was spent" caused a second
+# real trade to be sent for one the network had already accepted.
+_ALREADY_LANDED_MARKERS = (
+    "already been processed",
+    "alreadyprocessed",
+)
+
 
 class TransactionRejectedError(CollectorError):
     """sendTransaction's preflight simulation definitively REJECTED the
@@ -85,11 +94,23 @@ class SolanaRpcClient(BaseCollector):
         RPC code -32002 ("Transaction simulation failed") means the node
         simulated the transaction, it failed, and the node did NOT forward it
         to the network — nothing was spent, and retrying with a fresh quote
-        is safe."""
+        is safe.
+
+        ONE -32002 does NOT mean that: "This transaction has already been
+        processed" is returned under the same code when the transaction
+        ALREADY LANDED (a duplicate submission of a signature the network has
+        seen). Classifying that as "nothing was spent" made the executor
+        re-quote and send a SECOND real trade — a double-buy of a coin the
+        operator already owns, or a second dump (2026-07-31 bug hunt). It is
+        deliberately reported as ambiguous instead, so the caller's
+        "do NOT retry blindly — check Solscan" path handles it."""
         if not isinstance(error, dict):
             return None
         message = str(error.get("message", ""))
-        if error.get("code") != -32002 and "simulation failed" not in message.lower():
+        lowered = message.lower()
+        if any(marker in lowered for marker in _ALREADY_LANDED_MARKERS):
+            return None
+        if error.get("code") != -32002 and "simulation failed" not in lowered:
             return None
         if _SLIPPAGE_PROGRAM_ERROR in message:
             return ("the price moved beyond the slippage allowance before the "

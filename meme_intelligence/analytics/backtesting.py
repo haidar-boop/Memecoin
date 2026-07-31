@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 from meme_intelligence.config.settings import BacktestSettings, ScoringWeights
-from meme_intelligence.core.errors import CollectorError
+from meme_intelligence.core.errors import AllProvidersFailedError, CollectorError
 from meme_intelligence.core.logging_setup import get_logger
 from meme_intelligence.core.models import TokenIdentity
 
@@ -105,8 +105,22 @@ async def refresh_outcomes(
                                             target, window, settings)
             source = "snapshot"
             if measurement is None and market_service is not None:
-                measurement = await _live_measurement(market_service, prediction, now)
-                source = "live_fetch"
+                # A LIVE read measures the price NOW, so it is only a valid
+                # observation of this window if now is still inside the same
+                # tolerance a snapshot would have to meet. Without this check a
+                # prediction whose 1h window was never snapshotted got today's
+                # price recorded as its "1h outcome" days later — permanently,
+                # and fed to the learning layer as training signal
+                # (2026-07-31 bug hunt).
+                tolerance = timedelta(hours=window * settings.window_tolerance_fraction)
+                if abs(now - target) <= tolerance:
+                    measurement = await _live_measurement(market_service, prediction, now)
+                    source = "live_fetch"
+                else:
+                    _logger.debug(
+                        "window %sh for %s is %.1fh stale — no live fallback",
+                        window, prediction["address"],
+                        abs(now - target).total_seconds() / 3600.0)
             if measurement is None:
                 continue  # honest gap: nothing observed near this window
 
@@ -164,14 +178,26 @@ def _nearest_snapshot(series, prediction_id, target, window, settings):
 
 async def _live_measurement(market_service, prediction, now):
     token = TokenIdentity(chain=prediction["chain"], address=prediction["address"])
+    # get_best_pair collapses "every provider is down" into the SAME None as
+    # "this token has no market", so an outage was recorded as a token death:
+    # a permanent -100% outcome, a RUG label, and a deployer blacklisted
+    # forever — and storage only overwrites a NULL return, so the fabricated
+    # death could never be corrected (2026-07-31 bug hunt; the same Rule 8
+    # failure already fixed on the watchlist archive paths). Emptiness must be
+    # CONFIRMED by every provider before it counts as death.
     try:
-        pair = await market_service.get_best_pair(token.address, chain=token.chain)
-    except CollectorError as exc:
+        pairs = await market_service.get_token_pairs_confirmed(
+            token.address, chain=token.chain)
+    except (CollectorError, AllProvidersFailedError) as exc:
+        # Includes the unconfirmable-emptiness case: no measurement is
+        # recorded, so this window is simply retried on the next run.
         _logger.info("live outcome fetch failed for %s: %s", token.address, exc)
         return None
-    if pair is None:
-        # No tradable pair anymore: the token is dead — that IS the outcome.
+    if not pairs:
+        # Every provider answered and every answer was empty: no tradable pair
+        # anymore. THAT is a measured death, and it is the outcome.
         return 0.0, 0.0, now
+    pair = max(pairs, key=lambda p: p.liquidity_usd or 0.0)
     return pair.price_usd, pair.liquidity_usd, now
 
 

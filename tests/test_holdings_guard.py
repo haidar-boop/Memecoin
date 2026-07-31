@@ -569,3 +569,39 @@ async def test_a_rebought_position_is_not_judged_against_the_old_peak():
     await guard.poll_once()
     await guard.poll_once()
     assert executor.sells == []       # $12k is this position's baseline, not a drain
+
+
+async def test_the_real_notifier_still_delivers_the_outcome_after_a_retry():
+    """Regression for a bug the FakeNotifier above could never catch: it has
+    no cooldown, but the real NotificationEngine keys suppression on
+    (chain, address, alert_type, priority) for 900s. Emitting the retry
+    notice and the final outcome under the SAME type meant a sale that
+    succeeded on attempt 2 reached the operator as 'nothing was sold'."""
+    from meme_intelligence.alerts.notification_engine import NotificationEngine
+    from meme_intelligence.config.settings import AlertEngineSettings
+    from meme_intelligence.core.enums import AlertPriority
+
+    class RecordingSink:
+        min_priority = AlertPriority.LOW
+
+        def __init__(self):
+            self.events = []
+
+        async def send(self, event):
+            self.events.append(event)
+
+    sink = RecordingSink()
+    notifier = NotificationEngine([sink], AlertEngineSettings(cooldown_seconds=900.0),
+                                  time_func=lambda: 1000.0)
+    executor = OutcomeExecutor([
+        (False, True, "DUMP aborted — could not get a fresh quote. Nothing was sold."),
+        (True, False, "DUMP confirmed."),
+    ])
+    guard = make_guard([50_000.0, 48_000.0] + [8_000.0] * 4,
+                       settings=make_settings(MEMEINTEL_RUG_WATCH_AUTO_SELL="true"),
+                       executor=executor, notifier=notifier)
+    await run_polls(guard, 6)
+
+    assert len(executor.sells) == 2                    # failed once, then sold
+    titles = [e.title for e in sink.events]
+    assert any("AUTO-SOLD" in t for t in titles), titles   # the truth got through

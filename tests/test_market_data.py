@@ -246,3 +246,32 @@ async def test_get_boosts_tolerates_malformed_entries(monkeypatch):
     monkeypatch.setattr(client, "_get_json", fake_get_json)
     boosts = await client.get_boosts()
     assert [b.token_address for b in boosts] == ["GOOD"]
+
+
+def test_a_network_id_containing_an_underscore_keeps_the_address_intact():
+    """CONFIRMED bug: "polygon_pos_0xABC..." split on the FIRST underscore
+    gave network="polygon", address="pos_0xABC..." — a silently corrupted
+    contract address on every Polygon pool."""
+    from meme_intelligence.collectors.market_data import GeckoTerminalClient
+
+    payload = {"data": [{
+        "attributes": {"address": "PoolX", "reserve_in_usd": "50000"},
+        "relationships": {
+            "base_token": {"data": {"id": "polygon_pos_0xAbC0000000000000000000000000000000000001"}},
+        },
+    }]}
+    pairs = GeckoTerminalClient.__new__(GeckoTerminalClient)._parse_pools(payload)
+    assert pairs[0].base_token.address == "0xAbC0000000000000000000000000000000000001"
+    assert pairs[0].base_token.chain == "polygon"     # canonical, not "polygon_pos"
+
+
+def test_a_plain_network_id_still_parses():
+    from meme_intelligence.collectors.market_data import GeckoTerminalClient
+
+    payload = {"data": [{
+        "attributes": {"address": "PoolY", "reserve_in_usd": "1000"},
+        "relationships": {"base_token": {"data": {"id": "solana_So11111111111111111111111111111111111111112"}}},
+    }]}
+    pairs = GeckoTerminalClient.__new__(GeckoTerminalClient)._parse_pools(payload)
+    assert pairs[0].base_token.address == "So11111111111111111111111111111111111111112"
+    assert pairs[0].base_token.chain == "solana"

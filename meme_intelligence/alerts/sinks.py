@@ -60,6 +60,9 @@ ALERT_CHANNELS = {
     # warning swallow the CRITICAL confirmation that the position was
     # actually sold (2026-07-31 bug hunt).
     "rug_watch_blocked": "security",
+    # Non-terminal "retrying" notice. Separate from rug_watch_exit so the
+    # cooldown cannot let it suppress the actual outcome of the retry.
+    "rug_watch_exit_retry": "security",
     "momentum": "momentum",
     "score_drop_review": "reports",
     "boost": "boosts",

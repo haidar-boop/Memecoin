@@ -18,7 +18,7 @@ from meme_intelligence.analytics.backtesting import (
 from meme_intelligence.analyzers.scoring_engine import MasterAssessment
 from meme_intelligence.config.settings import BacktestSettings
 from meme_intelligence.core.enums import Classification, ConfidenceLevel
-from meme_intelligence.core.errors import ConfigurationError
+from meme_intelligence.core.errors import AllProvidersFailedError, ConfigurationError
 from meme_intelligence.core.models import CategoryScores, DexPair, TokenIdentity
 from meme_intelligence.database.storage import Storage
 
@@ -93,6 +93,11 @@ async def test_windows_never_measured_early_and_never_twice(tmp_path):
 
 
 class DeadTokenService:
+    """Every provider agrees there is no pair: a CONFIRMED dead market."""
+
+    async def get_token_pairs_confirmed(self, address, chain=None):
+        return []
+
     async def get_best_pair(self, address, chain=None):
         return None  # no tradable pair left
 
@@ -105,8 +110,13 @@ async def test_live_fetch_records_token_death(tmp_path):
             source="test", pair=pair(9, 1.0), regime="bull")
         recorded = await refresh_outcomes(storage, DeadTokenService(),
                                           settings=SETTINGS, now_func=lambda: NOW)
-        assert recorded == 2  # 1h + 24h windows, both from the live fetch
+        # ONLY the 24h window: NOW is T0+30h, so it sits 6h from the 24h target
+        # (inside the 8.4h tolerance) but 29h from the 1h target. A live read
+        # taken 29h late is not a measurement of the 1h window — this assertion
+        # used to expect 2 and was encoding that bug (2026-07-31 bug hunt).
+        assert recorded == 1
         outcomes = storage.outcomes_for_snapshot(storage.predictions()[0]["snapshot_id"])
+        assert 1.0 not in outcomes                 # stale window left unmeasured
         assert outcomes[24.0]["survived"] == 0
         assert outcomes[24.0]["price_change_percent"] == pytest.approx(-100.0)
         assert outcomes[24.0]["source"] == "live_fetch"
@@ -300,3 +310,42 @@ def test_old_database_migrates_new_columns(tmp_path):
         storage.record_snapshot(master(1, 80.0, Classification.WATCHLIST, T0),
                                 source="test", pair=pair(1, 1.0), regime="bull")
         assert storage.predictions()[0]["price_usd"] == pytest.approx(1.0)
+
+
+async def test_a_provider_outage_is_never_recorded_as_a_token_death(tmp_path):
+    """Rule 8, on the most damaging path there is: an unreadable market must
+    NOT be written as -100% / dead. storage only overwrites a NULL return, so
+    a fabricated death is permanent — and it blacklists the deployer."""
+    class OutageService:
+        async def get_token_pairs_confirmed(self, address, chain=None):
+            raise AllProvidersFailedError(
+                "get_token_pairs", {"dexscreener": OSError("down")})
+
+    with make_storage(tmp_path) as storage:
+        seed(storage, 1, Classification.STRONG_CANDIDATE, 1.00, None)
+        measured = await refresh_outcomes(storage, OutageService(),
+                                          settings=SETTINGS, now_func=lambda: NOW)
+        assert measured == 0                      # nothing recorded at all
+        rows = storage.outcomes_for_prediction(1) if hasattr(
+            storage, "outcomes_for_prediction") else None
+        if rows is not None:
+            assert not any(r.get("price_usd") == 0.0 for r in rows)
+
+
+async def test_a_long_overdue_window_is_never_filled_with_todays_price(tmp_path):
+    """A live read measures NOW. Recording it as the outcome of a window that
+    closed days ago writes a permanent, wrong training label."""
+    class LivePriceService:
+        async def get_token_pairs_confirmed(self, address, chain=None):
+            return [pair(9, 5.00)]
+
+    late = T0 + timedelta(days=6)          # 1h and 24h windows long past
+    with Storage(str(tmp_path / "late.sqlite3"), now_func=lambda: late) as storage:
+        storage.record_snapshot(
+            master(9, 85.0, Classification.STRONG_CANDIDATE, T0),
+            source="test", pair=pair(9, 1.0), regime="bull")
+        recorded = await refresh_outcomes(storage, LivePriceService(),
+                                          settings=SETTINGS, now_func=lambda: late)
+        outcomes = storage.outcomes_for_snapshot(storage.predictions()[0]["snapshot_id"])
+        assert 1.0 not in outcomes and 24.0 not in outcomes
+        assert recorded == 0

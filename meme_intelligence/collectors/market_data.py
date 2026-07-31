@@ -373,10 +373,15 @@ class GeckoTerminalClient(BaseCollector):
         attrs = item["attributes"]
         relationships = item.get("relationships") or {}
 
-        # Base token id has the form "<network>_<address>"; the pool id shares
-        # the same prefix, so split on the first underscore.
+        # Base token id has the form "<network>_<address>". Split on the LAST
+        # underscore, not the first: GeckoTerminal network ids can themselves
+        # contain one ("polygon_pos"), and splitting on the first turned
+        # "polygon_pos_0xABC..." into network="polygon", address="pos_0xABC..."
+        # — a silently corrupted contract address on every Polygon pool
+        # (2026-07-31 bug hunt). Addresses never contain "_" (base58 and 0x-hex
+        # both exclude it), so the last underscore is always the separator.
         base_id = ((relationships.get("base_token") or {}).get("data") or {}).get("id", "")
-        network, _, base_address = base_id.partition("_")
+        network, _, base_address = base_id.rpartition("_")
         if not network or not base_address:
             raise KeyError(f"unparseable base token id: {base_id!r}")
         # GeckoTerminal uses its own network vocabulary (eth, polygon_pos,
