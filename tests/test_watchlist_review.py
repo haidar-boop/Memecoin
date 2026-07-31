@@ -189,3 +189,79 @@ async def test_on_result_callback_invoked():
             limit=5, on_result=callback,
         )
         assert seen == ["GOOD"]
+
+
+# ---- Archiving requires EVIDENCE the market is gone (2026-07-31 bug hunt:
+# one provider's "not indexed" permanently archived a live $42k pool). ----
+
+
+class _EmptyProvider:
+    name = "dexscreener"
+
+    async def get_token_pairs(self, address, chain=None):
+        return []          # HTTP 200, token simply not indexed here
+
+
+class _LiveProvider:
+    name = "geckoterminal"
+
+    def __init__(self, pairs):
+        self._pairs = pairs
+
+    async def get_token_pairs(self, address, chain=None):
+        return list(self._pairs)
+
+
+def _service(*providers):
+    from meme_intelligence.collectors.market_service import MarketDataService
+    return MarketDataService(list(providers))
+
+
+async def test_one_providers_silence_never_archives_a_live_coin():
+    """The provider the pool answers on is not always the first one asked.
+    A coin with real liquidity on the SECOND provider must stay tracked."""
+    tok = token("LIVE")
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        storage.update_watchlist(tok, WatchlistTier.TIER_1_HIGH_PRIORITY, score=80.0)
+        changes = await review_entries(
+            storage,
+            _service(_EmptyProvider(), _LiveProvider([make_pair(tok, liquidity=42_000.0)])),
+            make_pipeline({tok.address: clean_profile(tok)}),
+            limit=5,
+        )
+        assert not any(c.change == "archived" for c in changes)
+        tiers = {e.token.address: e.tier for e in storage.get_watchlist()}
+        assert tiers.get(tok.address) is not WatchlistTier.ARCHIVED
+        assert tok.address in tiers          # still tracked, still protected
+
+
+async def test_every_provider_agreeing_empty_still_archives():
+    """The other half of the contract: a genuinely dead market is still
+    archived — the evidence standard changed, not the decision."""
+    tok = token("DEAD")
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        storage.update_watchlist(tok, WatchlistTier.TIER_1_HIGH_PRIORITY, score=80.0)
+        changes = await review_entries(
+            storage, _service(_EmptyProvider(), _LiveProvider([])),
+            make_pipeline({tok.address: clean_profile(tok)}), limit=5,
+        )
+        assert any(c.change == "archived" for c in changes)
+
+
+async def test_an_unconfirmable_emptiness_skips_rather_than_archives():
+    """When one provider says empty and the other cannot answer at all,
+    emptiness is UNCONFIRMED — that is missing data, never death (Rule 8)."""
+    class _BrokenProvider:
+        name = "geckoterminal"
+
+        async def get_token_pairs(self, address, chain=None):
+            raise TransientCollectorError("provider down")
+
+    tok = token("UNKN")
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        storage.update_watchlist(tok, WatchlistTier.TIER_1_HIGH_PRIORITY, score=80.0)
+        changes = await review_entries(
+            storage, _service(_EmptyProvider(), _BrokenProvider()),
+            make_pipeline({tok.address: clean_profile(tok)}), limit=5,
+        )
+        assert not any(c.change == "archived" for c in changes)

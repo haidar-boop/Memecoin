@@ -64,6 +64,7 @@ from meme_intelligence.scanners.launch_monitor import (
 from meme_intelligence.workflow.pipeline import PipelineResult, ResearchPipeline
 from meme_intelligence.workflow.watchlist_review import (
     TIER_FOR_CLASSIFICATION as _TIER_FOR_CLASSIFICATION,
+    fetch_live_pairs,
 )
 
 # Alert types whose evidence rests on market data and therefore get
@@ -527,15 +528,38 @@ class ContinuousScanner:
         stats.candidates = len(candidates)
 
         processed_this_cycle: set[str] = set()
-        for candidate in candidates[: self._settings.workflow.top_candidates]:
-            token = candidate.pair.base_token
-            key = (token.chain, token.address.lower())
-            # A key pending an insufficient-data retry is handled ONLY by
-            # _retry_insufficient_data, on its own paced schedule — analyzing
-            # it again here (every cycle it's still "new") would defeat the
-            # pacing and re-run the pipeline far more often than intended.
+        # Take the top N candidates the scanner has NOT already handled.
+        #
+        # Truncating to top_candidates BEFORE this filter (the shape until
+        # 2026-07-31) meant already-analyzed pools consumed the analysis
+        # budget: a high-ranking pool stays inside discovery's 24h window and
+        # keeps out-ranking newer launches for many cycles, so cycle after
+        # cycle every slot was filled by coins that were skipped on sight
+        # while unseen fresh candidates below them were discarded unread.
+        # That is the operator's "why does it say never analyzed" report, and
+        # it also silently ate most of the benefit of widening discovery to
+        # three pages. Filter first, then take the budget (Rule 12).
+        #
+        # A key pending an insufficient-data retry is handled ONLY by
+        # _retry_insufficient_data, on its own paced schedule — analyzing it
+        # again here (every cycle it's still "new") would defeat the pacing
+        # and re-run the pipeline far more often than intended.
+        fresh: list = []
+        for candidate in candidates:
+            key = (candidate.pair.base_token.chain,
+                   candidate.pair.base_token.address.lower())
             if key in self._seen or key in self._retry_pending:
                 continue
+            fresh.append(candidate)
+            if len(fresh) >= self._settings.workflow.top_candidates:
+                break
+        if candidates and not fresh:
+            self._logger.info(
+                "all %d discovery candidate(s) were already analyzed this run",
+                len(candidates))
+        for candidate in fresh:
+            token = candidate.pair.base_token
+            key = (token.chain, token.address.lower())
 
             result = await self._pipeline.analyze_pair(
                 candidate.pair, regime=self._regime,
@@ -1158,17 +1182,14 @@ class ContinuousScanner:
                 continue  # analyzed moments ago this cycle; nothing new to learn
             if entry.tier is WatchlistTier.TIER_3_RESEARCH_ONLY:
                 continue  # research-only entries wait for the daily routine
-            # Fetch via get_token_pairs, which RAISES on a provider outage,
-            # rather than get_best_pair, which collapses "all providers down"
-            # into the same None as "token has no pairs" (bug-hunt finding:
-            # a 2-failure blip passed the old health() heuristic — providers
-            # only report unhealthy after 3 consecutive failures — and
-            # permanently archived healthy tokens). Archive ONLY when a
-            # SUCCESSFUL call says the market is empty (Rule 8), exactly as
-            # watchlist_review.review_entries does.
+            # Archive ONLY on evidence the market is gone. fetch_live_pairs
+            # raises on an outage AND on an emptiness no provider could
+            # confirm, so neither is mistaken for death (Rule 8) — shared
+            # with watchlist_review.review_entries so the two archive paths
+            # cannot drift apart again (2026-07-31 bug hunt: one provider's
+            # "not indexed" permanently archived a live $42k pool).
             try:
-                pairs = await self._market.get_token_pairs(
-                    entry.token.address, chain=entry.token.chain)
+                pairs = await fetch_live_pairs(self._market, entry.token)
             except (CollectorError, AllProvidersFailedError) as exc:
                 self._logger.warning(
                     "watchlist recheck for %s skipped: market data unavailable (%s)",

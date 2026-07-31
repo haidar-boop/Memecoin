@@ -1842,3 +1842,67 @@ async def test_credit_gate_skips_wallet_lookup_on_stale_candidate():
         )
         await scanner2.run(max_cycles=1)
         assert wallet.calls == [stale_pair.base_token.address]   # holding: always checked
+
+
+# ---- Analysis budget must go to UNSEEN candidates (2026-07-31 bug hunt:
+# truncating to top_candidates before the _seen filter let already-analyzed
+# pools consume every slot, so fresh launches were discarded unread — the
+# operator's "why does it say never analyzed"). ----
+
+
+async def test_already_seen_candidates_do_not_consume_the_analysis_budget():
+    """Ten discoverable pools, a budget of 8. Cycle 1 analyzes 8; cycle 2 must
+    analyze the remaining 2 rather than re-skipping the same top-ranked 8 and
+    analyzing nothing."""
+    pools, profiles = [], {}
+    for i in range(10):
+        address = f"TokenBudget{i:02d}"
+        # Descending liquidity keeps discovery's ranking deterministic, so the
+        # same 8 win the ranking every cycle — the exact starvation shape.
+        pair = make_pair(address=address, symbol=f"B{i:02d}",
+                         liquidity_usd=200_000.0 - i * 1_000.0)
+        pools.append(pair)
+        profiles[address] = clean_profile(pair.base_token)
+
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        scanner, _ = make_scanner(storage, pools, profiles)
+        history = await scanner.run(max_cycles=2)
+
+    assert history[0].analyzed == 8          # budget spent on 8 unseen coins
+    assert history[1].analyzed == 2          # the rest — not 0
+    assert history[0].analyzed + history[1].analyzed == 10   # all pools reached
+
+
+async def test_scanner_recheck_does_not_archive_on_one_providers_silence():
+    """Same evidence standard in the scanner's own recheck path: a coin whose
+    pool only the second provider carries must not be archived as dead."""
+    from meme_intelligence.collectors.market_service import MarketDataService
+
+    tracked = TokenIdentity(chain="solana", address="TokenLive", symbol="LIVE")
+    live_pair = make_pair(address="TokenLive", symbol="LIVE", liquidity_usd=42_000.0)
+
+    class _Empty:
+        name = "dexscreener"
+
+        async def get_token_pairs(self, address, chain=None):
+            return []
+
+    class _Live:
+        name = "geckoterminal"
+
+        async def get_token_pairs(self, address, chain=None):
+            return [live_pair]
+
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        storage.update_watchlist(tracked, WatchlistTier.TIER_1_HIGH_PRIORITY, score=80.0)
+        scanner = make_scanner_with_market(
+            storage, [], {"TokenLive": clean_profile(tracked)},
+            MarketDataService([_Empty(), _Live()]),
+            settings=fast_recheck_settings())
+        await scanner.run(max_cycles=1)
+
+        # get_watchlist() hides archived rows, so presence is the real
+        # assertion here — a missing key would mean it WAS archived.
+        entries = {e.token.address: e.tier for e in storage.get_watchlist()}
+        assert "TokenLive" in entries, "live coin was archived on one provider's silence"
+        assert entries["TokenLive"] is not WatchlistTier.ARCHIVED

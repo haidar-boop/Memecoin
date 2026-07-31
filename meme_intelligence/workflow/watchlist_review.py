@@ -29,6 +29,36 @@ TIER_FOR_CLASSIFICATION = {
 _logger = get_logger("workflow.watchlist_review")
 
 
+async def fetch_live_pairs(market_client, token):
+    """Pairs for a tracked token, where EMPTY means "confirmed no market".
+
+    Archiving is permanent — it ends tracking, rechecks, and every future
+    protective alert for a coin the operator may hold — so emptiness must be
+    evidence, not one provider's silence. ``ProviderPool`` returns the first
+    answer that does not RAISE, and an empty list does not raise: DexScreener
+    replies HTTP 200 with no pairs for a token it has not indexed, which for a
+    coin discovered through GeckoTerminal is indistinguishable from "this
+    market is gone". Reproduced 2026-07-31 with a live $42k pool archived as
+    dead.
+
+    So prefer ``get_token_pairs_confirmed``, which sweeps the remaining
+    providers on the empty path and RAISES ``AllProvidersFailedError`` when
+    emptiness could not be confirmed (Rule 8 — unconfirmed absence is missing
+    data, never evidence of death). Clients that predate that method (the
+    documented duck-typed contract is ``get_token_pairs``) fall back with a
+    warning rather than breaking (Rule 18); callers already treat a raise as
+    "skip this entry".
+    """
+    confirmed = getattr(market_client, "get_token_pairs_confirmed", None)
+    if confirmed is not None:
+        return await confirmed(token.address, chain=token.chain)
+    _logger.warning(
+        "market client %s has no get_token_pairs_confirmed — an unindexed "
+        "token may be archived as dead (%s)",
+        type(market_client).__name__, token.address)
+    return await market_client.get_token_pairs(token.address, chain=token.chain)
+
+
 async def review_entries(
     storage: Storage,
     market_client,  # exposes get_token_pairs(token_address, chain=None)
@@ -63,9 +93,7 @@ async def review_entries(
             continue
 
         try:
-            pairs = await market_client.get_token_pairs(
-                entry.token.address, chain=entry.token.chain,
-            )
+            pairs = await fetch_live_pairs(market_client, entry.token)
         except (CollectorError, AllProvidersFailedError) as exc:
             _logger.info("review skipped for %s: market data unavailable (%s)",
                          entry.token.address, exc)

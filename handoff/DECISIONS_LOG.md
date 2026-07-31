@@ -2258,3 +2258,57 @@ nothing could trade); .env.example gained the MIN_READINGS and
 ROUTE_EVIDENCE_MAX_AGE lines. 11 new tests pin all of it (glitch-tick,
 pump-vs-spike, pool-vanish, failover, clamp, route-decay/escalation).
 Suite: baseline 66 sandbox failures unchanged, everything else green.
+
+## 2026-07-31 — Bug hunt: fixed the analysis-slot starvation and the fabricated-death archive
+
+An adversarial bug hunt (6 subsystem lenses, refute-by-default verifiers,
+every finding reproduced) returned 9 confirmed bugs. The two hurting the
+LIVE bot are fixed here; the rest are recorded for follow-up (three
+rug-guard criticals must be fixed before MEMEINTEL_RUG_WATCH_AUTO_SELL is
+ever set true).
+
+**1. Analysis budget went to coins already analyzed (controller._run_cycle).**
+`candidates[: top_candidates]` truncated BEFORE the `_seen`/`_retry_pending`
+filter, so a high-ranking pool that was already analyzed still occupied a
+slot and was then skipped inside the loop. Discovery keeps a pool for
+`max_age_hours` (24h) and ranks on liquidity/volume/activity, so the same
+top-ranked pools win the ranking for many consecutive cycles: during a busy
+launch hour the scanner could analyze ZERO new coins per cycle while unseen
+fresh candidates at ranks 9..N were discarded unread. This is the operator's
+"why does it say never analyzed" report, and it silently ate most of the
+benefit of widening discovery to 3 pages. Fixed: select the top N candidates
+NOT already seen/pending, then analyze. Logs when every candidate was
+already handled.
+
+**2. One provider's silence archived live coins as dead** (controller.
+_recheck_watchlist AND watchlist_review.review_entries — the same bug in
+both archive paths). Archiving is permanent: it ends tracking, rechecks and
+every future protective alert for a coin the operator may hold. It fired on
+an empty pair list from the FIRST provider that answered, but DexScreener
+returns HTTP 200 with no pairs for a token it has not indexed — so a coin
+whose pool only GeckoTerminal carries was archived as dead (reproduced with
+a live $42,000 pool). Fixed with a shared helper
+`watchlist_review.fetch_live_pairs`: prefers `get_token_pairs_confirmed`
+(sweeps every provider on the empty path; RAISES when emptiness cannot be
+confirmed — Rule 8), falls back to `get_token_pairs` with a warning for
+duck-typed clients lacking it (Rule 18). Shared deliberately so the two
+archive paths cannot drift apart again. A genuinely dead market — every
+provider agreeing — still archives; the evidence standard changed, not the
+decision.
+
+4 regression tests, each verified to FAIL with the fixes reverted and pass
+with them (one was initially a false pass: `get_watchlist()` hides archived
+rows, so asserting `!= ARCHIVED` on a missing key silently succeeded — it
+now asserts presence). Suite: 66 pre-existing sandbox failures
+(faiss/anthropic) unchanged, no new failures.
+
+Still open from the same hunt (NOT fixed here): holdings_guard reports
+"AUTO-SOLD" on a sell that returned failure and then never retries;
+holdings_guard state keyed by mint is never reset per position, so a
+re-bought coin is judged against the previous position's peak; the
+route-gone escalation and the real exit share a cooldown key so an
+AUTO-SOLD confirmation can be swallowed; cross_check_liquidity can
+"confirm" against a different pool; a held coin stuck at Avoid pins the
+watchlist recheck slots. Three further candidates were left unverified when
+the hunt hit a spend limit (trade_planner thin-evidence guard, backtesting
+outcome-window timing, rug-engine grading).
