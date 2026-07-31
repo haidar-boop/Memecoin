@@ -360,6 +360,8 @@ class ContinuousScanner:
         # red flag) — see _finalize_or_reschedule / _retry_insufficient_data.
         self._retry_pending = _BoundedKeySet(settings.workflow.max_tracked_keys)
         self._stop = asyncio.Event()
+        # Live rug guard over open positions; attached via set_holdings_guard.
+        self._holdings_guard = None
 
     def request_stop(self) -> None:
         """Ask the scanner to stop after the current cycle (graceful shutdown)."""
@@ -374,6 +376,12 @@ class ContinuousScanner:
             # Platform without signal support (e.g. some test loops); Ctrl-C
             # still raises KeyboardInterrupt in run().
             pass
+
+    def set_holdings_guard(self, guard) -> None:
+        """Attach the live rug guard so /status can report its state and the
+        Telegram kill switch can reach it (wired after construction, like the
+        Telegram listener — the guard needs the notifier this scanner uses)."""
+        self._holdings_guard = guard
 
     def set_telegram_listener(self, listener) -> None:
         """Attach the two-way Telegram command listener (Project 2).
@@ -411,6 +419,8 @@ class ContinuousScanner:
             "last_cycle": last,
             "networks": list(self._settings.workflow.network_list),
             "layers": dict(self._layers),
+            "rug_watch": (self._holdings_guard.status()
+                          if self._holdings_guard is not None else None),
             "db": db,
         }
 

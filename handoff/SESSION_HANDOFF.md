@@ -26,6 +26,13 @@
   tarball copy).
 - **Branch that matters now: `claude/rug-eyes`** — the droplet pulls it
   (supersedes `claude/memecoin-onboarding-yrvjbg` below).
+- **2026-07-31 (later): the auto-sell rug guard is PORTED and shipped**
+  (recovered from stranded commit a4d0985; its fatal `enabled`-vs-`live`
+  executor-flag bug fixed — see DECISIONS_LOG 2026-07-31). Watch-mode
+  first per the operator: `MEMEINTEL_RUG_WATCH_ENABLED=true` +
+  `MEMEINTEL_RUG_WATCH_POLL_SECONDS=30` alerts "RUG IN PROGRESS — /dump
+  NOW"; `MEMEINTEL_RUG_WATCH_AUTO_SELL=true` arms real auto-sells;
+  `/rugwatch off` is the phone kill switch.
 - **Everything in the spec that can be built is built** (Parts 1–33 + the
   Self-Learning Mind Layer), plus four of the follow-on projects:
   **Project 1** (live Jupiter round-trip sell test), **Project 2** (two-way

@@ -1,5 +1,6 @@
 """Tests for two-way Telegram control (Project 2, ROADMAP item 2)."""
 
+import dataclasses
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -1121,3 +1122,51 @@ async def test_percent_buy_button_malformed_payload_rejected():
         await listener._handle_update(callback_update(f"buy:{SOL_ADDR}:pct:notanumber"))
         await listener._handle_update(callback_update(f"buy:{SOL_ADDR}:notpct:50"))
     assert executor.buy_calls == []
+
+
+
+
+# ---- /rugwatch kill switch (operator request 2026-07-29) ----
+
+
+class FakeGuard:
+    def __init__(self, armed=True):
+        self._armed = armed
+        self.disarms = []
+
+    def disarm(self, reason):
+        self._armed = False
+        self.disarms.append(reason)
+
+    def status(self):
+        return {"enabled": True, "auto_sell": self._armed,
+                "watching": 2, "exited": 0}
+
+
+async def _rugwatch(guard, text="/rugwatch"):
+    with Storage(":memory:", now_func=lambda: NOW) as storage:
+        listener, calls = make_listener(storage)
+        listener._ctx = dataclasses.replace(listener._ctx, holdings_guard=guard)
+        await listener._handle_update(message_update(text))
+    return sent_messages(calls)[0]["text"]
+
+
+async def test_rugwatch_reports_armed_state():
+    text = await _rugwatch(FakeGuard(armed=True))
+    assert "ARMED" in text and "2 position" in text
+
+
+async def test_rugwatch_off_disarms_auto_sell():
+    """The only thing that spends money without a tap must be stoppable from
+    the phone — no SSH."""
+    guard = FakeGuard(armed=True)
+    text = await _rugwatch(guard, "/rugwatch off")
+    assert guard.disarms and not guard._armed
+    assert "DISARMED" in text
+    assert "restart the service" in text      # re-arming is deliberately manual
+
+
+async def test_rugwatch_explains_itself_when_not_running():
+    text = await _rugwatch(None)
+    assert "not running" in text
+    assert "MEMEINTEL_RUG_WATCH_ENABLED" in text

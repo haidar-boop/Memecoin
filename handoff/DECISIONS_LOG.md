@@ -2163,3 +2163,57 @@ sees every pump.fun launch (watching is free); this change widens the
 GeckoTerminal pool keyhole, which is where non-pump.fun coins were slipping
 through. 6 new discovery tests + 1 settings test; 3 test fakes gained the
 `page` kwarg. Suite: no new failures (same known missing-dep set).
+
+## 2026-07-31 — Auto-sell rug guard PORTED from the stranded branch (+ its fatal bug fixed)
+
+Operator: "Build me the system that auto sells when a rug is about to take
+place." He HAD it — built 2026-07-29 as a4d0985 on the old branch — but
+claude/rug-eyes forked from c9a7dc2, BEFORE the guard landed, stranding it.
+Ported rather than rebuilt (Rule 18): analyzers/rug_watch.py (pure
+HOLD/WARN/EXIT engine; drop measured from peak KNOWN liquidity; EXIT needs
+min_confirmations consecutive readings AND a live sell route; route-gone
+warns but never sells — selling with no route is futile),
+workflow/holdings_guard.py (own asyncio task polling held coins; exited-set
+recorded BEFORE the sell so a crash cannot double-sell; CRITICAL alert on
+every branch), RugWatchSettings (armed TWICE: enabled + auto_sell;
+min_confirmations < 2 rejected), /rugwatch phone kill switch, /status line,
+.env.example block. Dependency ported first:
+MarketDataService.get_token_pairs_confirmed (from 88d59d9) so "every
+provider agrees the pool is gone" is a measured zero while "nobody could
+answer" stays unknown — a provider outage must never liquidate a healthy
+position (Rule 8).
+
+**Fatal bug found during the port review and fixed:** the original guard
+gated the sell on `getattr(executor, "enabled", False)` — an attribute NO
+executor defines (they define `live`). Fully armed, the original would have
+ALWAYS said "trading not configured — /dump NOW" and never sold; its tests
+passed because the fake defined `enabled`. The port checks `live`, the fake
+now mirrors reality, and two regression tests pin the fix against the REAL
+DryRunExecutor and a live-flagged stub.
+
+Port adaptations vs a4d0985: the executor build in __main__ hoisted out of
+the telegram-enabled branch (shared by listener + guard; DryRun when no
+key); the old commit's execution.py auto-hold half SKIPPED (rug-eyes
+independently rebuilt it in 89ca18e — broadcast-marks, confirmed-releases);
+rug_watch_warning/rug_watch_exit routed to the "security" Telegram channel
+(new ALERT_CHANNELS entries — they otherwise fell to "reports"); cooldown
+distinctness pinned by test (a WARN can never suppress the EXIT — the key
+includes type+priority; a repeat EXIT inside 900s stays cooled). Recommended
+poll_seconds is 30, not the old 15: DexScreener reads cache for 30s, and two
+cached reads would count as two "confirmations" of one measurement.
+
+Rollout (operator chose watch-mode first): MEMEINTEL_RUG_WATCH_ENABLED=true
++ POLL_SECONDS=30, restart → CRITICAL "RUG IN PROGRESS — /dump NOW" alerts
+with the Dump button. Arm later with MEMEINTEL_RUG_WATCH_AUTO_SELL=true +
+restart; /rugwatch off disarms from the phone (one-way until restart).
+Known limits: one exit alert per coin per process run (in-memory by
+design); guard dumps serialize behind the shared executor lock (~45s worst
+case behind a manual trade).
+
+Flagged follow-up (out of scope): analytics/backtesting.py still uses
+get_best_pair, so a total provider outage can fabricate -100%/RUG outcomes
+and blacklist deployers; with get_token_pairs_confirmed now on HEAD the old
+branch's fix is cheap to port next.
+
+Suite: 66 pre-existing sandbox failures (faiss/anthropic) unchanged; ~50 new
+tests all green.

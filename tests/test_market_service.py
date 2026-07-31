@@ -161,3 +161,51 @@ async def test_search_fails_over_and_degrades_to_empty():
     assert await MarketDataService([broken, working]).search_pairs("MEME")
     assert await MarketDataService([broken]).search_pairs("MEME") == []
     assert await MarketDataService([FakeProvider("no-search")]).search_pairs("MEME") == []
+
+
+# ---- Confirmed-empty lookups (review finding, 2026-07-29) ----
+#
+# ProviderPool.call_with_provider returns the first result that does not RAISE,
+# and an empty list does not raise. DexScreener answers HTTP 200 {"pairs": null}
+# for a token it has not indexed (verified live 2026-07-29), which parses to [].
+# For a coin discovered through GeckoTerminal that DexScreener does not carry,
+# "not indexed here" was therefore indistinguishable from "no market left" —
+# and the backtester read the latter as a token death, writing a fabricated
+# -100% / RUG label and permanently blacklisting the deployer.
+
+
+async def test_empty_from_the_first_provider_is_not_an_empty_market():
+    """The decisive case: DexScreener silent, GeckoTerminal holding the pool."""
+    silent = FakeProvider("dexscreener", [])
+    knows = FakeProvider("geckoterminal", [make_pair(liquidity=42_000.0)])
+    service = MarketDataService([silent, knows])
+
+    # The plain lookup still short-circuits on the first non-raising provider.
+    assert await service.get_token_pairs("TokenAddr1", chain="solana") == []
+    # The confirming lookup keeps asking, and finds the live pool.
+    pairs = await service.get_token_pairs_confirmed("TokenAddr1", chain="solana")
+    assert [p.liquidity_usd for p in pairs] == [42_000.0]
+
+
+async def test_every_provider_empty_confirms_an_empty_market():
+    """A real death must still be reportable, or genuine rugs go unrecorded."""
+    service = MarketDataService([FakeProvider("a", []), FakeProvider("b", [])])
+    assert await service.get_token_pairs_confirmed("TokenAddr1", chain="solana") == []
+
+
+async def test_unanswered_provider_leaves_emptiness_unconfirmed():
+    """One provider empty, the other DOWN: nobody has established the market is
+    gone, so this is missing data and must raise rather than report [] (Rule 8).
+    Reporting [] here is exactly what fabricates a death."""
+    service = MarketDataService([FakeProvider("a", []), FakeProvider("b", fail=True)])
+    with pytest.raises(AllProvidersFailedError):
+        await service.get_token_pairs_confirmed("TokenAddr1", chain="solana")
+
+
+async def test_confirmation_sweep_only_runs_when_the_answer_is_empty():
+    """Rule 11: the normal path must not double its provider calls."""
+    primary = FakeProvider("primary", [make_pair()])
+    backup = FakeProvider("backup", [make_pair(liquidity=1.0)])
+    service = MarketDataService([primary, backup])
+    await service.get_token_pairs_confirmed("TokenAddr1", chain="solana")
+    assert primary.calls == 1 and backup.calls == 0

@@ -105,6 +105,7 @@ _HELP_TEXT = "\n".join([
     "/winners - what the bot's recorded winners had in common (read-only)",
     "/dev <address> - the deployer's track record across coins the bot watched",
     "/bundle <address> - are the top holders really one actor? (funding clusters)",
+    "/rugwatch [off] - live rug guard on your positions; 'off' disarms auto-sell",
     "/mute <address> - silence ALL alerts for a token",
     "/unmute <address> - restore alerts for a token",
     "/buy <address> <sol> - buy that many SOL of a token (live if enabled)",
@@ -135,6 +136,9 @@ class CommandContext:
     # BundleService for /bundle — wallet funding-cluster analysis (operator
     # request 2026-07-30). Optional (None = command reports what it needs).
     bundle_service: Any = None
+    # Live rug guard over open positions (None = not running). Exposed so the
+    # operator can disarm auto-sell from his phone without SSH.
+    holdings_guard: Any = None
 
 
 def _fmt_duration(seconds: float | None) -> str:
@@ -322,6 +326,7 @@ class TelegramCommandListener(BaseCollector):
             "/winners": self._cmd_winners,
             "/dev": self._cmd_dev,
             "/bundle": self._cmd_bundle,
+            "/rugwatch": self._cmd_rugwatch,
             "/mute": self._cmd_mute,
             "/unmute": self._cmd_unmute,
             "/buy": self._cmd_buy,
@@ -611,6 +616,11 @@ class TelegramCommandListener(BaseCollector):
             f"pump.fun {onoff('pumpfun')} | jupiter probe {onoff('jupiter_probe')} | "
             f"holder facts {onoff('onchain_security')} | "
             f"trading {trading}")
+        rug_watch = snap.get("rug_watch")
+        if rug_watch:
+            lines.append(
+                f"rug watch: watching {rug_watch.get('watching', '?')} | "
+                f"auto-sell {'ARMED' if rug_watch.get('auto_sell') else 'off'}")
         db = snap.get("db") or {}
         lines.append(
             f"db: {db.get('tokens', '?')} tokens, {db.get('alerts', '?')} alerts, "
@@ -1124,6 +1134,35 @@ class TelegramCommandListener(BaseCollector):
             while len(self._bundle_cache) > _CHECK_CACHE_MAX_ENTRIES:
                 self._bundle_cache.popitem(last=False)
         return text
+
+    async def _cmd_rugwatch(self, args: list[str]) -> str:
+        """Kill switch for the auto-sell guard, reachable from the phone.
+
+        The guard is the only thing in the system that spends money without a
+        tap, so disarming it must not require SSH. Disarm is one-way at
+        runtime: re-arming means editing .env and restarting, which is a
+        deliberate speed bump on pointing a loaded gun at the wallet again.
+        """
+        guard = self._ctx.holdings_guard
+        if guard is None:
+            return ("Rug watch is not running.\n"
+                    "Enable it with MEMEINTEL_RUG_WATCH_ENABLED=true in .env "
+                    "(and MEMEINTEL_RUG_WATCH_AUTO_SELL=true to let it sell).")
+        want = (args[0].lower() if args else "")
+        if want in ("off", "disarm", "stop"):
+            guard.disarm("operator sent /rugwatch off")
+            return ("Auto-sell DISARMED. The guard keeps watching and will still "
+                    "warn you, but it will not sell.\n"
+                    "To re-arm: set MEMEINTEL_RUG_WATCH_AUTO_SELL=true in .env and "
+                    "restart the service.")
+        status = guard.status()
+        lines = ["RUG WATCH",
+                 f"watching: {status['watching']} position(s)",
+                 f"auto-sell: {'ARMED' if status['auto_sell'] else 'off'}",
+                 f"exited this run: {status['exited']}"]
+        if status["auto_sell"]:
+            lines.append("Send /rugwatch off to disarm.")
+        return "\n".join(lines)
 
     async def _cmd_mute(self, args: list[str]) -> str:
         address, error = self._validated_address(args, "/mute <address>")

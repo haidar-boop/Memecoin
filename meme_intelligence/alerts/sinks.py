@@ -50,6 +50,11 @@ ALERT_CHANNELS = {
     "token_death": "security",
     "insider_risk": "security",
     "community_fake": "security",
+    # Live rug guard on held positions (2026-07-31 port): the system's only
+    # auto-sell alerts — must never fall through to the low-attention
+    # "reports" channel.
+    "rug_watch_warning": "security",
+    "rug_watch_exit": "security",
     "momentum": "momentum",
     "score_drop_review": "reports",
     "boost": "boosts",

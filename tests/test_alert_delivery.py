@@ -543,3 +543,43 @@ async def test_telegram_alert_shows_trade_buttons_with_percents(monkeypatch):
     await sink.send(make_event())
     data = str(calls[0]["reply_markup"])
     assert "buy:" in data and "dump:" in data
+
+
+# ---- Rug-guard alert routing + cooldown distinctness (2026-07-31 port) ----
+
+
+def test_rug_watch_alerts_route_to_the_security_channel():
+    """The system's only auto-sell alerts must never fall through to the
+    low-attention "reports" channel."""
+    warn = make_event(priority=AlertPriority.HIGH, alert_type="rug_watch_warning")
+    exit_ = make_event(priority=AlertPriority.CRITICAL, alert_type="rug_watch_exit")
+    assert channel_for(warn) == "security"
+    assert channel_for(exit_) == "security"
+
+
+async def test_a_warn_can_never_cool_down_the_exit():
+    """The cooldown key includes alert_type AND priority, so an escalating
+    rug (WARN then EXIT on the same coin, seconds apart) delivers BOTH —
+    pinned here because the guard's whole point dies if the exit alert is
+    suppressed by its own warning."""
+    sink = RecordingSink()
+    engine = NotificationEngine([sink], AlertEngineSettings(cooldown_seconds=900.0),
+                                time_func=lambda: 1000.0)
+    warn = make_event(priority=AlertPriority.HIGH, alert_type="rug_watch_warning")
+    exit_ = make_event(priority=AlertPriority.CRITICAL, alert_type="rug_watch_exit")
+    await engine.dispatch([warn])
+    await engine.dispatch([exit_])
+    assert [e.alert_type for e in sink.events] == ["rug_watch_warning", "rug_watch_exit"]
+
+
+async def test_a_repeat_exit_inside_the_window_is_cooled_down():
+    """The other half of the contract: the SAME stage re-firing within the
+    cooldown stays suppressed, so a drain that keeps draining does not spam
+    a CRITICAL every poll."""
+    sink = RecordingSink()
+    engine = NotificationEngine([sink], AlertEngineSettings(cooldown_seconds=900.0),
+                                time_func=lambda: 1000.0)
+    exit_ = make_event(priority=AlertPriority.CRITICAL, alert_type="rug_watch_exit")
+    await engine.dispatch([exit_])
+    await engine.dispatch([exit_])
+    assert [e.alert_type for e in sink.events] == ["rug_watch_exit"]

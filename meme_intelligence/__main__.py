@@ -50,6 +50,7 @@ from meme_intelligence.database.storage import Storage
 from meme_intelligence.trading.trade_planner import TradePlan, TradePlanner
 from meme_intelligence.workflow.boost_watcher import BoostWatcher
 from meme_intelligence.workflow.controller import ContinuousScanner
+from meme_intelligence.workflow.holdings_guard import HoldingsGuard
 from meme_intelligence.workflow.daily_routine import DailyRoutine
 from meme_intelligence.workflow.pipeline import PipelineResult, ResearchPipeline
 from meme_intelligence.workflow.watchlist_review import review_entries
@@ -1175,11 +1176,22 @@ async def _cmd_monitor(args, settings) -> int:
             onchain_security = build_onchain_security(settings)
             if onchain_security is not None:
                 stack.push_async_callback(onchain_security.close)
+            market_service = build_market_service(settings, dex, gecko)
+            # Built once and shared: the Telegram listener needs it for
+            # /buy//dump, and the holdings rug guard needs it to auto-exit a
+            # draining position. Without a trading key this is the DryRun
+            # executor, so building it unconditionally costs nothing.
+            executor, exec_rpc = build_executor(
+                settings, storage, jupiter_client,
+                helius_rate_limiter=helius_rate_limiter)
+            if exec_rpc is not None:
+                stack.push_async_callback(exec_rpc.close)
+            holdings_guard = None
             scanner = ContinuousScanner(
                 settings, storage, notifier,
                 gecko_client=gecko, goplus_client=goplus,
                 jupiter_client=jupiter_client,
-                market_service=build_market_service(settings, dex, gecko),
+                market_service=market_service,
                 community_client=coingecko,
                 pumpportal_client=pumpportal,
                 pumpfun_client=pumpfun,
@@ -1190,17 +1202,28 @@ async def _cmd_monitor(args, settings) -> int:
                 learning_service=learning_service,
                 regime=MarketRegime(args.regime),
             )
+            # Live rug guard (operator request 2026-07-29, after losing a
+            # position to a rug; ported 2026-07-31): fast poll over open
+            # positions that can EXIT by itself. Off unless armed twice —
+            # see RugWatchSettings.
+            if settings.rug_watch.enabled:
+                holdings_guard = HoldingsGuard(
+                    settings, storage, notifier, market_service,
+                    executor=executor, jupiter_client=jupiter_client)
+                await holdings_guard.start()
+                stack.push_async_callback(holdings_guard.stop)
+                scanner.set_holdings_guard(holdings_guard)
+                if settings.rug_watch.auto_sell:
+                    print("WARNING: the rug guard is ARMED — it will SELL a held "
+                          "position by itself when liquidity collapse is confirmed. "
+                          "Send /rugwatch off on Telegram to disarm without SSH.")
+
             # Two-way Telegram control (Project 2): opt-in via
             # MEMEINTEL_TELEGRAM_COMMANDS_ENABLED; needs the same bot
             # secrets the alert sink uses. Built AFTER the scanner because
             # its command context wraps the scanner's public methods.
             if settings.telegram_commands.enabled:
                 if settings.telegram_bot_token and settings.telegram_chat_id:
-                    executor, exec_rpc = build_executor(
-                        settings, storage, jupiter_client,
-                        helius_rate_limiter=helius_rate_limiter)
-                    if exec_rpc is not None:
-                        stack.push_async_callback(exec_rpc.close)
                     bundle_service = build_bundle_service(
                         settings, helius_rate_limiter=helius_rate_limiter)
                     if bundle_service is not None:
@@ -1214,6 +1237,7 @@ async def _cmd_monitor(args, settings) -> int:
                         executor=executor,
                         boost_lookup=dex.get_token_boost,
                         bundle_service=bundle_service,
+                        holdings_guard=holdings_guard,
                     )
                     listener = TelegramCommandListener(
                         settings.telegram_bot_token, settings.telegram_chat_id,
