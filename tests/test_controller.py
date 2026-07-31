@@ -64,11 +64,13 @@ class FakeGecko:
         self.calls = 0
         self.fail_on_call = fail_on_call
 
-    async def get_new_pools(self, network):
+    async def get_new_pools(self, network, page=1):
         self.calls += 1
         if self.fail_on_call is not None and self.calls == self.fail_on_call:
             raise TransientCollectorError("provider hiccup")
-        return self.pools
+        # One page of pools; deeper pages are empty, matching the real feed
+        # once it runs out (and keeping per-cycle counts stable in tests).
+        return self.pools if page == 1 else []
 
 
 class FakeGoPlus:

@@ -47,8 +47,8 @@ class FakeGecko:
     def __init__(self, pools):
         self.pools = pools
 
-    async def get_new_pools(self, network):
-        return self.pools
+    async def get_new_pools(self, network, page=1):
+        return self.pools if page == 1 else []
 
 
 class FakeGoPlus:

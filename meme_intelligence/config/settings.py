@@ -818,7 +818,19 @@ class WorkflowSettings:
     """Daily research routine configuration (Part 11)."""
 
     networks: str = "solana"          # comma-separated network ids to scan
-    top_candidates: int = 5           # discovery candidates to deep-analyze per run
+    # Raised 5 -> 8 with the wider discovery net (operator 2026-07-31 "do 1"
+    # after "Never analyzed" on a coin that went big): 60 pools competing for
+    # 5 slots would sharpen selection without widening coverage, and coverage
+    # was the complaint. Worst case is 3 extra full analyses per cycle.
+    top_candidates: int = 8           # discovery candidates to deep-analyze per run
+    # Pages of the newest-pools feed fetched per network per cycle. One page
+    # (~20 pools) was a keyhole: on busy launch hours pools scrolled past it
+    # between 45s cycles and were never seen at all — the operator's
+    # "Never analyzed" coins. 3 pages ≈ 60 newest pools for +2 provider
+    # calls per cycle (Rule 11 — bounded, well inside the free tier's rate
+    # limit). Discovery filters/ranking are unchanged: this widens what is
+    # SEEN, not what qualifies.
+    discovery_pages: int = 3
     watchlist_review_limit: int = 10  # existing entries re-checked per run
     risk_on_btc_change_percent: float = 2.0   # BTC 24h gain above this = risk-on
     risk_off_btc_drop_percent: float = 3.0    # BTC 24h drop beyond this = risk-off
@@ -842,7 +854,8 @@ class WorkflowSettings:
     def __post_init__(self) -> None:
         if not self.networks.strip():
             raise ConfigurationError("workflow networks must be non-empty")
-        for name in ("top_candidates", "watchlist_review_limit",
+        for name in ("top_candidates", "discovery_pages",
+                     "watchlist_review_limit",
                      "risk_on_btc_change_percent", "risk_off_btc_drop_percent",
                      "monitor_interval_seconds", "watchlist_recheck_cycles",
                      "max_tracked_keys", "insufficient_data_retry_minutes",

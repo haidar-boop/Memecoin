@@ -508,6 +508,7 @@ class ContinuousScanner:
         try:
             candidates, rejected = await scan_new_pools(
                 self._gecko, self._discovery, self._settings.workflow.network_list,
+                pages=self._settings.workflow.discovery_pages,
             )
         except CollectorError as exc:
             self._logger.warning("pool discovery unavailable this cycle: %s", exc)

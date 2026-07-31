@@ -2137,3 +2137,29 @@ rug engine or scoring thinks (operator's no-touch zone). Four new tests
 same result; one-figure-is-enough; blind honeypot still warns; default +
 env load). Suite: no new failures (remaining sandbox failures are the known
 missing optional deps: faiss/anthropic/solders).
+
+## 2026-07-31 — Wider discovery net: 3 pages + top 8 (operator "do 1")
+
+Operator hit "Never analyzed" on a coin that went big and asked for the bot
+to "look at every single coin that is released." Full coverage is not
+feasible on this infrastructure (20-40k Solana launches/day x 5-8 API calls
+each would exhaust every provider tier analyzing mostly corpses — Rule 11),
+and the operator was told so plainly; he chose option 1, widen the net.
+
+Changes: `scan_new_pools` gained a `pages` kwarg (default 1 — Rule 18, the
+daily routine and CLI paths are unchanged); the continuous scanner passes
+`workflow.discovery_pages` (new setting, default 3 ≈ 60 newest pools per
+45s cycle instead of 20, +2 GeckoTerminal calls/cycle, well inside the
+free tier). `workflow.top_candidates` raised 5 -> 8 so the wider view can
+also be analyzed, not just ranked (worst case +3 full analyses/cycle).
+Failure contract (Rule 9): a page failing after the first keeps what was
+fetched; only a nothing-was-seen first-page failure propagates into the
+existing outage path; an empty page stops pagination (feed exhausted).
+
+Also diagnosed for the operator: "/why <address>" is a HISTORY lookup — its
+"Never analyzed" means the coin never crossed the bot's field of view;
+"/check <address>" analyzes any coin on demand. The pump.fun stream already
+sees every pump.fun launch (watching is free); this change widens the
+GeckoTerminal pool keyhole, which is where non-pump.fun coins were slipping
+through. 6 new discovery tests + 1 settings test; 3 test fakes gained the
+`page` kwarg. Suite: no new failures (same known missing-dep set).

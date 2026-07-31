@@ -23,8 +23,11 @@ from datetime import datetime, timezone
 from typing import Callable, Iterable, Sequence
 
 from meme_intelligence.config.settings import DiscoverySettings
+from meme_intelligence.core.errors import CollectorError
 from meme_intelligence.core.logging_setup import get_logger
 from meme_intelligence.core.models import DexPair
+
+_logger = get_logger("scanners.discovery")
 
 _COMPONENT_MAX = 25.0  # four components x 25 = 100
 
@@ -184,9 +187,37 @@ async def scan_new_pools(
     client,  # GeckoTerminalClient or any provider with get_new_pools(network)
     engine: DiscoveryEngine,
     networks: Sequence[str],
+    *,
+    pages: int = 1,
 ) -> tuple[list[TokenCandidate], list[RejectedPool]]:
-    """Convenience wrapper: fetch new pools across networks and evaluate them."""
+    """Convenience wrapper: fetch new pools across networks and evaluate them.
+
+    ``pages`` widens the field of view (operator 2026-07-31, "Never analyzed"
+    on a coin that went big): one page is only the ~20 newest pools — a
+    keyhole that busy launch hours scroll straight past between scanner
+    cycles, so coins were routinely never seen at all. Each extra page costs
+    one extra provider call per network per cycle (Rule 11 — bounded, small).
+
+    Failure contract (Rule 9): a page failing AFTER the first keeps whatever
+    was already fetched — a partial view beats losing the cycle. Only a
+    first-page failure for the FIRST network propagates (nothing was seen at
+    all, which is the caller's existing outage path); later networks reuse
+    the same keep-what-we-have rule so one network's outage cannot blind the
+    others.
+    """
     pools: list[DexPair] = []
     for network in networks:
-        pools.extend(await client.get_new_pools(network))
+        for page in range(1, max(1, pages) + 1):
+            try:
+                batch = await client.get_new_pools(network, page=page)
+            except CollectorError:
+                if page == 1 and not pools:
+                    raise
+                _logger.warning(
+                    "new-pools page %d unavailable for %s; continuing with "
+                    "%d pools already fetched", page, network, len(pools))
+                break
+            if not batch:
+                break  # feed exhausted: deeper pages are empty too
+            pools.extend(batch)
     return engine.evaluate(pools)
